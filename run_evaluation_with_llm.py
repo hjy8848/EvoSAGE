@@ -43,6 +43,7 @@ python run_evaluation_with_llm.py \
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -696,6 +697,8 @@ class LLMEvaluationPipeline:
         
         file_paths = {}
         timestamp = datetime.now().strftime("%Y%m%d")
+        # 模型ID通常包含 provider/model 这样的斜杠，不能直接用于文件名。
+        safe_model_name = re.sub(r"[^A-Za-z0-9._-]+", "_", self.model_name).strip("._-") or "model"
         
         # 调试信息
         if self.verbose:
@@ -704,7 +707,7 @@ class LLMEvaluationPipeline:
                 print(f"  [{i}] simulation_id={sim_result.simulation_id}, turns={len(sim_result.turns)}")
         
         # 保存对话数据
-        dialogues_file = self.output_dir / f"{self.model_name}_{timestamp}_dialogues.jsonl"
+        dialogues_file = self.output_dir / f"{safe_model_name}_{timestamp}_dialogues.jsonl"
         dialogue_count = 0
         with open(dialogues_file, 'w', encoding='utf-8') as f:
             for sim_result in self.simulation_results:
@@ -729,7 +732,7 @@ class LLMEvaluationPipeline:
         file_paths["dialogues"] = dialogues_file
         
         # 保存完整结果
-        results_file = self.output_dir / f"{self.model_name}_{timestamp}_results.json"
+        results_file = self.output_dir / f"{safe_model_name}_{timestamp}_results.json"
         with open(results_file, 'w', encoding='utf-8') as f:
             all_results = {
                 "metadata": {
@@ -747,7 +750,7 @@ class LLMEvaluationPipeline:
         file_paths["results"] = results_file
         
         # 保存汇总报告
-        summary_file = self.output_dir / f"{self.model_name}_{timestamp}_summary.json"
+        summary_file = self.output_dir / f"{safe_model_name}_{timestamp}_summary.json"
         with open(summary_file, 'w', encoding='utf-8') as f:
             summary = self._generate_summary()
             json.dump(summary, f, ensure_ascii=False, indent=2)
