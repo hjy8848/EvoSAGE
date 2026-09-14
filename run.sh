@@ -881,7 +881,9 @@ run_eval_server() {
         done
     fi
     
-    local run_log="$LOG_DIR/${model}-${log_timestamp}-run.log"
+    local safe_model="${model//\//_}"
+    mkdir -p "$LOG_DIR"
+    local run_log="$LOG_DIR/${safe_model}-${log_timestamp}-run.log"
     
     if [ -n "$scenarios_list" ]; then
         IFS=',' read -ra scenarios <<< "$scenarios_list"
@@ -1065,7 +1067,9 @@ run_eval_api() {
                 ;;
         esac
     done
-    local run_log="$LOG_DIR/${model}-${log_timestamp}-run.log"
+    local safe_model="${model//\//_}"
+    mkdir -p "$LOG_DIR"
+    local run_log="$LOG_DIR/${safe_model}-${log_timestamp}-run.log"
     # 验证必需参数
     if [ -z "$model" ]; then
         print_error "--model 是必需的" | tee -a "$run_log"
