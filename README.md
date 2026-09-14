@@ -75,11 +75,14 @@ The framework adopts a **unified GPU allocation strategy**, automatically config
 ### 0. Environment Setup
 
 ```bash
-# Install dependencies
-pip install vllm openai anthropic requests
+# Install dependencies for pure API mode (no GPU/vLLM required)
+pip install -r requirements-api.txt
 
-# Check GPU status
-nvidia-smi
+# For local vLLM mode, additionally install vLLM in a CUDA-capable environment
+# pip install vllm
+
+# Check GPU status only when using local vLLM mode
+# nvidia-smi
 ```
 
 ### 1. Cleanup GPU Memory (Optional)
@@ -113,19 +116,24 @@ bash run.sh eval-server \
     --max-turns 30
 ```
 
-#### Method 2: Using API Service
+#### Method 2: Pure API Evaluation (User + Agent + Judge)
 
 ```bash
 bash run.sh eval-api \
     --scenario online_education \
-    --model gpt-4.1 \
-    --api-key YOUR_OPENAI_KEY \
-    --agent-model-type api \
-    --agent-model-url https://api.openai.com/v1 \
-    --agent-model-name gpt-4.1 \
+    --model dashscope/qwen3.7-plus \
+    --api-url http://10.130.138.46:8010/v1 \
+    --api-key YOUR_API_KEY \
+    --user-model-name dashscope/qwen3.7-plus \
+    --agent-model-name dashscope/qwen3.7-plus \
+    --judge-model-name dashscope/qwen3.7-plus \
     --num-users 2 \
     --max-turns 10
 ```
+
+In API mode, all three roles use the same OpenAI-compatible endpoint. No local
+vLLM server or NVIDIA GPU is required. `--model` is used as the run label;
+the three actual model names are selected with `--*-model-name`.
 
 #### Method 3: Multi-Model Voting Evaluation
 
@@ -302,17 +310,19 @@ results/
 
 ### eval-api - API Evaluation
 
-**Function**: Evaluate using remote API, no GPU resources required
+**Function**: Evaluate using an OpenAI-compatible API for all three roles;
+no local GPU resources are required
 
 **Basic Usage**:
 ```bash
 bash run.sh eval-api \
     --scenario online_education \
-    --model gpt-4.1 \
-    --api-key YOUR_OPENAI_KEY \
-    --agent-model-type api \
-    --agent-model-url https://api.openai.com/v1 \
-    --agent-model-name gpt-4.1 \
+    --model dashscope/qwen3.7-plus \
+    --api-url http://10.130.138.46:8010/v1 \
+    --api-key YOUR_API_KEY \
+    --user-model-name dashscope/qwen3.7-plus \
+    --agent-model-name dashscope/qwen3.7-plus \
+    --judge-model-name dashscope/qwen3.7-plus \
     --num-users 2 \
     --max-turns 10
 ```
@@ -321,21 +331,25 @@ bash run.sh eval-api \
 ```bash
 bash run.sh eval-api \
     --scenarios-list online_education,ecommerce_refund \
-    --model gpt-4.1 \
+    --model dashscope/qwen3.7-plus \
+    --api-url http://10.130.138.46:8010/v1 \
     --api-key YOUR_KEY \
-    --agent-model-type api \
-    --agent-model-url https://api.openai.com/v1 \
-    --agent-model-name gpt-4.1
+    --user-model-name dashscope/qwen3.7-plus \
+    --agent-model-name dashscope/qwen3.7-plus \
+    --judge-model-name dashscope/qwen3.7-plus
 ```
 
 **Full Parameters**:
 - `--scenario SCENARIO`: Single scenario name
 - `--scenarios-list LIST`: Multiple scenarios, comma-separated
-- `--model MODEL`: Judge model name (required)
-- `--api-key KEY`: Judge model API key (required)
-- `--agent-model-type TYPE`: Agent model type (`api` or `vllm`)
-- `--agent-model-url URL`: Agent model API URL
-- `--agent-model-name NAME`: Agent model name
+- `--model MODEL`: Run label (required)
+- `--api-key KEY`: API key shared by User, Agent, and Judge (required)
+- `--api-url URL`: OpenAI-compatible API base URL shared by all three roles (required)
+- `--user-model-name NAME`: User simulator model name
+- `--agent-model-name NAME`: Agent model under test
+- `--judge-model-name NAME`: Judge model name
+- `--agent-model-type TYPE`: Retained for compatibility; pure API mode uses API for Agent
+- `--agent-model-url URL`: Legacy alias for `--api-url`
 - `--output DIR`: Output directory (default: ./results)
 - `--num-users NUM`: Number of users (default: 2)
 - `--max-turns NUM`: Maximum dialogue turns (default: 10)

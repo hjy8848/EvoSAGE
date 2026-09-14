@@ -75,11 +75,11 @@
 ### 0. 环境准备
 
 ```bash
-# 安装依赖
-pip install vllm openai anthropic requests
+# 安装纯API模式依赖（不需要GPU/vLLM）
+pip install -r requirements-api.txt
 
-# 检查GPU状态
-nvidia-smi
+# 只有使用本地vLLM模式时才需要检查GPU
+# nvidia-smi
 ```
 
 ### 1. 清理GPU显存 (可选)
@@ -113,19 +113,22 @@ bash run.sh eval-server \
     --max-turns 30
 ```
 
-#### 方式2: 使用API服务
+#### 方式2: 纯API评测（User + Agent + Judge）
 
 ```bash
 bash run.sh eval-api \
     --scenario online_education \
-    --model gpt-4.1 \
-    --api-key YOUR_OPENAI_KEY \
-    --agent-model-type api \
-    --agent-model-url https://api.openai.com/v1 \
-    --agent-model-name gpt-4.1 \
+    --model dashscope/qwen3.7-plus \
+    --api-url http://10.130.138.46:8010/v1 \
+    --api-key YOUR_API_KEY \
+    --user-model-name dashscope/qwen3.7-plus \
+    --agent-model-name dashscope/qwen3.7-plus \
+    --judge-model-name dashscope/qwen3.7-plus \
     --num-users 2 \
     --max-turns 10
 ```
+
+纯API模式下三个角色均通过同一个OpenAI兼容接口调用，不需要本地vLLM或NVIDIA GPU。
 
 #### 方式3: 多模型投票评测
 
@@ -308,11 +311,12 @@ results/
 ```bash
 bash run.sh eval-api \
     --scenario online_education \
-    --model gpt-4.1 \
-    --api-key YOUR_OPENAI_KEY \
-    --agent-model-type api \
-    --agent-model-url https://api.openai.com/v1 \
-    --agent-model-name gpt-4.1 \
+    --model dashscope/qwen3.7-plus \
+    --api-url http://10.130.138.46:8010/v1 \
+    --api-key YOUR_API_KEY \
+    --user-model-name dashscope/qwen3.7-plus \
+    --agent-model-name dashscope/qwen3.7-plus \
+    --judge-model-name dashscope/qwen3.7-plus \
     --num-users 2 \
     --max-turns 10
 ```
@@ -321,21 +325,25 @@ bash run.sh eval-api \
 ```bash
 bash run.sh eval-api \
     --scenarios-list online_education,ecommerce_refund \
-    --model gpt-4.1 \
+    --model dashscope/qwen3.7-plus \
+    --api-url http://10.130.138.46:8010/v1 \
     --api-key YOUR_KEY \
-    --agent-model-type api \
-    --agent-model-url https://api.openai.com/v1 \
-    --agent-model-name gpt-4.1
+    --user-model-name dashscope/qwen3.7-plus \
+    --agent-model-name dashscope/qwen3.7-plus \
+    --judge-model-name dashscope/qwen3.7-plus
 ```
 
 **完整参数**:
 - `--scenario SCENARIO`: 单个场景名称
 - `--scenarios-list LIST`: 多个场景,逗号分隔
-- `--model MODEL`: Judge模型名称 (必需)
-- `--api-key KEY`: Judge模型API密钥 (必需)
-- `--agent-model-type TYPE`: 客服模型类型 (`api`或`vllm`)
-- `--agent-model-url URL`: 客服模型API地址
-- `--agent-model-name NAME`: 客服模型名称
+- `--model MODEL`: 运行标签 (必需)
+- `--api-key KEY`: User、Agent、Judge共用的API密钥 (必需)
+- `--api-url URL`: 三个角色共用的OpenAI兼容API地址 (必需)
+- `--user-model-name NAME`: User模拟器模型名称
+- `--agent-model-name NAME`: 被测Agent模型名称
+- `--judge-model-name NAME`: Judge模型名称
+- `--agent-model-type TYPE`: 为兼容旧参数保留；纯API模式自动使用API
+- `--agent-model-url URL`: `--api-url`的旧版别名
 - `--output DIR`: 输出目录 (默认: ./results)
 - `--num-users NUM`: 用户数量 (默认: 2)
 - `--max-turns NUM`: 最大对话轮次 (默认: 10)

@@ -5,9 +5,8 @@
 Complete Evaluation Script with LLM Support
 
 设计说明：
-- User 模型：必须本地 vLLM (http://localhost:8000)
-- Judge 模型：必须本地 vLLM (http://localhost:8002)
-- Agent 模型：可以是本地 vLLM 或 OpenAI 兼容 API
+- `--eval-mode api`：User、Agent、Judge 全部使用 OpenAI 兼容 API
+- `--eval-mode vllm`：使用本地 vLLM（保留原有模式）
 
 使用方法：
 
@@ -20,14 +19,16 @@ python run_evaluation_with_llm.py \
     --output ./results \
     --verbose
 
-# 方案2：Agent使用API（推荐准确度）
+# 方案2：三个角色全部使用OpenAI兼容API
 python run_evaluation_with_llm.py \
     --scenario online_education \
-    --model my_model \
+    --model dashscope/qwen3.7-plus \
     --eval-mode api \
-    --agent-model-type api \
-    --agent-model-name gpt-4 \
-    --api-key sk-xxx \
+    --api-url http://10.130.138.46:8010/v1 \
+    --api-key YOUR_API_KEY \
+    --user-model-name dashscope/qwen3.7-plus \
+    --agent-model-name dashscope/qwen3.7-plus \
+    --judge-model-name dashscope/qwen3.7-plus \
     --output ./results \
     --verbose
 
@@ -224,8 +225,11 @@ class LLMEvaluationPipeline:
         agent_model_url: str = "http://localhost:8001",
         judge_model_url: str = "http://localhost:8002",
         api_key: Optional[str] = None,
-        agent_model_type: str = "vllm",  # "vllm" 或 "api" (agent可以是本地或API，user和judge必须本地)
-        agent_model_name: str = "gpt-3.5-turbo",  # API模式下的模型名
+        api_url: str = "https://api.openai.com/v1",
+        user_model_name: str = "gpt-3.5-turbo",
+        agent_model_type: str = "vllm",  # "vllm" 或 "api"
+        agent_model_name: str = "gpt-3.5-turbo",
+        judge_model_name: str = "gpt-3.5-turbo",
         max_turns: int = 10,
         verbose: bool = True,
     ):
@@ -233,21 +237,23 @@ class LLMEvaluationPipeline:
         初始化LLM评测管道
         
         设计说明：
-        - User模型：必须本地vLLM (http://localhost:8000)
-        - Judge模型：必须本地vLLM (http://localhost:8002)
-        - Agent模型：可以是本地vLLM或API模型
+        - eval_mode="api"：User、Agent、Judge 全部使用同一个 OpenAI 兼容 API
+        - eval_mode="vllm"：使用本地 vLLM，保留原有行为
         
         Args:
             scenario_id: 场景ID
             model_name: 模型名称
             output_dir: 输出目录
             eval_mode: 评测模式 (vllm本地/api API模式)
-            user_model_url: 用户模型URL (固定本地vLLM)
+            user_model_url: 用户模型URL (vLLM模式使用)
             agent_model_url: 客服模型URL (本地vLLM时使用)
-            judge_model_url: 评判模型URL (固定本地vLLM)
-            api_key: API密钥 (agent为API模式时需要)
+            judge_model_url: 评判模型URL (vLLM模式使用)
+            api_key: API密钥 (API模式需要)
+            api_url: OpenAI兼容API基础URL (API模式需要)
+            user_model_name: User模型名称 (API模式使用)
             agent_model_type: agent模型类型 (vllm本地/api API)
-            agent_model_name: agent为API时的模型名称
+            agent_model_name: Agent模型名称
+            judge_model_name: Judge模型名称 (API模式使用)
             max_turns: 最大对话轮次
             verbose: 是否打印详细日志
         """
@@ -272,8 +278,11 @@ class LLMEvaluationPipeline:
             agent_model_url,
             judge_model_url,
             api_key,
+            api_url,
+            user_model_name,
             agent_model_type,
             agent_model_name,
+            judge_model_name,
         )
         
         # 结果容器
@@ -292,25 +301,58 @@ class LLMEvaluationPipeline:
         agent_model_url: str,
         judge_model_url: str,
         api_key: Optional[str],
+        api_url: str,
+        user_model_name: str,
         agent_model_type: str = "vllm",
         agent_model_name: str = "gpt-3.5-turbo",
+        judge_model_name: str = "gpt-3.5-turbo",
     ):
         """初始化LLM客户端
         
         设计说明：
-        - User模型：必须本地vLLM
-        - Judge模型：必须本地vLLM
-        - Agent模型：可以是本地vLLM或API
+        - eval_mode="api"：User、Agent、Judge 全部使用 OpenAI 兼容 API
+        - eval_mode="vllm"：User、Agent、Judge 使用本地 vLLM，或按原逻辑让 Agent 使用 API
         
         Args:
             eval_mode: 评测模式 (vllm/api)
-            user_model_url: 用户模型URL (本地vLLM)
+            user_model_url: 用户模型URL (vLLM模式)
             agent_model_url: 客服模型URL (eval_mode=vllm时使用)
-            judge_model_url: 评判模型URL (本地vLLM)
-            api_key: API密钥 (agent_model_type=api时需要)
+            judge_model_url: 评判模型URL (vLLM模式)
+            api_key: API密钥 (API模式需要)
+            api_url: OpenAI兼容API基础URL (API模式需要)
+            user_model_name: User模型名称 (API模式)
             agent_model_type: agent模型类型 (vllm/api)
-            agent_model_name: agent为API时的模型名称
+            agent_model_name: Agent模型名称
+            judge_model_name: Judge模型名称 (API模式)
         """
+
+        # 纯 API 模式：三个角色均通过同一个 OpenAI 兼容接口调用。
+        # 这样可以在没有本地 GPU/vLLM 的机器上运行 SAGE-Bench。
+        if eval_mode == "api":
+            if not api_key:
+                raise ValueError("API模式需要提供 --api-key")
+            if not api_url:
+                raise ValueError("API模式需要提供 --api-url")
+
+            self.user_llm_client = get_llm_client(
+                "openai_api",
+                base_url=api_url,
+                api_key=api_key,
+                model_name=user_model_name,
+            )
+            self.agent_llm_client = get_llm_client(
+                "openai_api",
+                base_url=api_url,
+                api_key=api_key,
+                model_name=agent_model_name,
+            )
+            self.judge_llm_client = get_llm_client(
+                "openai_api",
+                base_url=api_url,
+                api_key=api_key,
+                model_name=judge_model_name,
+            )
+            return
         
         # eval_mode指定的是整体倾向，但实际以agent_model_type为准
         # eval_mode="vllm" 表示倾向本地，agent_model_type可覆盖
@@ -1515,7 +1557,7 @@ def main():
     parser.add_argument(
         "--user-model-url",
         default="http://localhost:8000",
-        help="用户模型服务URL (固定本地vLLM)",
+        help="用户模型服务URL (vLLM模式使用)",
     )
     parser.add_argument(
         "--agent-model-url",
@@ -1531,22 +1573,37 @@ def main():
     parser.add_argument(
         "--judge-model-url",
         default="http://localhost:8002",
-        help="评判模型服务URL (固定本地vLLM)",
+        help="评判模型服务URL (vLLM模式使用)",
+    )
+    parser.add_argument(
+        "--api-url",
+        default="https://api.openai.com/v1",
+        help="OpenAI兼容API基础URL (API模式下User/Agent/Judge共用)",
     )
     parser.add_argument(
         "--api-key",
-        help="API密钥 (agent为api模式时需要)",
+        help="API密钥 (API模式需要)",
+    )
+    parser.add_argument(
+        "--user-model-name",
+        default="gpt-3.5-turbo",
+        help="User模型名称 (API模式使用)",
     )
     parser.add_argument(
         "--agent-model-type",
         default="vllm",
         choices=["vllm", "api"],
-        help="agent模型类型 (vllm本地/api API) - user和judge必须本地",
+        help="agent模型类型 (纯API模式下自动使用API)",
     )
     parser.add_argument(
         "--agent-model-name",
         default="gpt-3.5-turbo",
-        help="agent为API模式时的模型名称 (default: gpt-3.5-turbo)",
+        help="Agent模型名称 (default: gpt-3.5-turbo)",
+    )
+    parser.add_argument(
+        "--judge-model-name",
+        default="gpt-3.5-turbo",
+        help="Judge模型名称 (API模式使用)",
     )
     parser.add_argument(
         "--intents",
@@ -1675,8 +1732,11 @@ def main():
         agent_model_url=args.agent_model_url,
         judge_model_url=args.judge_model_url,
         api_key=args.api_key,
+        api_url=args.api_url,
+        user_model_name=args.user_model_name,
         agent_model_type=args.agent_model_type,
         agent_model_name=args.agent_model_name,
+        judge_model_name=args.judge_model_name,
         max_turns=args.max_turns,
         verbose=args.verbose,
     )

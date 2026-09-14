@@ -297,8 +297,12 @@ show_help() {
   eval-api           使用 API 进行评测
     选项:
       --scenario SCENARIO        场景名称 (必需)
-      --model MODEL              Judge模型名称 (必需)
+      --model MODEL              运行标签 (必需)
       --api-key KEY              API密钥 (必需)
+      --api-url URL              OpenAI兼容API地址 (User/Agent/Judge共用)
+      --user-model-name NAME     User模型名称
+      --agent-model-name NAME    Agent模型名称
+      --judge-model-name NAME    Judge模型名称
   
   eval-voting        使用多模型投票进行评测（Judge同时调用三个API模型）
     选项:
@@ -307,7 +311,7 @@ show_help() {
       --api-keys KEYS            对应模型的API密钥列表,逗号分隔 (必需)
       --api-urls URLS            对应模型的API地址列表,逗号分隔 (必需)
       --agent-model-type TYPE    客服模型类型 (api或vllm)
-      --agent-model-url URL      客服模型URL
+      --agent-model-url URL      客服模型URL (兼容旧参数；纯API模式请使用--api-url)
       --agent-model-name NAME    客服模型名称
       --output DIR               输出目录 (默认: ./results)
       --num-users NUM            用户数 (默认: 2)
@@ -966,9 +970,12 @@ run_eval_api() {
     local scenario=""
     local model=""
     local api_key=""
+    local api_url=""
+    local user_model_name="gpt-3.5-turbo"
     local agent_model_type="api"
     local agent_model_url=""
-    local agent_model_name=""
+    local agent_model_name="gpt-3.5-turbo"
+    local judge_model_name="gpt-3.5-turbo"
     local output_dir="./results"
     local num_users=2
     local max_turns=10
@@ -996,6 +1003,14 @@ run_eval_api() {
                 api_key="$2"
                 shift 2
                 ;;
+            --api-url)
+                api_url="$2"
+                shift 2
+                ;;
+            --user-model-name)
+                user_model_name="$2"
+                shift 2
+                ;;
             --agent-model-type)
                 agent_model_type="$2"
                 shift 2
@@ -1006,6 +1021,10 @@ run_eval_api() {
                 ;;
             --agent-model-name)
                 agent_model_name="$2"
+                shift 2
+                ;;
+            --judge-model-name)
+                judge_model_name="$2"
                 shift 2
                 ;;
             --output)
@@ -1056,6 +1075,15 @@ run_eval_api() {
         print_error "--api-key 是必需的" | tee -a "$run_log"
         exit 1
     fi
+    # 纯 API 模式下三个角色共用同一个 OpenAI 兼容接口。
+    # 为兼容旧命令，如果未传 --api-url，则回退到 --agent-model-url。
+    if [ -z "$api_url" ] && [ -n "$agent_model_url" ]; then
+        api_url="$agent_model_url"
+    fi
+    if [ -z "$api_url" ]; then
+        print_error "纯API模式需要 --api-url" | tee -a "$run_log"
+        exit 1
+    fi
     
     # 如果提供了scenarios-list，使用列表；否则使用单个scenario
     if [ -n "$scenarios_list" ]; then
@@ -1074,8 +1102,10 @@ run_eval_api() {
         current_scenario=$((current_scenario + 1))
         
         print_header "[$current_scenario/$total_scenarios] 评测场景 (API): $scenario" | tee -a "$run_log"
-        print_info "Judge模型: $model" | tee -a "$run_log"
-        print_info "客服模型: $agent_model_name (类型: $agent_model_type)" | tee -a "$run_log"
+        print_info "User模型: $user_model_name" | tee -a "$run_log"
+        print_info "Agent模型: $agent_model_name" | tee -a "$run_log"
+        print_info "Judge模型: $judge_model_name" | tee -a "$run_log"
+        print_info "API地址: $api_url" | tee -a "$run_log"
         print_info "用户数: $num_users | 最大轮次: $max_turns" | tee -a "$run_log"
         
         scenario_output="$output_dir/$scenario"
@@ -1087,9 +1117,11 @@ run_eval_api() {
             --model "$model" \
             --eval-mode api \
             --api-key "$api_key" \
+            --api-url "$api_url" \
+            --user-model-name "$user_model_name" \
             --agent-model-type "$agent_model_type" \
-            --agent-model-url "$agent_model_url" \
             --agent-model-name "$agent_model_name" \
+            --judge-model-name "$judge_model_name" \
             --output "$scenario_output" \
             --num-users "$num_users" \
             --max-turns "$max_turns" \
