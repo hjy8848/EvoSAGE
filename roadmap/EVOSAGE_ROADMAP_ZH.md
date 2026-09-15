@@ -234,7 +234,7 @@ Evaluator 计算 legacy/environment 双轨结果
 
 Agent 只看到 `system_prompt`、对话历史、`initial_observation` 和公开工具结果；完整 `backend_record`、`expected_outcome`、GT path/action 和评测 metadata 只保留给 Simulator/Evaluator。`predicted_path`/`predicted_action` 来自 Agent 输出，`executed_path`/`executed_action` 由 Backend event log 重建。真实目标完成只由 `expected_outcome` 与 Backend 最终状态判断，关键词结果仅保留在 legacy `goal_fulfillment` 中。
 
-本轮新增的 Ecommerce E2E 覆盖：隐藏状态防泄漏、不同 Backend 的初始输入一致、用户错误陈述、查询结果误判、假装退款成功、真实退款成功、拒绝模型自报 executed_path、同一 Backend 的完整 trace，以及 runner 主入口接线。当前本地 `unittest discover -s tests` 结果为 15/15 通过。
+本轮新增的 Ecommerce E2E 覆盖：隐藏状态防泄漏、不同 Backend 的初始输入一致、用户错误陈述、查询结果误判、假装退款成功、真实退款成功、拒绝模型自报 executed_path、同一 Backend 的完整 trace，以及 runner 主入口接线（`Signed/Low → query_order → transfer_human`）。当前本地 `unittest discover -s tests` 结果为 15/15 通过。
 
 ## 3. 我们真正要进化什么
 

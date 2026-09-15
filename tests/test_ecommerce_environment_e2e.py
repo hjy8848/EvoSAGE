@@ -93,17 +93,17 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
     def test_runner_main_entry_wires_case_backend_and_legacy_gt(self):
         path_config = {
             "Classification_items": ["ReturnOrRefund", True, "User", "Reasonable", "Calm"],
-            "system_variables": {"ShippingStatus": "Unshipped", "CreditLevel": "High"},
+            "system_variables": {"ShippingStatus": "Signed", "CreditLevel": "Low"},
             "expected_path": ["step1", "step2", "step3"],
-            "final_output": {"Action": "Refund"},
+            "final_output": {"Action": "TransHuman"},
         }
         captured = {}
         case_id = _stable_id("CASE", "ecommerce_refund:refund_before_shipping:runner-test")
         order_id = _stable_id("ORD", case_id)
         client = ScriptedClient([
             response_with_tools(ToolCall("q", "query_order", {"order_id": order_id})),
-            response_with_tools(ToolCall("a", "submit_refund", {"order_id": order_id})),
-            response_with_json("Refund", path_config["expected_path"], "退款已提交。"),
+            response_with_tools(ToolCall("a", "transfer_human", {"order_id": order_id})),
+            response_with_json("TransHuman", path_config["expected_path"], "已为您转接人工客服。"),
         ])
 
         class TestPipeline(runner_module.LLMEvaluationPipeline):
@@ -160,18 +160,18 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         self.assertIs(captured["backend_environment"].case_spec, captured["case_spec"])
         self.assertNotIn("system_info", captured["run_context_data"])
         self.assertNotIn("expected_outcome", captured["run_context_data"])
-        self.assertEqual(result.case_spec["metadata"]["legacy_gt"]["finals"]["Action"], "Refund")
+        self.assertEqual(result.case_spec["metadata"]["legacy_gt"]["finals"]["Action"], "TransHuman")
         self.assertTrue(result.case_spec["metadata"]["legacy_gt"]["classification"])
         self.assertTrue(result.case_spec["metadata"]["legacy_gt"]["expected_path"])
         first_messages = json.dumps(client.requests[0]["messages"], ensure_ascii=False)
         self.assertNotIn("Signed", first_messages)
         self.assertNotIn("Low", first_messages)
         self.assertTrue(any(message.get("role") == "tool" for message in client.requests[1]["messages"]))
-        self.assertIn("Unshipped", json.dumps(client.requests[1]["messages"], ensure_ascii=False))
+        self.assertIn("Signed", json.dumps(client.requests[1]["messages"], ensure_ascii=False))
         self.assertEqual([event["name"] for event in result.backend_events], [
-            "query_order", "submit_refund", "Refund"
+            "query_order", "transfer_human", "TransHuman"
         ])
-        self.assertEqual(result.backend_final_state["order"]["refund_status"], "Approved")
+        self.assertEqual(result.backend_final_state["order"]["human_transfer_status"], "Requested")
         self.assertGreater(report.legacy_score, 0.0)
         self.assertGreater(report.environment_score, 0.0)
         self.assertEqual(report.environment_goal_fulfillment, 1.0)
