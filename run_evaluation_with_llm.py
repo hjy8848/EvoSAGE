@@ -248,6 +248,7 @@ class LLMEvaluationPipeline:
         max_turns: int = 10,
         verbose: bool = True,
         user_simulator_mode: str = "llm",
+        user_policy_mode: str = "truthful",
         legacy_execution: bool = False,
     ):
         """
@@ -281,6 +282,7 @@ class LLMEvaluationPipeline:
         self.max_turns = max_turns
         self.verbose = verbose
         self.user_simulator_mode = user_simulator_mode
+        self.user_policy_mode = user_policy_mode
         self.legacy_execution = legacy_execution
         
         # 创建输出目录
@@ -516,6 +518,7 @@ class LLMEvaluationPipeline:
             user_intent=user_intent,
             path_config=path_config or {},
             user_id=user_id,
+            user_policy_mode=self.user_policy_mode,
         )
         if path_config:
             case_spec.metadata["classification_dict"] = _path_config_to_classification(
@@ -523,7 +526,14 @@ class LLMEvaluationPipeline:
             )
             case_spec.metadata["expected_path"] = path_config.get("expected_path", [])
             case_spec.metadata["finals"] = path_config.get("final_output", {})
-        backend_environment = create_backend(case_spec)
+        # 本轮只把 ecommerce_refund 接入 authoritative backend 闭环。
+        # 其他场景继续使用原兼容路径，避免在本轮扩大迁移范围。
+        backend_environment = (
+            create_backend(case_spec)
+            if self.scenario_id == "ecommerce_refund" else None
+        )
+        if backend_environment is not None:
+            backend_environment.reset(case_spec)
 
         if self.user_simulator_mode == "rule":
             user_model = RuleUserModel(user_profile, user_system_prompt, case_spec)
@@ -576,8 +586,11 @@ class LLMEvaluationPipeline:
         # 使用LLM生成初始消息(根据用户画像动态生成,避免固定模板)
         initial_message = user_model.generate_initial_message()
         
-        # 所有场景的后台状态都只通过正式工具返回，不进入 Agent 上下文。
+        # Ecommerce 的后台状态只通过正式工具返回，不进入 Agent 上下文；
+        # 未迁移场景保留旧 system_info 兼容视图。
         context_data = {"initial_observation": case_spec.initial_observation}
+        if backend_environment is None:
+            context_data["system_info"] = system_info
         
         # 运行模拟
         if self.verbose:
@@ -1686,6 +1699,12 @@ def main():
         help="用户模拟器模式：LLM、规则状态机或改写对抗模式",
     )
     parser.add_argument(
+        "--user-policy-mode",
+        default="truthful",
+        choices=["truthful", "mistaken", "withholding", "adversarial_false_claim"],
+        help="电商用户事实策略：真实、错误认知、暂不披露或对抗性错误陈述",
+    )
+    parser.add_argument(
         "--legacy-execution",
         action="store_true",
         help="兼容旧版：允许 finals.Action 直接触发动作；默认只接受正式动作工具调用",
@@ -1825,6 +1844,7 @@ def main():
         max_turns=args.max_turns,
         verbose=args.verbose,
         user_simulator_mode=args.user_simulator_mode,
+        user_policy_mode=args.user_policy_mode,
         legacy_execution=args.legacy_execution,
     )
     

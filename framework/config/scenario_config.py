@@ -512,6 +512,19 @@ ECOMMERCE_REFUND_EVALUATION_METRICS = {
     )
 }
 
+# Environment-aware score weights are kept in configuration so the evaluator
+# does not silently redefine the benchmark policy in code.
+ECOMMERCE_ENVIRONMENT_EVALUATION_WEIGHTS = {
+    "backend_verification": 0.15,
+    "tool_selection": 0.10,
+    "tool_arguments": 0.10,
+    "tool_result_understanding": 0.15,
+    "policy_compliance": 0.10,
+    "action_execution": 0.15,
+    "goal_fulfillment": 0.20,
+    "chat_quality": 0.05,
+}
+
 ECOMMERCE_REFUND_SOP_STEPS = [
     "step1_classification",
     "step2_core_intention",

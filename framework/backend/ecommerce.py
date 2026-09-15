@@ -45,6 +45,7 @@ class EcommerceBackend(BackendEnvironment):
             "exchange_order": "提交换货申请",
             "schedule_pickup": "安排上门取件",
             "request_document": "要求补充售后凭证",
+            "transfer_human": "转接人工客服",
             "charge_fee": "要求支付换货运费",
             "comfort_customer": "记录安抚处理",
             "comfort_and_compensate": "记录安抚和赔偿处理",
@@ -60,6 +61,7 @@ class EcommerceBackend(BackendEnvironment):
             "exchange_order": "Exchange",
             "schedule_pickup": "CollectionService",
             "request_document": "Supplementary",
+            "transfer_human": "TransHuman",
             "charge_fee": "PayFee",
             "comfort_customer": "Comfort",
             "comfort_and_compensate": "Comfort+Compensation",
@@ -103,6 +105,11 @@ class EcommerceBackend(BackendEnvironment):
                     "refund_status": order.get("refund_status"),
                     "refund_eligible": order.get("refund_eligible"),
                     "return_window_open": order.get("return_window_open"),
+                    # These are authoritative policy inputs used by the SOP;
+                    # they are exposed only after a valid order lookup.
+                    "responsibility": order.get("responsibility"),
+                    "refund_reasonable": order.get("refund_reasonable"),
+                    "has_document": order.get("has_document"),
                 },
             )
 
@@ -247,7 +254,16 @@ class EcommerceBackend(BackendEnvironment):
                 data={"order_id": order.get("order_id"), "refund_status": "Rejected"},
             )
 
-        # 安抚、补偿、人工转接等动作先记录业务动作，暂不改变订单状态。
+        if action_name in {"TransHuman", "transfer_human"}:
+            order["human_transfer_status"] = "Requested"
+            order["last_action"] = "TransHuman"
+            return ActionResult(
+                success=True,
+                action_name="TransHuman",
+                data={"order_id": order.get("order_id"), "human_transfer_status": "Requested"},
+            )
+
+        # 安抚、补偿等动作先记录业务动作，暂不改变订单状态。
         order["last_action"] = action_name
         return ActionResult(
             success=True,

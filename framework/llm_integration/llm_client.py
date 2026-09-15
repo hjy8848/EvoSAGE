@@ -38,6 +38,11 @@ class LLMResponse:
         if self.tool_calls is None:
             self.tool_calls = []
 
+    @property
+    def content(self) -> str:
+        """OpenAI-compatible alias used by callers that prefer content."""
+        return self.text
+
 
 def _parse_tool_calls(message: Dict[str, Any]) -> list:
     """Normalize OpenAI-compatible tool calls."""
@@ -45,17 +50,27 @@ def _parse_tool_calls(message: Dict[str, Any]) -> list:
     for index, item in enumerate(message.get("tool_calls") or []):
         function = item.get("function", {}) if isinstance(item, dict) else {}
         arguments = function.get("arguments", {})
+        arguments_valid = True
+        argument_error = None
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
                 arguments = {}
+                arguments_valid = False
+                argument_error = str(exc)
+        if not isinstance(arguments, dict):
+            arguments_valid = False
+            argument_error = argument_error or "tool arguments must be a JSON object"
+            arguments = {}
         parsed.append(
             ToolCall(
                 call_id=(item.get("id") if isinstance(item, dict) else None)
                 or f"call_{index}",
                 name=function.get("name", ""),
-                arguments=arguments if isinstance(arguments, dict) else {},
+                arguments=arguments,
+                arguments_valid=arguments_valid,
+                argument_error=argument_error,
             )
         )
     return parsed

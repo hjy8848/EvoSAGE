@@ -334,7 +334,11 @@ class LLMUserModel(UserModel):
         knowledge = self.case_spec.user_knowledge or {}
         policy = self.case_spec.user_policy or {}
         visible = {}
-        if knowledge.get("knows_order_id") and knowledge.get("order_id"):
+        if (
+            knowledge.get("knows_order_id")
+            and knowledge.get("order_id")
+            and policy.get("show_order_id_initially", True)
+        ):
             visible["order_id"] = knowledge["order_id"]
         if knowledge.get("knows_record_id") and knowledge.get("record_id"):
             visible["record_id"] = knowledge["record_id"]

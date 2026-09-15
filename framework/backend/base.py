@@ -49,13 +49,23 @@ class BackendEnvironment:
         call_id: Optional[str] = None,
     ) -> ToolResult:
         if self.is_action_tool(tool_name):
+            before = self.get_state_snapshot()
             action_name = self.get_action_tool_map()[tool_name]
+            tool_event = BackendEvent(
+                event_type="tool_call",
+                name=tool_name,
+                arguments=copy.deepcopy(arguments or {}),
+                result={},
+                state_before=before,
+                turn_index=turn_index,
+            )
+            self.event_log.append(tool_event)
             action_result = self.execute_action(
                 action_name,
                 arguments or {},
                 turn_index=turn_index,
             )
-            return ToolResult(
+            result = ToolResult(
                 success=action_result.success,
                 tool_name=tool_name,
                 data=copy.deepcopy(action_result.data),
@@ -63,6 +73,11 @@ class BackendEnvironment:
                 error_message=action_result.error_message,
                 call_id=call_id,
             )
+            # Action tools produce two auditable events: the formal tool call
+            # and the state-changing action execution.
+            tool_event.result = result.to_dict()
+            tool_event.state_after = self.get_state_snapshot()
+            return result
         before = self.get_state_snapshot()
         try:
             result = self._execute_tool(tool_name, arguments or {})

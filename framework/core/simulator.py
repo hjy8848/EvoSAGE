@@ -31,6 +31,19 @@ class SimulationTurn:
     # Judge 评测结果（投票模式中保存三个 Judge 的原始输出）
     judge_evaluation: Optional[Dict[str, Any]] = None
 
+    # 本轮事件快照。它们由 Simulator/Backend 生成，不由 Agent 自报。
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    tool_results: List[Dict[str, Any]] = field(default_factory=list)
+    action_calls: List[Dict[str, Any]] = field(default_factory=list)
+    action_results: List[Dict[str, Any]] = field(default_factory=list)
+    backend_state_before: Dict[str, Any] = field(default_factory=dict)
+    backend_state_after: Dict[str, Any] = field(default_factory=dict)
+    predicted_classification: Dict[str, Any] = field(default_factory=dict)
+    predicted_path: List[str] = field(default_factory=list)
+    predicted_action: str = ""
+    executed_path: List[str] = field(default_factory=list)
+    executed_action: str = ""
+
 
 @dataclass
 class SimulationResult:
@@ -62,6 +75,10 @@ class SimulationResult:
     dialogue_length: int = 0
     path_taken: List[str] = field(default_factory=list)
     actions_taken: List[str] = field(default_factory=list)
+    predicted_path: List[str] = field(default_factory=list)
+    predicted_action: str = ""
+    executed_path: List[str] = field(default_factory=list)
+    executed_action: str = ""
     
     # 时间戳
     start_time: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -79,6 +96,10 @@ class SimulationResult:
             "dialogue_length": self.dialogue_length,
             "path_taken": self.path_taken,
             "actions_taken": self.actions_taken,
+            "predicted_path": self.predicted_path,
+            "predicted_action": self.predicted_action,
+            "executed_path": self.executed_path,
+            "executed_action": self.executed_action,
             "termination_reason": self.termination_reason,
             "final_status": self.final_status,
             "goal_solved": self.goal_solved,
@@ -95,6 +116,17 @@ class SimulationResult:
                     "agent_output": turn.agent_output.to_dict(),
                     "timestamp": turn.timestamp,
                     "judge_evaluation": turn.judge_evaluation if turn.judge_evaluation else None,
+                    "tool_calls": turn.tool_calls,
+                    "tool_results": turn.tool_results,
+                    "action_calls": turn.action_calls,
+                    "action_results": turn.action_results,
+                    "backend_state_before": turn.backend_state_before,
+                    "backend_state_after": turn.backend_state_after,
+                    "predicted_classification": turn.predicted_classification,
+                    "predicted_path": turn.predicted_path,
+                    "predicted_action": turn.predicted_action,
+                    "executed_path": turn.executed_path,
+                    "executed_action": turn.executed_action,
                 }
                 for turn in self.turns
             ],
@@ -213,18 +245,38 @@ class DialogueSimulator:
             result.dialogue_length = len(result.turns)
             if result.turns:
                 result.path_taken = result.turns[-1].agent_output.path_taken or self.agent_model.path_taken
+                result.predicted_path = list(result.turns[-1].predicted_path)
+                result.predicted_action = result.turns[-1].predicted_action
             else:
                 result.path_taken = self.agent_model.path_taken
-            result.actions_taken = [
-                turn.agent_output.action for turn in result.turns if turn.agent_output.action
-            ]
 
             if self.backend_environment is not None:
                 result.backend_events = self.backend_environment.get_event_log()
                 result.backend_final_state = self.backend_environment.get_state_snapshot()
+                result.executed_path = self._reconstruct_execution_path(result.backend_events)
+                result.executed_action = self._last_successful_action(result.backend_events)
+                result.actions_taken = [
+                    event.get("result", {}).get("action_name")
+                    for event in result.backend_events
+                    if event.get("event_type") == "action_execution"
+                    and event.get("result", {}).get("success")
+                    and event.get("result", {}).get("action_name")
+                ]
                 result.goal_solved = self.backend_environment.goal_satisfied()
             else:
+                result.actions_taken = [
+                    turn.agent_output.action for turn in result.turns if turn.agent_output.action
+                ]
                 result.goal_solved = getattr(self.user_model, "problem_status", "") == "solved"
+            if result.turns:
+                # These remain Agent predictions; executed_* below comes only
+                # from Backend event log.
+                result.predicted_path = list(result.turns[-1].predicted_path)
+                result.predicted_action = result.turns[-1].predicted_action
+            if result.goal_solved and not result.termination_reason:
+                # The loop may end immediately after the final allowed turn,
+                # before the next top-of-loop termination check runs.
+                result.termination_reason = "goal_fulfilled"
             if hasattr(self.user_model, "environment_state"):
                 state = self.user_model.environment_state
                 result.user_environment_state = (
@@ -233,7 +285,7 @@ class DialogueSimulator:
             if result.goal_solved:
                 result.final_status = "goal_solved"
             elif not result.termination_reason:
-                result.termination_reason = "max_turns_reached"
+                result.termination_reason = "max_turns"
                 result.final_status = "max_turns_reached"
             elif result.termination_reason == "end_step_reached":
                 result.final_status = "workflow_end_without_goal_confirmation"
@@ -285,6 +337,11 @@ class DialogueSimulator:
             print(f"\n[轮次 {turn_id}]")
             print(f"用户: {user_message}")
         
+        backend_state_before = (
+            self.backend_environment.get_state_snapshot()
+            if self.backend_environment is not None else {}
+        )
+
         # 客服处理
         agent_output = self.agent_model.process_turn(
             user_message=user_message,
@@ -331,11 +388,66 @@ class DialogueSimulator:
             print(f"当前步骤: {agent_output.current_step}")
             print(f"动作: {agent_output.action}")
         
-        # 记录轮次
+        turn_events = [
+            event for event in new_events
+            if event.get("turn_index") == turn_id
+        ]
+        action_tool_names = set(
+            self.backend_environment.get_action_tool_map()
+            if self.backend_environment is not None else {}
+        )
+        action_calls = [
+            call for call in agent_output.tool_calls
+            if call.get("name") in action_tool_names
+        ]
+        action_results = [
+            tool_result for tool_result in agent_output.tool_results
+            if tool_result.get("tool_name") in action_tool_names
+        ]
+        predicted_classification = (
+            agent_output.classification_output.to_dict()
+            if getattr(agent_output, "classification_output", None)
+            and hasattr(agent_output.classification_output, "to_dict")
+            else (agent_output.classification_output or {})
+        )
+        predicted_path = list(
+            getattr(agent_output, "predicted_path", None)
+            or getattr(agent_output, "expected_path", None)
+            or []
+        )
+        predicted_action = (
+            getattr(agent_output, "predicted_action", "")
+            or (agent_output.final_output.Action if agent_output.final_output else "")
+            or getattr(agent_output, "action", "")
+        )
+        executed_path = self._reconstruct_turn_execution_path(
+            agent_output, turn_events, action_tool_names
+        )
+        executed_action = self._last_successful_action(turn_events)
+        agent_output.predicted_path = predicted_path
+        agent_output.predicted_action = predicted_action
+        agent_output.executed_path = executed_path
+        agent_output.executed_action = executed_action
+
+        # 记录轮次。执行字段全部由事件日志重建，不能由模型输出覆盖。
         turn = SimulationTurn(
             turn_id=turn_id,
             user_message=user_message,
-            agent_output=agent_output
+            agent_output=agent_output,
+            tool_calls=list(agent_output.tool_calls),
+            tool_results=list(agent_output.tool_results),
+            action_calls=action_calls,
+            action_results=action_results,
+            backend_state_before=backend_state_before,
+            backend_state_after=(
+                self.backend_environment.get_state_snapshot()
+                if self.backend_environment is not None else {}
+            ),
+            predicted_classification=predicted_classification,
+            predicted_path=predicted_path,
+            predicted_action=predicted_action,
+            executed_path=executed_path,
+            executed_action=executed_action,
         )
         result.turns.append(turn)
         
@@ -344,6 +456,58 @@ class DialogueSimulator:
             self.user_model.update_satisfaction(0.1)
         elif agent_output.action in ["GUIDE", "REVIEW"]:
             self.user_model.update_satisfaction(0.05)
+
+    @staticmethod
+    def _last_successful_action(events: List[Dict[str, Any]]) -> str:
+        for event in reversed(events or []):
+            if (
+                event.get("event_type") == "action_execution"
+                and event.get("result", {}).get("success")
+            ):
+                return event.get("result", {}).get("action_name", "")
+        return ""
+
+    @classmethod
+    def _reconstruct_turn_execution_path(
+        cls,
+        agent_output: AgentTurnOutput,
+        events: List[Dict[str, Any]],
+        action_tool_names: set,
+    ) -> List[str]:
+        """Build an execution trace from formal calls and Backend events."""
+        trace = []
+        action_events = [
+            event for event in events
+            if event.get("event_type") == "action_execution"
+        ]
+        action_index = 0
+        for call in agent_output.tool_calls:
+            name = call.get("name", "")
+            if not name:
+                continue
+            trace.append(f"tool:{name}")
+            if name in action_tool_names and action_index < len(action_events):
+                action = action_events[action_index]
+                action_name = action.get("result", {}).get("action_name") or action.get("name", "")
+                trace.append(f"action:{action_name}")
+                action_index += 1
+        # Include direct legacy executions, if explicitly enabled.
+        for action in action_events[action_index:]:
+            action_name = action.get("result", {}).get("action_name") or action.get("name", "")
+            trace.append(f"action:{action_name}")
+        return trace
+
+    @classmethod
+    def _reconstruct_execution_path(cls, events: List[Dict[str, Any]]) -> List[str]:
+        trace = []
+        for event in events or []:
+            if event.get("event_type") == "tool_call":
+                trace.append(f"tool:{event.get('name', '')}")
+            elif event.get("event_type") == "action_execution":
+                result = event.get("result", {})
+                action_name = result.get("action_name") or event.get("name", "")
+                trace.append(f"action:{action_name}")
+        return trace
     
     def _should_terminate(self, result: SimulationResult) -> bool:
         """
@@ -360,6 +524,22 @@ class DialogueSimulator:
 
         if self.backend_environment is not None and self.backend_environment.goal_satisfied():
             return True
+
+        if result.turns:
+            last_output = result.turns[-1].agent_output
+            if last_output.metadata.get("tool_loop_limit"):
+                return True
+            if self.backend_environment is not None:
+                turn_events = [
+                    event for event in self.backend_environment.get_event_log()
+                    if event.get("turn_index") == result.turns[-1].turn_id
+                ]
+                if any(
+                    event.get("event_type") in {"tool_call", "action_execution"}
+                    and not event.get("result", {}).get("success")
+                    for event in turn_events
+                ):
+                    return True
         
         # 检查最后的步骤是否为END
         if result.turns:
@@ -492,11 +672,8 @@ class DialogueSimulator:
     
     def _get_termination_reason(self, result: SimulationResult) -> str:
         """获取终止原因"""
-        if len(result.turns) >= self.max_turns:
-            return "max_turns_reached"
-
         if self.backend_environment is not None and self.backend_environment.goal_satisfied():
-            return "backend_goal_satisfied"
+            return "goal_fulfilled"
         
         if result.turns:
             last_turn = result.turns[-1]
@@ -504,14 +681,36 @@ class DialogueSimulator:
             
             last_user_msg = last_turn.user_message.lower()
             last_agent_msg = last_agent_output.chat.lower()
-            
-            # 检查是否因为双方再见而终止
+
+            turn_events = [
+                event for event in (self.backend_environment.get_event_log()
+                                    if self.backend_environment else [])
+                if event.get("turn_index") == last_turn.turn_id
+            ]
+            if any(
+                event.get("event_type") == "action_execution"
+                and event.get("result", {}).get("action_name") == "TransHuman"
+                and event.get("result", {}).get("success")
+                for event in turn_events
+            ):
+                return "transfer_human"
+            if last_agent_output.metadata.get("tool_loop_limit"):
+                return "max_tool_steps"
+            if any(
+                event.get("event_type") in {"tool_call", "action_execution"}
+                and not event.get("result", {}).get("success")
+                for event in turn_events
+            ):
+                return "tool_failure"
+
+        # 检查是否因为双方再见而终止
+        if result.turns:
             farewell_keywords = ['再见', '拜拜', 'bye', 'goodbye', '88']
             user_says_bye = any(keyword in last_user_msg for keyword in farewell_keywords)
             agent_says_bye = any(keyword in last_agent_msg for keyword in farewell_keywords)
             
             if user_says_bye and agent_says_bye:
-                return "both_said_goodbye"
+                return "user_ended"
             
             # 检查是否因为重复感谢祝福而终止
             if len(result.turns) >= 2:
@@ -532,7 +731,7 @@ class DialogueSimulator:
                                   has_thank_or_blessing(prev_agent_msg))
                 
                 if user_repeating and agent_repeating:
-                    return "repeating_courtesy_exchanges"
+                    return "user_ended"
             
             # 检查是否因为重复问题/回答而终止
             if len(result.turns) >= 3:
@@ -571,6 +770,9 @@ class DialogueSimulator:
             
             if last_agent_output.next_step is None:
                 return "end_step_reached"
+
+        if len(result.turns) >= self.max_turns:
+            return "max_turns"
         
         return "unknown"
     

@@ -230,7 +230,9 @@ class AgentTurnOutput:
     
     # 期望路径和最终动作(按新格式要求)
     expected_path: List[str] = field(default_factory=list)  # 按实际流程顺序填写的期望路径
+    predicted_path: List[str] = field(default_factory=list)  # Agent 自报/预测的路径
     final_output: Optional[FinalOutput] = None  # 最终动作输出
+    predicted_action: str = ""  # Agent 预测的动作
     
     # 兼容旧格式的字段
     action: str = ""               # 最终动作 (兼容字段)
@@ -242,6 +244,8 @@ class AgentTurnOutput:
     
     # 路径追踪
     path_taken: List[str] = field(default_factory=list)  # 走过的步骤
+    executed_path: List[str] = field(default_factory=list)  # 由 Backend event 重建的执行轨迹
+    executed_action: str = ""  # Backend 实际成功执行的动作
     
     # JSON解析状态
     json_parse_failed: bool = False  # 是否JSON解析失败
@@ -261,12 +265,16 @@ class AgentTurnOutput:
             "timestamp": self.timestamp,
             "classification_output": self.classification_output.to_dict() if self.classification_output else None,
             "cot": self.cot,
-            "expected_path": self.expected_path,  # 新格式：期望路径
-            "predicted_path": self.expected_path,
+            "expected_path": self.expected_path,  # 兼容字段：模型声明的路径
+            "predicted_path": self.predicted_path or self.expected_path,
             "final_output": self.final_output.to_dict() if self.final_output else None,  # 新格式：最终动作
+            "predicted_action": self.predicted_action or (
+                self.final_output.Action if self.final_output else self.action
+            ),
             "chat": self.chat,
             "path_taken": self.path_taken,
-            "executed_path": self.path_taken,
+            "executed_path": self.executed_path,
+            "executed_action": self.executed_action,
             "json_parse_failed": self.json_parse_failed,  # JSON解析失败标记
             "tool_calls": self.tool_calls,
             "tool_results": self.tool_results,
@@ -288,6 +296,10 @@ class AgentTurnOutput:
             "plan": self.plan,
             "chat": self.chat,
             "path_taken": self.path_taken,
+            "predicted_path": self.predicted_path or self.expected_path,
+            "predicted_action": self.predicted_action or self.action,
+            "executed_path": self.executed_path,
+            "executed_action": self.executed_action,
             "tool_calls": self.tool_calls,
             "tool_results": self.tool_results,
             "action_result": self.action_result,
@@ -961,6 +973,7 @@ class AgentModel:
         # 构建消息列表
         public_observations = json.dumps(
             {
+                "initial_observation": self.context_data.get("initial_observation", {}),
                 "tool_results": self.context_data.get("tool_observations", [])[-6:],
                 "action_results": self.context_data.get("backend_action_results", [])[-3:],
             },
@@ -1015,19 +1028,40 @@ class AgentModel:
                         )
                         from ..backend.types import ToolCall
                         for index, raw_call in enumerate(fallback_data.get("tool_calls", [])):
+                            raw_arguments = raw_call.get("arguments", {})
+                            arguments_valid = isinstance(raw_arguments, dict)
+                            argument_error = None
+                            if isinstance(raw_arguments, str):
+                                try:
+                                    raw_arguments = json.loads(raw_arguments)
+                                    arguments_valid = isinstance(raw_arguments, dict)
+                                except json.JSONDecodeError as exc:
+                                    raw_arguments = {}
+                                    arguments_valid = False
+                                    argument_error = str(exc)
+                            if not isinstance(raw_arguments, dict):
+                                raw_arguments = {}
+                                arguments_valid = False
+                                argument_error = argument_error or "tool arguments must be a JSON object"
                             response_tool_calls.append(
                                 ToolCall(
                                     call_id=raw_call.get("call_id") or raw_call.get("id") or f"text_call_{index}",
                                     name=raw_call.get("name", ""),
-                                    arguments=raw_call.get("arguments", {})
-                                    if isinstance(raw_call.get("arguments", {}), dict)
-                                    else {},
+                                    arguments=raw_arguments,
+                                    arguments_valid=arguments_valid,
+                                    argument_error=argument_error,
                                 )
                             )
                     except (TypeError, ValueError, json.JSONDecodeError):
                         response_tool_calls = []
                 if response_tool_calls and backend_environment is not None and tool_round >= max_tool_steps:
                     turn_output.metadata["tool_loop_limit"] = True
+                    turn_output.metadata["termination_reason"] = "max_tool_steps"
+                    turn_output.chat = "工具调用次数已达上限，暂时无法继续处理。"
+                    self.add_agent_message(turn_output.chat)
+                    self.turn_history.append(turn_output)
+                    self.current_turn += 1
+                    return turn_output
                 if not response_tool_calls or backend_environment is None or tool_round >= max_tool_steps:
                     break
 
@@ -1054,6 +1088,11 @@ class AgentModel:
                     })
 
                 for call in response_tool_calls:
+                    if not getattr(call, "arguments_valid", True):
+                        turn_output.metadata.setdefault("invalid_tool_arguments", []).append({
+                            "name": call.name,
+                            "error": getattr(call, "argument_error", None),
+                        })
                     tool_result = backend_environment.execute_tool(
                         call.name,
                         call.arguments,
@@ -1293,6 +1332,7 @@ class AgentModel:
             # 提取路径
             if "now_path" in data:
                 turn_output.expected_path = data["now_path"]
+                turn_output.predicted_path = list(data["now_path"] or [])
             
             # 提取finals
             if "finals" in data:
@@ -1302,6 +1342,7 @@ class AgentModel:
                     PLAN=finals_dict.get("PLAN", "none"),
                     extra_fields={k: v for k, v in finals_dict.items() if k not in ["Action", "PLAN"]}
                 )
+                turn_output.predicted_action = finals_dict.get("Action", "")
                 turn_output.action = turn_output.final_output.Action
                 turn_output.plan = turn_output.final_output.PLAN
 

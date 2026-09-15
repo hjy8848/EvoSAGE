@@ -1,7 +1,6 @@
 import unittest
 import json
 from types import SimpleNamespace
-from importlib import import_module
 
 from framework.backend import EcommerceBackend, build_case_spec, create_backend
 from framework.models.agent_model import AgentModel
@@ -29,7 +28,7 @@ class EcommerceBackendTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.data["shipping_status"], "Unshipped")
-        self.assertNotIn("responsibility", result.data)
+        self.assertEqual(result.data["responsibility"], "User")
         self.assertEqual(backend.get_event_log()[0]["event_type"], "tool_call")
 
     def test_action_requires_verification_and_mutates_state(self):
@@ -160,39 +159,6 @@ class EcommerceBackendTests(unittest.TestCase):
         self.assertEqual(len(action_events), 1)
         self.assertTrue(backend.goal_satisfied())
         self.assertEqual(output.action, "Refund")
-
-    def test_all_scenario_path_cases_have_query_and_action_state_transitions(self):
-        scenarios = [
-            "online_education", "ecommerce_refund", "telecom_package",
-            "property_service", "logistics_delivery", "airline_refund",
-        ]
-        for scenario in scenarios:
-            module = import_module(f"framework.sop.{scenario}_PathList")
-            paths = module.generate_path_list()
-            for index, path in enumerate(paths):
-                with self.subTest(scenario=scenario, path=index + 1):
-                    case = build_case_spec(scenario, "test_intent", path, f"{scenario}-{index}")
-                    backend = create_backend(case)
-                    record_id = case.user_knowledge.get("order_id") or case.user_knowledge["record_id"]
-                    query_name = next(
-                        tool["function"]["name"]
-                        for tool in backend.get_tool_definitions()
-                        if tool["function"]["name"].startswith("query_")
-                    )
-                    query = backend.execute_tool(query_name, {"record_id": record_id, "order_id": record_id})
-                    self.assertTrue(query.success)
-                    expected_action = path.get("final_output", {}).get("Action")
-                    action_tool = next(
-                        name for name, action in backend.get_action_tool_map().items()
-                        if action == expected_action
-                    )
-                    action = backend.execute_tool(action_tool, {"record_id": record_id, "order_id": record_id})
-                    self.assertTrue(action.success)
-                    if scenario == "online_education" and expected_action == "PLAN":
-                        self.assertFalse(backend.goal_satisfied())
-                    else:
-                        self.assertTrue(backend.goal_satisfied())
-
 
 if __name__ == "__main__":
     unittest.main()

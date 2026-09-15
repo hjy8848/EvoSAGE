@@ -19,6 +19,7 @@ def build_case_spec(
     user_intent: str,
     path_config: Optional[Dict[str, Any]] = None,
     user_id: str = "user",
+    user_policy_mode: str = "truthful",
 ) -> CaseSpec:
     """Build a deterministic case from the existing PathList.
 
@@ -67,6 +68,15 @@ def build_case_spec(
         elif expected_action == "Reject":
             expected_outcome["order.refund_status"] = "Rejected"
 
+        actual_shipping_status = system_variables.get("ShippingStatus", "Signed")
+        if user_policy_mode in {"mistaken", "adversarial_false_claim"}:
+            believed_shipping_status = (
+                "Unshipped" if actual_shipping_status != "Unshipped" else "Signed"
+            )
+        else:
+            believed_shipping_status = actual_shipping_status
+        reveal_order_id = user_policy_mode != "withholding"
+
         return CaseSpec(
             case_id=case_id,
             scenario=scenario_id,
@@ -81,12 +91,14 @@ def build_case_spec(
                 "product_name": "无线耳机",
                 "knows_order_id": True,
                 "knows_customer_id": True,
-                "believes_shipping_status": system_variables.get("ShippingStatus"),
+                "believes_shipping_status": believed_shipping_status,
             },
             user_policy={
-                "truthfulness": "truthful",
+                "mode": user_policy_mode,
+                "truthfulness": "truthful" if user_policy_mode == "truthful" else "unreliable",
                 "reveal_order_id_on_request": True,
                 "reveal_customer_id_on_request": True,
+                "show_order_id_initially": reveal_order_id,
                 "reveal_hidden_account_fields": False,
             },
             initial_observation={},

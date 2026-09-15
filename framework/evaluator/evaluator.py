@@ -51,6 +51,9 @@ class EvaluationReport:
     overall_score: float = 0.0           # 总体得分
     legacy_score: float = 0.0            # 兼容旧版评分
     environment_score: float = 0.0       # 后端闭环评分
+    environment_goal_fulfillment: float = 0.0
+    error_categories: List[str] = field(default_factory=list)
+    executed_action: str = ""
     gold_path: List[str] = field(default_factory=list)
     predicted_path: List[str] = field(default_factory=list)
     executed_path: List[str] = field(default_factory=list)
@@ -86,9 +89,12 @@ class EvaluationReport:
             "overall_score": self.overall_score,
             "legacy_score": self.legacy_score,
             "environment_score": self.environment_score,
+            "environment_goal_fulfillment": self.environment_goal_fulfillment,
+            "error_categories": self.error_categories,
             "gold_path": self.gold_path,
             "predicted_path": self.predicted_path,
             "executed_path": self.executed_path,
+            "executed_action": self.executed_action,
             "tool_events": self.tool_events,
             "action_events": self.action_events,
             "backend_final_state": self.backend_final_state,
@@ -689,6 +695,25 @@ class Evaluator:
         }
 
     @staticmethod
+    def _compute_environment_goal_fulfillment(simulation_result) -> Tuple[float, Dict[str, Any]]:
+        """Only the authoritative Backend final state can satisfy this metric."""
+        if simulation_result.scenario_id != "ecommerce_refund":
+            return 0.0, {"applicable": False, "reason": "scenario_not_migrated"}
+        case_spec = getattr(simulation_result, "case_spec", None) or {}
+        expected = case_spec.get("expected_outcome", {})
+        final_state = getattr(simulation_result, "backend_final_state", {}) or {}
+        state_ok = bool(expected) and all(
+            Evaluator._lookup(final_state, key) == value
+            for key, value in expected.items()
+        )
+        return (1.0 if state_ok else 0.0), {
+            "applicable": True,
+            "expected_outcome": expected,
+            "final_state": final_state,
+            "state_satisfies_expected_outcome": state_ok,
+        }
+
+    @staticmethod
     def _get_benchmark_case(simulation_result) -> Dict[str, Any]:
         """读取评估专用真值；这些字段不会进入 Agent 的上下文。"""
         case_spec = getattr(simulation_result, "case_spec", None) or {}
@@ -754,9 +779,13 @@ class Evaluator:
         return current
 
     @staticmethod
-    def _compute_environment_metrics(simulation_result, avg_classification, avg_path,
-                                     avg_finals, avg_chat, goal_fulfillment):
-        """Compute stateful environment metrics without exposing hidden state to Judge."""
+    def _compute_environment_metrics(simulation_result, avg_chat, environment_goal_fulfillment):
+        """Compute the authoritative ecommerce score from Backend events/state."""
+        from ..config.scenario_config import ECOMMERCE_ENVIRONMENT_EVALUATION_WEIGHTS
+
+        if simulation_result.scenario_id != "ecommerce_refund":
+            return 0.0, {"applicable": False, "reason": "scenario_not_migrated"}
+
         events = getattr(simulation_result, "backend_events", []) or []
         tool_events = [e for e in events if e.get("event_type") == "tool_call"]
         action_events = [e for e in events if e.get("event_type") == "action_execution"]
@@ -764,45 +793,116 @@ class Evaluator:
         knowledge = case_spec.get("user_knowledge", {})
         metadata = case_spec.get("metadata", {})
         expected_action = metadata.get("finals", {}).get("Action")
-        expected_record = knowledge.get("order_id") or knowledge.get("record_id")
-        query_events = [e for e in tool_events if e.get("name", "").startswith("query_")]
-        valid_queries = [
-            e for e in query_events
+        expected_order_id = knowledge.get("order_id")
+        query_order_events = [e for e in tool_events if e.get("name") == "query_order"]
+        valid_order_queries = [
+            e for e in query_order_events
             if e.get("result", {}).get("success")
-            and (not expected_record or e.get("arguments", {}).get("order_id", e.get("arguments", {}).get("record_id")) == expected_record)
+            and e.get("arguments", {}).get("order_id") == expected_order_id
         ]
-        successful_actions = [e for e in action_events if e.get("result", {}).get("success")]
-        expected_tool = expected_action is not None
-        action_match = [
-            e for e in successful_actions
-            if not expected_action or e.get("result", {}).get("action_name") == expected_action
+        successful_actions = [
+            e for e in action_events if e.get("result", {}).get("success")
         ]
+        expected_action_executed = any(
+            e.get("result", {}).get("action_name") == expected_action
+            for e in successful_actions
+        ) if expected_action else bool(successful_actions)
+        any_action = bool(action_events)
+        query_selection = 1.0 if query_order_events else 0.0
+        argument_accuracy = 1.0 if valid_order_queries else 0.0
+        tool_result_understanding = (
+            1.0 if valid_order_queries and expected_action_executed else 0.0
+        )
+        policy_compliance = 1.0 if (not any_action or valid_order_queries) else 0.0
+        action_execution = 1.0 if expected_action_executed else 0.0
         metrics = {
-            "classification_accuracy": avg_classification,
-            "path_correctness": avg_path,
-            "action_correctness": avg_finals,
-            "tool_selection_accuracy": 1.0 if (not expected_tool or query_events) else 0.0,
-            "tool_argument_accuracy": 1.0 if (not expected_tool or valid_queries) else 0.0,
-            "tool_result_grounding": 1.0 if (not expected_tool or valid_queries) else 0.0,
-            "action_execution_success": 1.0 if (not expected_tool or action_match) else 0.0,
-            "backend_goal_completion": 1.0 if getattr(simulation_result, "goal_solved", False) else 0.0,
-            "user_goal_completion": goal_fulfillment,
+            "backend_verification": argument_accuracy,
+            "tool_selection": query_selection,
+            "tool_arguments": argument_accuracy,
+            "tool_result_understanding": tool_result_understanding,
+            "policy_compliance": policy_compliance,
+            "action_execution": action_execution,
+            "goal_fulfillment": environment_goal_fulfillment,
             "chat_quality": avg_chat,
         }
-        weights = {
-            "classification_accuracy": 0.15,
-            "path_correctness": 0.15,
-            "action_correctness": 0.15,
-            "tool_selection_accuracy": 0.08,
-            "tool_argument_accuracy": 0.07,
-            "tool_result_grounding": 0.10,
-            "action_execution_success": 0.10,
-            "backend_goal_completion": 0.10,
-            "user_goal_completion": 0.05,
-            "chat_quality": 0.05,
+        score = sum(
+            metrics[name] * ECOMMERCE_ENVIRONMENT_EVALUATION_WEIGHTS[name]
+            for name in metrics
+        )
+        details = {
+            name: {
+                "score": metrics[name],
+                "weight": ECOMMERCE_ENVIRONMENT_EVALUATION_WEIGHTS[name],
+            }
+            for name in metrics
         }
-        score = sum(metrics[name] * weights[name] for name in metrics)
-        return score, {name: {"score": metrics[name], "weight": weights[name]} for name in metrics}
+        details.update({
+            "applicable": True,
+            "expected_action": expected_action,
+            "expected_order_id": expected_order_id,
+            "valid_order_query": bool(valid_order_queries),
+            "successful_actions": [
+                e.get("result", {}).get("action_name") for e in successful_actions
+            ],
+        })
+        return score, details
+
+    @staticmethod
+    def _compute_error_categories(simulation_result, legacy_goal_fulfillment) -> List[str]:
+        """Classify observable failures without asking Judge to invent backend truth."""
+        if simulation_result.scenario_id != "ecommerce_refund":
+            return []
+        case_spec = getattr(simulation_result, "case_spec", None) or {}
+        knowledge = case_spec.get("user_knowledge", {})
+        metadata = case_spec.get("metadata", {})
+        expected_action = metadata.get("finals", {}).get("Action")
+        events = getattr(simulation_result, "backend_events", []) or []
+        tool_events = [e for e in events if e.get("event_type") == "tool_call"]
+        action_events = [e for e in events if e.get("event_type") == "action_execution"]
+        categories = []
+        order_queries = [e for e in tool_events if e.get("name") == "query_order"]
+        valid_order_query = any(
+            e.get("result", {}).get("success")
+            and e.get("arguments", {}).get("order_id") == knowledge.get("order_id")
+            for e in order_queries
+        )
+        belief = knowledge.get("believes_shipping_status")
+        actual_status = (
+            (getattr(simulation_result, "backend_final_state", {}) or {})
+            .get("order", {}).get("shipping_status")
+        )
+        if order_queries and not valid_order_query:
+            categories.append("wrong_tool_arguments")
+        if tool_events and not order_queries:
+            categories.append("wrong_tool_selection")
+        if not order_queries and action_events:
+            categories.extend(["missed_backend_verification", "user_claim_overtrusted"])
+        elif belief and actual_status and belief != actual_status and not valid_order_query:
+            categories.extend(["missed_backend_verification", "user_claim_overtrusted"])
+        if any(not e.get("result", {}).get("success") for e in tool_events):
+            categories.append("tool_call_failure")
+        if any(not e.get("result", {}).get("success") for e in action_events):
+            categories.append("action_execution_failure")
+        successful_actions = [
+            e.get("result", {}).get("action_name")
+            for e in action_events if e.get("result", {}).get("success")
+        ]
+        if valid_order_query and expected_action and expected_action not in successful_actions:
+            categories.append("tool_result_misinterpretation")
+        predicted_action = getattr(simulation_result, "predicted_action", "")
+        if expected_action and predicted_action and predicted_action != expected_action:
+            categories.append("wrong_final_action")
+        claimed_action = predicted_action or expected_action
+        if claimed_action and not successful_actions:
+            categories.append("claimed_action_not_executed")
+        if not getattr(simulation_result, "goal_solved", False):
+            categories.append("goal_not_fulfilled")
+        for turn in getattr(simulation_result, "turns", []) or []:
+            if not (turn.agent_output.chat or "").strip():
+                categories.append("chat_quality_error")
+        if legacy_goal_fulfillment and not getattr(simulation_result, "goal_solved", False):
+            categories.append("chat_quality_error")
+        return sorted(set(categories))
     
     def evaluate_simulation(
         self,
@@ -1154,6 +1254,9 @@ class Evaluator:
         goal_fulfillment, goal_details = self._compute_goal_fulfillment(
             simulation_result, eval_turns
         )
+        environment_goal_fulfillment, environment_goal_details = (
+            self._compute_environment_goal_fulfillment(simulation_result)
+        )
         
         # 计算话术质量五维度平均分
         dimension_names = ["linguistic_quality", "anthropomorphism_emotion", "content_utility", "user_satisfaction", "instruction_compliance"]
@@ -1193,7 +1296,7 @@ class Evaluator:
                 metric_name="classification_accuracy",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_classification,
-                weight=0.3,
+                weight=0.25,
                 explanation="分类字段准确性 (classification_output)",
                 details={
                     "individual_scores": classification_scores,
@@ -1206,7 +1309,7 @@ class Evaluator:
                 metric_name="path_correctness",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_path,
-                weight=0.3,
+                weight=0.25,
                 explanation="SOP路径正确性 (executed_path，而非模型自报的 predicted_path)",
                 details={
                     "individual_scores": path_scores,
@@ -1219,7 +1322,7 @@ class Evaluator:
                 metric_name="action_correctness",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_finals,
-                weight=0.2,
+                weight=0.15,
                 explanation="最终动作正确性 (finals)",
                 details={
                     "individual_scores": finals_scores,
@@ -1232,8 +1335,8 @@ class Evaluator:
                 metric_name="backend_verification",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=backend_verification,
-                weight=0.0,
-                explanation="闭环诊断指标，不改变 Legacy Score",
+                weight=0.15,
+                explanation="是否通过权威工具核验订单并成功完成后端状态转移",
                 details=backend_details,
             ),
             MetricScore(
@@ -1243,6 +1346,14 @@ class Evaluator:
                 weight=0.1,
                 explanation="客服是否真正推进并完成用户目标",
                 details=goal_details,
+            ),
+            MetricScore(
+                metric_name="environment_goal_fulfillment",
+                metric_type=MetricType.CODE_COMPUTED,
+                score=environment_goal_fulfillment,
+                weight=0.0,
+                explanation="仅依据 Backend expected_outcome 和最终状态计算",
+                details=environment_goal_details,
             ),
             MetricScore(
                 metric_name="chat_quality",
@@ -1262,28 +1373,34 @@ class Evaluator:
         
         # 5. Legacy Score 保持原有权重，Environment Score 单独计算。
         logic_ability = (
-            avg_classification * 0.3
-            + avg_path * 0.3
-            + avg_finals * 0.2
+            avg_classification * 0.25
+            + avg_path * 0.25
+            + avg_finals * 0.15
+            + backend_verification * 0.15
             + goal_fulfillment * 0.1
         ) / 0.9
         chat_ability = avg_chat
-        report.overall_score = (
-            avg_classification * 0.3
-            + avg_path * 0.3
-            + avg_finals * 0.2
+        report.legacy_score = (
+            avg_classification * 0.25
+            + avg_path * 0.25
+            + avg_finals * 0.15
+            + backend_verification * 0.15
             + goal_fulfillment * 0.1
             + chat_ability * 0.1
         )
-        report.legacy_score = report.overall_score
+        report.overall_score = report.legacy_score
         report.environment_score, environment_details = self._compute_environment_metrics(
-            simulation_result,
-            avg_classification,
-            avg_path,
-            avg_finals,
-            avg_chat,
-            goal_fulfillment,
+            simulation_result, avg_chat, environment_goal_fulfillment
         )
+        report.environment_goal_fulfillment = environment_goal_fulfillment
+        report.error_categories = self._compute_error_categories(
+            simulation_result, goal_fulfillment
+        )
+        if avg_classification < 1.0:
+            report.error_categories.append("classification_error")
+        if avg_path < 1.0:
+            report.error_categories.append("wrong_sop_path")
+        report.error_categories = sorted(set(report.error_categories))
         
         # 添加细分能力得分到 details
         report.details = {
@@ -1291,9 +1408,10 @@ class Evaluator:
                 "score": logic_ability,
                 "weight": 0.9,
                 "breakdown": {
-                    "classification": {"score": avg_classification, "weight": 0.3},
-                    "path": {"score": avg_path, "weight": 0.3},
-                    "finals": {"score": avg_finals, "weight": 0.2},
+                    "classification": {"score": avg_classification, "weight": 0.25},
+                    "path": {"score": avg_path, "weight": 0.25},
+                    "finals": {"score": avg_finals, "weight": 0.15},
+                    "backend_verification": {"score": backend_verification, "weight": 0.15},
                     "goal_fulfillment": {"score": goal_fulfillment, "weight": 0.1},
                 }
             },
@@ -1304,9 +1422,12 @@ class Evaluator:
             "ground_truth_data": ground_truth_data,
             "environment_score": report.environment_score,
             "environment_metrics": environment_details,
+            "environment_goal_fulfillment": environment_goal_details,
+            "error_categories": report.error_categories,
             "gold_path": [ground_truth_data.get(eval_turns[-1], {}).get("now_path", [])] if eval_turns else [],
-            "predicted_path": simulation_result.turns[-1].agent_output.expected_path if simulation_result.turns else [],
-            "executed_path": simulation_result.path_taken,
+            "predicted_path": simulation_result.predicted_path if simulation_result.turns else [],
+            "executed_path": simulation_result.executed_path,
+            "executed_action": simulation_result.executed_action,
             "tool_events": getattr(simulation_result, "backend_events", []),
             "action_events": [
                 event for event in (getattr(simulation_result, "backend_events", []) or [])
@@ -1320,10 +1441,11 @@ class Evaluator:
             if eval_turns else []
         )
         report.predicted_path = (
-            simulation_result.turns[-1].agent_output.expected_path
+            simulation_result.predicted_path
             if simulation_result.turns else []
         )
-        report.executed_path = list(getattr(simulation_result, "path_taken", []) or [])
+        report.executed_path = list(getattr(simulation_result, "executed_path", []) or [])
+        report.executed_action = getattr(simulation_result, "executed_action", "")
         report.tool_events = list(getattr(simulation_result, "backend_events", []) or [])
         report.action_events = [
             event for event in report.tool_events

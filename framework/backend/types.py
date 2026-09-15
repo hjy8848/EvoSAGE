@@ -40,12 +40,16 @@ class ToolCall:
     call_id: str
     name: str
     arguments: Dict[str, Any] = field(default_factory=dict)
+    arguments_valid: bool = True
+    argument_error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "call_id": self.call_id,
             "name": self.name,
             "arguments": copy.deepcopy(self.arguments),
+            "arguments_valid": self.arguments_valid,
+            "argument_error": self.argument_error,
         }
 
 
