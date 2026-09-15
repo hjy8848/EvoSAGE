@@ -31,7 +31,32 @@ class EcommerceBackendTests(unittest.TestCase):
         self.assertNotIn("responsibility", result.data)
         self.assertNotIn("refund_reasonable", result.data)
         self.assertNotIn("has_document", result.data)
+        self.assertNotIn("refund_eligible", result.data)
         self.assertEqual(backend.get_event_log()[0]["event_type"], "tool_call")
+
+    def test_refund_eligibility_is_not_derived_from_expected_action(self):
+        signed_refund = build_case_spec(
+            "ecommerce_refund",
+            "refund_request",
+            {
+                "Classification_items": ["ReturnOrRefund", None, None, None, None],
+                "system_variables": {"ShippingStatus": "Signed"},
+                "final_output": {"Action": "Refund"},
+            },
+            user_id="signed-refund",
+        )
+        unshipped_reject = build_case_spec(
+            "ecommerce_refund",
+            "refund_request",
+            {
+                "Classification_items": ["ReturnOrRefund", None, None, None, None],
+                "system_variables": {"ShippingStatus": "Unshipped"},
+                "final_output": {"Action": "Reject"},
+            },
+            user_id="unshipped-reject",
+        )
+        self.assertFalse(signed_refund.backend_record["order"]["refund_eligible"])
+        self.assertTrue(unshipped_reject.backend_record["order"]["refund_eligible"])
 
     def test_action_requires_verification_and_mutates_state(self):
         backend = EcommerceBackend(self._case())

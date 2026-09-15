@@ -268,6 +268,15 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
             0.5,
         )
 
+    def test_query_order_does_not_expose_gt_derived_eligibility(self):
+        case = make_case("Unshipped", "High", "Refund")
+        order_id = case.user_knowledge["order_id"]
+        result = create_backend(case).execute_tool(
+            "query_order", {"order_id": order_id}, turn_index=0
+        )
+        self.assertTrue(result.success)
+        self.assertNotIn("refund_eligible", result.data)
+
     def test_pretending_refund_success_does_not_change_backend_goal(self):
         case = make_case("Unshipped", "High", "Refund")
         client = ScriptedClient([response_with_json("Refund", chat="已经为您退款。")])

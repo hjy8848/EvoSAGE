@@ -103,7 +103,6 @@ class EcommerceBackend(BackendEnvironment):
                     "shipping_status": order.get("shipping_status"),
                     "payment_status": order.get("payment_status"),
                     "refund_status": order.get("refund_status"),
-                    "refund_eligible": order.get("refund_eligible"),
                     "return_window_open": order.get("return_window_open"),
                 },
             )

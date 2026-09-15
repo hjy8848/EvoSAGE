@@ -234,9 +234,9 @@ Evaluator 计算 legacy/environment 双轨结果
 
 Agent 只看到 `system_prompt`、对话历史、`initial_observation` 和公开工具结果；完整 `backend_record`、`expected_outcome`、GT path/action 和评测 metadata 只保留给 Simulator/Evaluator。`predicted_path`/`predicted_action` 来自 Agent 输出，`executed_path`/`executed_action` 由 Backend event log 重建。真实目标完成只由 `expected_outcome` 与 Backend 最终状态判断，关键词结果仅保留在 legacy `goal_fulfillment` 中。
 
-本轮新增的 Ecommerce E2E 覆盖：隐藏状态防泄漏、不同 Backend 的初始输入一致、用户错误陈述、查询结果误判、假装退款成功、真实退款成功、拒绝模型自报 executed_path、同一 Backend 的完整 trace、信用等级必查，以及 runner 主入口接线（`Signed/Low → query_order → transfer_human`）。当前本地 `unittest discover -s tests` 结果为 16/16 通过。
+本轮新增的 Ecommerce E2E 覆盖：隐藏状态防泄漏、不同 Backend 的初始输入一致、用户错误陈述、查询结果误判、假装退款成功、真实退款成功、拒绝模型自报 executed_path、同一 Backend 的完整 trace、信用等级必查、eligibility 不泄漏，以及 runner 主入口接线（`Signed/Low → query_order → transfer_human`）。当前本地 `unittest discover -s tests` 结果为 18/18 通过。
 
-第二轮 benchmark validity 修正：`query_order` 只返回订单后台事实（物流、支付、售后状态），不再返回 `Responsibility`、`RefundReasonable`、`ProvidedDocument` 等对话语义分类 GT；这些字段仍留在 evaluator-only 的 CaseSpec/backend 内部。CaseSpec metadata 额外声明 `required_backend_verifications`，根据样本实际使用的 `ShippingStatus`、`CreditLevel`、`PaymentStatus` 要求分别完成 `query_order`、`query_customer_profile`、`query_payment`，environment score 同时检查工具选择、参数、结果字段和动作前核验顺序，避免“没查但猜对”获得完整环境分。
+第二轮 benchmark validity 修正：`query_order` 只返回订单后台事实（物流、支付和售后状态），不再返回 `Responsibility`、`RefundReasonable`、`ProvidedDocument` 等对话语义分类 GT，也不返回由 `expected_action` 派生的 `refund_eligible`；这些字段仍留在 evaluator-only 的 CaseSpec/backend 内部，公开 eligibility 不能反向泄漏目标动作。CaseSpec metadata 额外声明 `required_backend_verifications`，根据样本实际使用的 `ShippingStatus`、`CreditLevel`、`PaymentStatus` 要求分别完成 `query_order`、`query_customer_profile`、`query_payment`，environment score 同时检查工具选择、参数、结果字段和动作前核验顺序，避免“没查但猜对”获得完整环境分。
 
 ## 3. 我们真正要进化什么
 

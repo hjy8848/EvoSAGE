@@ -87,6 +87,8 @@ def build_case_spec(
     if scenario_id == "ecommerce_refund":
         system_variables = path_config.get("system_variables", {})
         classification = path_config.get("Classification_items", [])
+        shipping_status = system_variables.get("ShippingStatus", "Signed")
+        payment_status = "Paid"
         responsibility = classification[2] if len(classification) > 2 else "User"
         reason = classification[3] if len(classification) > 3 else "Reasonable"
         has_document = classification[1] if len(classification) > 1 else None
@@ -96,11 +98,16 @@ def build_case_spec(
             "order": {
                 "order_id": order_id,
                 "product": {"product_id": "SKU-001", "name": "无线耳机", "price": 299},
-                "shipping_status": system_variables.get("ShippingStatus", "Signed"),
-                "payment_status": "Paid",
+                "shipping_status": shipping_status,
+                "payment_status": payment_status,
                 "paid_amount": 299,
                 "refund_status": "None",
-                "refund_eligible": expected_action in {"Refund", "Interception", "CollectionService"},
+                # This is a backend policy fact, not a projection of the GT
+                # action. It is kept internal for action validation.
+                "refund_eligible": (
+                    shipping_status == "Unshipped"
+                    and payment_status == "Paid"
+                ),
                 "return_window_open": True,
                 "responsibility": responsibility,
                 "refund_reasonable": reason,
@@ -121,7 +128,7 @@ def build_case_spec(
         elif expected_action == "Reject":
             expected_outcome["order.refund_status"] = "Rejected"
 
-        actual_shipping_status = system_variables.get("ShippingStatus", "Signed")
+        actual_shipping_status = shipping_status
         if user_policy_mode in {"mistaken", "adversarial_false_claim"}:
             believed_shipping_status = (
                 "Unshipped" if actual_shipping_status != "Unshipped" else "Signed"
