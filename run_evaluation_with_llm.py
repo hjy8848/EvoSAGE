@@ -73,6 +73,8 @@ from framework.llm_integration import (
     get_llm_client,
     LLMUserModel,
     LLMUserMessageGenerator,
+    RuleUserModel,
+    RewritingUserModel,
     LLMJudge,
     MultiModelJudge,
 )
@@ -245,6 +247,8 @@ class LLMEvaluationPipeline:
         judge_model_name: str = "gpt-3.5-turbo",
         max_turns: int = 10,
         verbose: bool = True,
+        user_simulator_mode: str = "llm",
+        legacy_execution: bool = False,
     ):
         """
         初始化LLM评测管道
@@ -276,6 +280,8 @@ class LLMEvaluationPipeline:
         self.eval_mode = eval_mode
         self.max_turns = max_turns
         self.verbose = verbose
+        self.user_simulator_mode = user_simulator_mode
+        self.legacy_execution = legacy_execution
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -517,23 +523,28 @@ class LLMEvaluationPipeline:
             )
             case_spec.metadata["expected_path"] = path_config.get("expected_path", [])
             case_spec.metadata["finals"] = path_config.get("final_output", {})
-        # 当前闭环先落地电商退款；其他五个场景继续走原有兼容流程，
-        # 等各自的 CaseSpec/工具/状态转移适配器完成后再接入。
-        backend_environment = (
-            create_backend(case_spec)
-            if self.scenario_id == "ecommerce_refund"
-            else None
-        )
-        
-        # 使用LLM用户模型
-        user_model = LLMUserModel(
-            profile=user_profile,
-            system_prompt=user_system_prompt,
-            llm_client=self.user_llm_client,
-            temperature=0.8,
-            max_tokens=512,
-            case_spec=case_spec,
-        )
+        backend_environment = create_backend(case_spec)
+
+        if self.user_simulator_mode == "rule":
+            user_model = RuleUserModel(user_profile, user_system_prompt, case_spec)
+        elif self.user_simulator_mode == "rewrite":
+            user_model = RewritingUserModel(
+                profile=user_profile,
+                system_prompt=user_system_prompt,
+                llm_client=self.user_llm_client,
+                temperature=0.8,
+                max_tokens=512,
+                case_spec=case_spec,
+            )
+        else:
+            user_model = LLMUserModel(
+                profile=user_profile,
+                system_prompt=user_system_prompt,
+                llm_client=self.user_llm_client,
+                temperature=0.8,
+                max_tokens=512,
+                case_spec=case_spec,
+            )
         
         # 创建客服模型
         # 根据场景ID获取对应的系统提示词
@@ -559,15 +570,14 @@ class LLMEvaluationPipeline:
             verbose=self.verbose,
             backend_environment=backend_environment,
             case_spec=case_spec,
+            legacy_execution=self.legacy_execution,
         )
         
         # 使用LLM生成初始消息(根据用户画像动态生成,避免固定模板)
         initial_message = user_model.generate_initial_message()
         
-        # 电商后台状态不再进入 Agent 上下文；其余场景在迁移完成前保留兼容视图。
+        # 所有场景的后台状态都只通过正式工具返回，不进入 Agent 上下文。
         context_data = {"initial_observation": case_spec.initial_observation}
-        if self.scenario_id != "ecommerce_refund":
-            context_data["system_info"] = system_info
         
         # 运行模拟
         if self.verbose:
@@ -1670,6 +1680,17 @@ def main():
         help="Judge模型名称 (API模式使用)",
     )
     parser.add_argument(
+        "--user-simulator-mode",
+        default="llm",
+        choices=["llm", "rule", "rewrite"],
+        help="用户模拟器模式：LLM、规则状态机或改写对抗模式",
+    )
+    parser.add_argument(
+        "--legacy-execution",
+        action="store_true",
+        help="兼容旧版：允许 finals.Action 直接触发动作；默认只接受正式动作工具调用",
+    )
+    parser.add_argument(
         "--intents",
         nargs="+",
         help="指定要测试的用户意图 (如不指定则自动测试所有intents)",
@@ -1803,6 +1824,8 @@ def main():
         judge_model_name=args.judge_model_name,
         max_turns=args.max_turns,
         verbose=args.verbose,
+        user_simulator_mode=args.user_simulator_mode,
+        legacy_execution=args.legacy_execution,
     )
     
     # 【投票模式】设置投票judge

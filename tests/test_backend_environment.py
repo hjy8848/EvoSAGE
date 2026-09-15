@@ -1,8 +1,9 @@
 import unittest
 import json
 from types import SimpleNamespace
+from importlib import import_module
 
-from framework.backend import EcommerceBackend, build_case_spec
+from framework.backend import EcommerceBackend, build_case_spec, create_backend
 from framework.models.agent_model import AgentModel
 from framework import get_sop_graph
 
@@ -107,6 +108,90 @@ class EcommerceBackendTests(unittest.TestCase):
         self.assertEqual(output.tool_results[0]["data"]["order_id"], order_id)
         self.assertEqual(output.action, "Refund")
         self.assertEqual(backend.state["order"]["refund_status"], "None")
+
+    def test_formal_action_tool_changes_state_once(self):
+        case = self._case()
+        backend = EcommerceBackend(case)
+        order_id = case.user_knowledge["order_id"]
+
+        class ActionClient:
+            def __init__(self):
+                self.calls = 0
+
+            def generate(self, prompt, **kwargs):
+                self.calls += 1
+                from framework.backend import ToolCall
+                if self.calls == 1:
+                    return SimpleNamespace(
+                        text="",
+                        tool_calls=[ToolCall("q", "query_order", {"order_id": order_id})],
+                        metadata={},
+                    )
+                if self.calls == 2:
+                    return SimpleNamespace(
+                        text="",
+                        tool_calls=[ToolCall("a", "submit_refund", {"order_id": order_id})],
+                        metadata={},
+                    )
+                return SimpleNamespace(
+                    text=json.dumps({
+                        "classification_output": {
+                            "CoreIntention": "ReturnOrRefund",
+                            "ProvidedDocument": True,
+                            "Responsibility": "User",
+                            "RefundReasonable": "Reasonable",
+                            "EmotionStatus": "Calm",
+                        },
+                        "now_path": ["step1", "step2", "step3"],
+                        "finals": {"Action": "Refund"},
+                        "chat": "退款已提交。",
+                    }, ensure_ascii=False),
+                    tool_calls=[],
+                    metadata={},
+                )
+
+        agent = AgentModel(
+            "ecommerce_refund", get_sop_graph("ecommerce_refund"),
+            system_prompt="return JSON", llm_client=ActionClient(),
+            use_llm_for_full_output=True,
+        )
+        output = agent.process_turn("我要退款", backend_environment=backend)
+        action_events = [event for event in backend.get_event_log() if event["event_type"] == "action_execution"]
+        self.assertEqual(len(action_events), 1)
+        self.assertTrue(backend.goal_satisfied())
+        self.assertEqual(output.action, "Refund")
+
+    def test_all_scenario_path_cases_have_query_and_action_state_transitions(self):
+        scenarios = [
+            "online_education", "ecommerce_refund", "telecom_package",
+            "property_service", "logistics_delivery", "airline_refund",
+        ]
+        for scenario in scenarios:
+            module = import_module(f"framework.sop.{scenario}_PathList")
+            paths = module.generate_path_list()
+            for index, path in enumerate(paths):
+                with self.subTest(scenario=scenario, path=index + 1):
+                    case = build_case_spec(scenario, "test_intent", path, f"{scenario}-{index}")
+                    backend = create_backend(case)
+                    record_id = case.user_knowledge.get("order_id") or case.user_knowledge["record_id"]
+                    query_name = next(
+                        tool["function"]["name"]
+                        for tool in backend.get_tool_definitions()
+                        if tool["function"]["name"].startswith("query_")
+                    )
+                    query = backend.execute_tool(query_name, {"record_id": record_id, "order_id": record_id})
+                    self.assertTrue(query.success)
+                    expected_action = path.get("final_output", {}).get("Action")
+                    action_tool = next(
+                        name for name, action in backend.get_action_tool_map().items()
+                        if action == expected_action
+                    )
+                    action = backend.execute_tool(action_tool, {"record_id": record_id, "order_id": record_id})
+                    self.assertTrue(action.success)
+                    if scenario == "online_education" and expected_action == "PLAN":
+                        self.assertFalse(backend.goal_satisfied())
+                    else:
+                        self.assertTrue(backend.goal_satisfied())
 
 
 if __name__ == "__main__":

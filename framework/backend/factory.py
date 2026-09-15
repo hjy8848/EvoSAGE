@@ -5,6 +5,7 @@ import hashlib
 
 from .base import BackendEnvironment
 from .ecommerce import EcommerceBackend
+from .scenario import ScenarioBackend
 from .types import CaseSpec
 
 
@@ -97,16 +98,36 @@ def build_case_spec(
             },
         )
 
-    # Compatibility case for scenarios that will be migrated in later phases.
+    # All remaining scenarios use the same deterministic record contract; the
+    # adapter exposes only scenario-specific tools and public fields.
+    record_id = _stable_id("REC", f"{case_id}:record")
+    customer_id = _stable_id("CUS", case_id)
+    expected_outcome = {"interaction.last_action": expected_action} if expected_action else {}
+    if expected_action == "PLAN":
+        expected_outcome["interaction.plan_created"] = True
     return CaseSpec(
         case_id=case_id,
         scenario=scenario_id,
-        backend_record={"system_info": path_config.get("system_variables", {})},
+        backend_record={
+            "record": {"record_id": record_id, "customer_id": customer_id},
+            "system_info": dict(path_config.get("system_variables", {})),
+            "status": {},
+            "interaction": {
+                "last_action": None,
+                "status": "open",
+                "answer_completed": False,
+            },
+        },
         user_goal={"type": user_intent, "desired_action": expected_action},
-        user_knowledge={"knows_order_id": False},
-        user_policy={"truthfulness": "truthful"},
+        user_knowledge={
+            "record_id": record_id,
+            "customer_id": customer_id,
+            "knows_record_id": True,
+            "knows_customer_id": True,
+        },
+        user_policy={"truthfulness": "truthful", "reveal_record_id_on_request": True},
         initial_observation={},
-        expected_outcome={},
+        expected_outcome=expected_outcome,
         metadata={"user_intent": user_intent, "path_config": path_config},
     )
 
@@ -114,4 +135,4 @@ def build_case_spec(
 def create_backend(case_spec: CaseSpec) -> BackendEnvironment:
     if case_spec.scenario == "ecommerce_refund":
         return EcommerceBackend(case_spec)
-    return BackendEnvironment(case_spec)
+    return ScenarioBackend(case_spec)

@@ -113,3 +113,29 @@ class BackendEvent:
             "state_after": copy.deepcopy(self.state_after),
             "turn_index": self.turn_index,
         }
+
+
+@dataclass
+class UserEnvironmentState:
+    """Explicit customer-side state; hidden facts never enter Agent prompts."""
+
+    goal: Dict[str, Any] = field(default_factory=dict)
+    facts: Dict[str, Any] = field(default_factory=dict)
+    known_facts: Dict[str, Any] = field(default_factory=dict)
+    revealed_facts: List[str] = field(default_factory=list)
+    emotion: str = "calm"
+    satisfaction: float = 0.5
+    resolution_status: str = "unsolved"
+    escalation_status: str = "none"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "goal": copy.deepcopy(self.goal),
+            "facts": copy.deepcopy(self.facts),
+            "known_facts": copy.deepcopy(self.known_facts),
+            "revealed_facts": list(self.revealed_facts),
+            "emotion": self.emotion,
+            "satisfaction": self.satisfaction,
+            "resolution_status": self.resolution_status,
+            "escalation_status": self.escalation_status,
+        }

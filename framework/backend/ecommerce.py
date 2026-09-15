@@ -10,7 +10,7 @@ class EcommerceBackend(BackendEnvironment):
     scenario_id = "ecommerce_refund"
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
-        return [
+        definitions = [
             tool_definition(
                 "query_order",
                 "查询订单的物流、支付和售后状态。需要用户提供准确订单号。",
@@ -36,6 +36,35 @@ class EcommerceBackend(BackendEnvironment):
                 ["order_id"],
             ),
         ]
+        action_properties = {
+            "order_id": {"type": "string", "description": "已核验的订单号"},
+        }
+        for tool_name, description in {
+            "submit_refund": "提交退款申请",
+            "intercept_shipment": "申请拦截物流",
+            "exchange_order": "提交换货申请",
+            "schedule_pickup": "安排上门取件",
+            "request_document": "要求补充售后凭证",
+            "charge_fee": "要求支付换货运费",
+            "comfort_customer": "记录安抚处理",
+            "comfort_and_compensate": "记录安抚和赔偿处理",
+            "reject_request": "拒绝售后请求",
+        }.items():
+            definitions.append(tool_definition(tool_name, description, action_properties))
+        return definitions
+
+    def get_action_tool_map(self) -> Dict[str, str]:
+        return {
+            "submit_refund": "Refund",
+            "intercept_shipment": "Interception",
+            "exchange_order": "Exchange",
+            "schedule_pickup": "CollectionService",
+            "request_document": "Supplementary",
+            "charge_fee": "PayFee",
+            "comfort_customer": "Comfort",
+            "comfort_and_compensate": "Comfort+Compensation",
+            "reject_request": "Reject",
+        }
 
     def _order(self) -> Dict[str, Any]:
         return self.state.get("order", self.state)
@@ -116,6 +145,14 @@ class EcommerceBackend(BackendEnvironment):
         return super()._execute_tool(tool_name, arguments)
 
     def _execute_action(self, action_name: str, arguments: Dict[str, Any]) -> ActionResult:
+        requested_order_id = arguments.get("order_id") or self.selected_records.get("order_id")
+        if self.selected_records.get("order_id") != requested_order_id:
+            return ActionResult(
+                success=False,
+                action_name=action_name,
+                error_code="order_not_verified",
+                error_message="执行售后动作前必须先查询有效订单。",
+            )
         order = self._selected_order(arguments)
         if not order:
             return ActionResult(

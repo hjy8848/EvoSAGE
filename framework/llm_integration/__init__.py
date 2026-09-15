@@ -26,6 +26,8 @@ from .llm_client import (
 from .llm_user_model import (
     LLMUserModel,
     LLMUserMessageGenerator,
+    RuleUserModel,
+    RewritingUserModel,
 )
 
 from .llm_judge import (
@@ -44,6 +46,8 @@ __all__ = [
     "EXAMPLE_CONFIG",
     "LLMUserModel",
     "LLMUserMessageGenerator",
+    "RuleUserModel",
+    "RewritingUserModel",
     "LLMJudge",
     "MultiModelJudge",
     "MultiModelVotingJudge",

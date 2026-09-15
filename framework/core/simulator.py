@@ -44,13 +44,14 @@ class SimulationResult:
     # 对话过程
     turns: List[SimulationTurn] = field(default_factory=list)
     
-    # 上下文数据(包含system_info等)
+    # Agent 可见的公开上下文；隐藏 backend_record 不放在这里
     context_data: Dict[str, Any] = field(default_factory=dict)
 
     # 结构化案例与后端审计轨迹。案例可供评估器使用，但不会注入 Agent prompt。
     case_spec: Optional[Dict[str, Any]] = None
     backend_events: List[Dict[str, Any]] = field(default_factory=list)
     backend_final_state: Dict[str, Any] = field(default_factory=dict)
+    user_environment_state: Dict[str, Any] = field(default_factory=dict)
     
     # 终止信息
     termination_reason: str = ""
@@ -85,6 +86,7 @@ class SimulationResult:
             "case_spec": self.case_spec,
             "backend_events": self.backend_events,
             "backend_final_state": self.backend_final_state,
+            "user_environment_state": self.user_environment_state,
             "duration_seconds": self.duration_seconds,
             "turns": [
                 {
@@ -115,6 +117,7 @@ class DialogueSimulator:
         backend_environment: Optional[BackendEnvironment] = None,
         case_spec: Optional[CaseSpec] = None,
         max_tool_steps: int = 8,
+        legacy_execution: bool = False,
     ):
         """
         初始化对话模拟器
@@ -132,6 +135,7 @@ class DialogueSimulator:
         self.backend_environment = backend_environment
         self.case_spec = case_spec
         self.max_tool_steps = max_tool_steps
+        self.legacy_execution = legacy_execution
         
         self.simulation_turn = 0
     
@@ -221,6 +225,11 @@ class DialogueSimulator:
                 result.goal_solved = self.backend_environment.goal_satisfied()
             else:
                 result.goal_solved = getattr(self.user_model, "problem_status", "") == "solved"
+            if hasattr(self.user_model, "environment_state"):
+                state = self.user_model.environment_state
+                result.user_environment_state = (
+                    state.to_dict() if hasattr(state, "to_dict") else dict(state)
+                )
             if result.goal_solved:
                 result.final_status = "goal_solved"
             elif not result.termination_reason:
@@ -293,7 +302,7 @@ class DialogueSimulator:
             )
         
         # 结构化动作执行：只有模型明确给出最终动作时，才触发真实后端状态转移。
-        if self.backend_environment is not None and agent_output.action:
+        if self.legacy_execution and self.backend_environment is not None and agent_output.action:
             action_result = self.backend_environment.execute_action(
                 agent_output.action,
                 arguments=agent_output.action_parameters,

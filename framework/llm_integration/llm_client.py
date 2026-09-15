@@ -200,6 +200,7 @@ class VLLMLocalClient(LLMClient):
                         tokens=tokens,
                         metadata={
                             "finish_reason": data["choices"][0].get("finish_reason"),
+                            "attempts": attempt + 1,
                         }
                     )
                 else:
@@ -353,6 +354,7 @@ class VLLMChatClient(LLMClient):
                         metadata={
                             "finish_reason": data["choices"][0].get("finish_reason"),
                             "assistant_message": message,
+                            "attempts": attempt + 1,
                         },
                         tool_calls=tool_calls,
                         raw_response=data,
@@ -510,6 +512,7 @@ class OpenAIAPIClient(LLMClient):
                         metadata={
                             "finish_reason": data["choices"][0].get("finish_reason"),
                             "assistant_message": message,
+                            "attempts": attempt + 1,
                         },
                         tool_calls=tool_calls,
                         raw_response=data,

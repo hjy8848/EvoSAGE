@@ -43,8 +43,10 @@ from .backend import (
     BackendEnvironment,
     CaseSpec,
     EcommerceBackend,
+    ScenarioBackend,
     ToolCall,
     ToolResult,
+    UserEnvironmentState,
     build_case_spec,
     create_backend,
 )
@@ -69,8 +71,10 @@ __all__ = [
     "BackendEnvironment",
     "CaseSpec",
     "EcommerceBackend",
+    "ScenarioBackend",
     "ToolCall",
     "ToolResult",
+    "UserEnvironmentState",
     "build_case_spec",
     "create_backend",
 ]

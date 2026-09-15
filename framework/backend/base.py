@@ -34,6 +34,13 @@ class BackendEnvironment:
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         return []
 
+    def get_action_tool_map(self) -> Dict[str, str]:
+        """Return formal-tool-name -> canonical SOP action name."""
+        return {}
+
+    def is_action_tool(self, tool_name: str) -> bool:
+        return tool_name in self.get_action_tool_map()
+
     def execute_tool(
         self,
         tool_name: str,
@@ -41,6 +48,21 @@ class BackendEnvironment:
         turn_index: Optional[int] = None,
         call_id: Optional[str] = None,
     ) -> ToolResult:
+        if self.is_action_tool(tool_name):
+            action_name = self.get_action_tool_map()[tool_name]
+            action_result = self.execute_action(
+                action_name,
+                arguments or {},
+                turn_index=turn_index,
+            )
+            return ToolResult(
+                success=action_result.success,
+                tool_name=tool_name,
+                data=copy.deepcopy(action_result.data),
+                error_code=action_result.error_code,
+                error_message=action_result.error_message,
+                call_id=call_id,
+            )
         before = self.get_state_snapshot()
         try:
             result = self._execute_tool(tool_name, arguments or {})
@@ -120,6 +142,13 @@ class BackendEnvironment:
             return False
         expected = self.case_spec.expected_outcome
         if not expected:
+            return False
+        if (
+            self.case_spec.scenario == "online_education"
+            and self._lookup(self.state, "interaction.last_action") == "PLAN"
+            and not self._lookup(self.state, "interaction.answer_completed")
+        ):
+            # Resource allocation is not itself an answer to a knowledge question.
             return False
         return all(self._lookup(self.state, key) == value for key, value in expected.items())
 

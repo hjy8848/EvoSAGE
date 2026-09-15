@@ -14,6 +14,7 @@ import logging
 from ..models import UserModel, UserProfile
 from .llm_client import LLMClient
 from ..backend.types import CaseSpec
+from ..backend.types import UserEnvironmentState
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,11 @@ class LLMUserModel(UserModel):
         self.max_tokens = max_tokens
         self.case_spec = case_spec
         self.backend_events = []
+        self.environment_state = UserEnvironmentState(
+            goal=case_spec.user_goal if case_spec else {"type": profile.user_intent},
+            facts=case_spec.user_knowledge if case_spec else {},
+            known_facts=case_spec.user_knowledge if case_spec else {},
+        )
         
         # 新增: 追踪问题是否已解决
         self.problem_status = "unsolved"  # unsolved, partially_solved, solved
@@ -77,8 +83,20 @@ class LLMUserModel(UserModel):
         if public_event["event_type"] == "action_execution":
             result = public_event["result"] or {}
             if result.get("success"):
-                self.problem_status = "solved"
-                self.problem_resolved = True
+                desired = (self.case_spec.expected_outcome if self.case_spec else {})
+                action_name = result.get("action_name")
+                if desired and action_name:
+                    self.problem_status = "partially_solved"
+                    self.environment_state.resolution_status = "partially_solved"
+                else:
+                    self.problem_status = "solved"
+                    self.problem_resolved = True
+                    self.environment_state.resolution_status = "solved"
+                self.environment_state.satisfaction = min(
+                    1.0, self.environment_state.satisfaction + 0.2
+                )
+                if action_name in {"TransHuman", "TRANSFER_HUMAN"}:
+                    self.environment_state.escalation_status = "requested"
     
     def generate_initial_message(self) -> str:
         """
@@ -318,6 +336,8 @@ class LLMUserModel(UserModel):
         visible = {}
         if knowledge.get("knows_order_id") and knowledge.get("order_id"):
             visible["order_id"] = knowledge["order_id"]
+        if knowledge.get("knows_record_id") and knowledge.get("record_id"):
+            visible["record_id"] = knowledge["record_id"]
         if knowledge.get("knows_customer_id") and knowledge.get("customer_id"):
             visible["customer_id"] = knowledge["customer_id"]
         if knowledge.get("product_name"):
@@ -326,6 +346,9 @@ class LLMUserModel(UserModel):
             visible["user_belief_about_shipping"] = knowledge["believes_shipping_status"]
         visible["can_reveal_order_id_on_request"] = policy.get(
             "reveal_order_id_on_request", False
+        )
+        visible["can_reveal_record_id_on_request"] = policy.get(
+            "reveal_record_id_on_request", False
         )
         visible["can_reveal_customer_id_on_request"] = policy.get(
             "reveal_customer_id_on_request", False
@@ -460,6 +483,56 @@ class LLMUserModel(UserModel):
         return "好的，谢谢你的帮助。"
 
 
+class RuleUserModel(UserModel):
+    """Deterministic customer policy used as a non-LLM evaluation baseline."""
+
+    def __init__(self, profile: UserProfile, system_prompt: str = "", case_spec: Optional[CaseSpec] = None):
+        super().__init__(profile, system_prompt)
+        self.case_spec = case_spec
+        self.backend_events = []
+        self.environment_state = UserEnvironmentState(
+            goal=case_spec.user_goal if case_spec else {"type": profile.user_intent},
+            facts=case_spec.user_knowledge if case_spec else {},
+            known_facts=case_spec.user_knowledge if case_spec else {},
+        )
+        self.problem_status = "unsolved"
+
+    def generate_initial_message(self) -> str:
+        goal = self.profile.user_intent.replace("_", " ")
+        return f"您好，我想咨询{goal}，请帮我核实并处理。"
+
+    def observe_backend_event(self, event: Dict[str, Any]) -> None:
+        self.backend_events.append({
+            "event_type": event.get("event_type"),
+            "name": event.get("name"),
+            "result": event.get("result", {}),
+        })
+        if event.get("event_type") == "action_execution" and event.get("result", {}).get("success"):
+            self.environment_state.resolution_status = "partially_solved"
+            self.environment_state.satisfaction = min(1.0, self.environment_state.satisfaction + 0.15)
+
+    def generate_next_message(self, agent_last_message: str, turn_count: int, context=None) -> str:
+        if self.environment_state.resolution_status == "solved":
+            return "谢谢，问题解决了，再见。"
+        if any(token in agent_last_message for token in ["订单号", "记录编号", "客户号"]):
+            knowledge = self.case_spec.user_knowledge if self.case_spec else {}
+            return knowledge.get("order_id") or knowledge.get("record_id") or "我先核对一下编号。"
+        if self.backend_events and self.backend_events[-1]["event_type"] == "action_execution":
+            return "请确认这个处理是否已经生效？"
+        return "请先帮我核实相关状态，再告诉我可以怎么处理。"
+
+
+class RewritingUserModel(LLMUserModel):
+    """LLM customer variant that requests paraphrased/adversarial expressions."""
+
+    def _build_initial_message_prompt(self) -> str:
+        return super()._build_initial_message_prompt() + "\n请使用与常见模板不同的自然表达。"
+
+    def _build_generation_prompt(self, agent_last_message: str, turn_count: int, context=None) -> str:
+        return super()._build_generation_prompt(agent_last_message, turn_count, context) + \
+            "\n请避免复用上一轮句式，保持业务事实不变。\n"
+
+
 class LLMUserMessageGenerator:
     """LLM用户消息生成器"""
     
@@ -507,7 +580,7 @@ class LLMUserMessageGenerator:
         Returns:
             str: 生成的用户消息
         """
-        if not isinstance(user_model, LLMUserModel):
+        if not isinstance(user_model, LLMUserModel) and not hasattr(user_model, "generate_next_message"):
             # 如果不是LLMUserModel，创建临时的生成提示词
             prompt = self._build_simple_prompt(
                 user_intent=user_model.profile.user_intent,
@@ -515,11 +588,18 @@ class LLMUserMessageGenerator:
                 agent_message=agent_last_message,
                 turn_count=turn_count,
             )
-        else:
+        elif isinstance(user_model, LLMUserModel):
             # 使用LLMUserModel的生成逻辑
             return user_model.generate_next_message(
                 agent_last_message=agent_last_message,
                 turn_count=turn_count,
+                context=kwargs,
+            )
+        else:
+            return user_model.generate_next_message(
+                agent_last_message=agent_last_message,
+                turn_count=turn_count,
+                context=kwargs,
             )
         
         try:

@@ -271,6 +271,7 @@ class AgentTurnOutput:
             "tool_calls": self.tool_calls,
             "tool_results": self.tool_results,
             "action_result": self.action_result,
+            "metadata": self.metadata,
         }
     
     def to_dict_legacy(self) -> Dict[str, Any]:
@@ -290,6 +291,7 @@ class AgentTurnOutput:
             "tool_calls": self.tool_calls,
             "tool_results": self.tool_results,
             "action_result": self.action_result,
+            "metadata": self.metadata,
         }
 
 
@@ -964,8 +966,16 @@ class AgentModel:
             },
             ensure_ascii=False,
         )
+        tool_policy = ""
+        if backend_environment is not None:
+            tool_policy = (
+                "\n\n【环境工具规则】\n"
+                "后台状态不可猜测，必须先调用查询工具。"
+                "状态变更必须调用动作工具；仅在 chat 或 finals 中声明动作不算执行成功。"
+                "工具失败时必须依据错误结果处理，不能把失败当成功。"
+            )
         messages = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": self.system_prompt + tool_policy},
             {"role": "user", "content": f"【对话历史】\n{dialogue_context}\n\n【当前用户消息】\n{user_message}\n\n【已获得的公开后台观察】\n{public_observations}"}
         ]
         
@@ -1016,6 +1026,8 @@ class AgentModel:
                             )
                     except (TypeError, ValueError, json.JSONDecodeError):
                         response_tool_calls = []
+                if response_tool_calls and backend_environment is not None and tool_round >= max_tool_steps:
+                    turn_output.metadata["tool_loop_limit"] = True
                 if not response_tool_calls or backend_environment is None or tool_round >= max_tool_steps:
                     break
 
@@ -1050,6 +1062,12 @@ class AgentModel:
                     )
                     turn_output.tool_calls.append(call.to_dict())
                     turn_output.tool_results.append(tool_result.to_dict())
+                    if backend_environment.is_action_tool(call.name):
+                        turn_output.action = backend_environment.get_action_tool_map()[call.name]
+                        if tool_result.success:
+                            turn_output.action_result = tool_result.to_dict()
+                        else:
+                            turn_output.metadata.setdefault("failed_action_tools", []).append(call.name)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.call_id,
@@ -1058,6 +1076,13 @@ class AgentModel:
                     })
                     self.context_data.setdefault("tool_observations", []).append(tool_result.to_dict())
                 tool_round += 1
+
+            if hasattr(response, "metadata") and isinstance(response.metadata, dict):
+                turn_output.metadata["llm_request"] = {
+                    key: response.metadata.get(key)
+                    for key in ("finish_reason", "attempts")
+                    if key in response.metadata
+                }
             
             # print(f"[DEBUG] === LLM调用成功 ===")
             # print(f"[DEBUG] Response type: {type(response)}")
@@ -1300,6 +1325,8 @@ class AgentModel:
                         if observation.get("tool_name") == "query_customer_profile":
                             if data_fields.get("credit_level") is not None:
                                 system_info["CreditLevel"] = data_fields["credit_level"]
+                        if isinstance(data_fields.get("system_info"), dict):
+                            system_info.update(data_fields["system_info"])
                     if system_info:
                         rule_context = dict(rule_context)
                         rule_context["system_info"] = system_info
