@@ -3,8 +3,10 @@ import json
 from types import SimpleNamespace
 
 from framework.backend import EcommerceBackend, build_case_spec, create_backend
+from framework.backend.factory import _build_required_backend_verifications
 from framework.models.agent_model import AgentModel
 from framework import get_sop_graph
+from framework.sop.ecommerce_refund_PathList import generate_path_list
 
 
 class EcommerceBackendTests(unittest.TestCase):
@@ -57,6 +59,29 @@ class EcommerceBackendTests(unittest.TestCase):
         )
         self.assertFalse(signed_refund.backend_record["order"]["refund_eligible"])
         self.assertTrue(unshipped_reject.backend_record["order"]["refund_eligible"])
+
+    def test_pathlist_required_verifications_match_decision_stages(self):
+        for path_index, path_config in enumerate(generate_path_list(), 1):
+            expected_fields = set()
+            expected_path = set(path_config.get("expected_path", []))
+            if "step3" in expected_path:
+                expected_fields.add("ShippingStatus")
+            if "step4" in expected_path:
+                expected_fields.add("CreditLevel")
+            if "step_payment" in expected_path:
+                expected_fields.add("PaymentStatus")
+
+            actual_fields = {
+                item["backend_field"]
+                for item in _build_required_backend_verifications(
+                    "ecommerce_refund", path_config
+                )
+            }
+            self.assertEqual(
+                actual_fields,
+                expected_fields,
+                f"PathList {path_index} verification plan drifted from expected_path",
+            )
 
     def test_action_requires_verification_and_mutates_state(self):
         backend = EcommerceBackend(self._case())
