@@ -501,17 +501,6 @@ class LLMEvaluationPipeline:
             user_profile.user_id,
         )
         
-        # 生成system_info
-        if path_config:
-            # 从path_config生成system_info
-            system_info = self._generate_system_info_from_path_config(path_config)
-        else:
-            # 使用原有逻辑，根据场景获取初始状态
-            system_info = get_initial_state_for_intent_by_scenario(
-                self.scenario_id,
-                user_intent
-            )
-
         # CaseSpec 是唯一的案例真值来源；Agent 只接收公开观察和工具结果。
         case_spec = build_case_spec(
             scenario_id=self.scenario_id,
@@ -520,12 +509,6 @@ class LLMEvaluationPipeline:
             user_id=user_id,
             user_policy_mode=self.user_policy_mode,
         )
-        if path_config:
-            case_spec.metadata["classification_dict"] = _path_config_to_classification(
-                self.scenario_config, path_config
-            )
-            case_spec.metadata["expected_path"] = path_config.get("expected_path", [])
-            case_spec.metadata["finals"] = path_config.get("final_output", {})
         # 本轮只把 ecommerce_refund 接入 authoritative backend 闭环。
         # 其他场景继续使用原兼容路径，避免在本轮扩大迁移范围。
         backend_environment = (
@@ -590,6 +573,13 @@ class LLMEvaluationPipeline:
         # 未迁移场景保留旧 system_info 兼容视图。
         context_data = {"initial_observation": case_spec.initial_observation}
         if backend_environment is None:
+            if path_config:
+                system_info = self._generate_system_info_from_path_config(path_config)
+            else:
+                system_info = get_initial_state_for_intent_by_scenario(
+                    self.scenario_id,
+                    user_intent
+                )
             context_data["system_info"] = system_info
         
         # 运行模拟

@@ -7,11 +7,27 @@ from .base import BackendEnvironment
 from .ecommerce import EcommerceBackend
 from .scenario import ScenarioBackend
 from .types import CaseSpec
+from ..config import get_scenario_config
 
 
 def _stable_id(prefix: str, value: str) -> str:
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10].upper()
     return f"{prefix}-{digest}"
+
+
+def _build_legacy_gt(scenario_id: str, path_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize PathList truth into the evaluator's stable legacy shape."""
+    values = path_config.get("Classification_items", [])
+    field_names = list(get_scenario_config(scenario_id).classification_fields.keys())
+    classification = {
+        field_name: values[index] if index < len(values) else None
+        for index, field_name in enumerate(field_names)
+    }
+    return {
+        "classification": classification,
+        "expected_path": list(path_config.get("expected_path", [])),
+        "finals": dict(path_config.get("final_output", {})),
+    }
 
 
 def build_case_spec(
@@ -28,6 +44,7 @@ def build_case_spec(
     incrementally without changing the public runner API.
     """
     path_config = path_config or {}
+    legacy_gt = _build_legacy_gt(scenario_id, path_config)
     case_id = _stable_id("CASE", f"{scenario_id}:{user_intent}:{user_id}")
     expected_action = path_config.get("final_output", {}).get("Action", "")
 
@@ -106,6 +123,12 @@ def build_case_spec(
             metadata={
                 "user_intent": user_intent,
                 "path_config": path_config,
+                "legacy_path_config": path_config,
+                "legacy_gt": legacy_gt,
+                # Keep the flat aliases for existing consumers.
+                "classification_dict": legacy_gt["classification"],
+                "expected_path": legacy_gt["expected_path"],
+                "finals": legacy_gt["finals"],
                 "classification": classification,
             },
         )
@@ -140,7 +163,15 @@ def build_case_spec(
         user_policy={"truthfulness": "truthful", "reveal_record_id_on_request": True},
         initial_observation={},
         expected_outcome=expected_outcome,
-        metadata={"user_intent": user_intent, "path_config": path_config},
+        metadata={
+            "user_intent": user_intent,
+            "path_config": path_config,
+            "legacy_path_config": path_config,
+            "legacy_gt": legacy_gt,
+            "classification_dict": legacy_gt["classification"],
+            "expected_path": legacy_gt["expected_path"],
+            "finals": legacy_gt["finals"],
+        },
     )
 
 

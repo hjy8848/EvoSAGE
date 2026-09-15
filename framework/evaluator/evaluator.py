@@ -636,9 +636,8 @@ class Evaluator:
             if index < len(simulation_result.turns)
         ]
         text = " ".join(texts).strip()
-        case_spec = getattr(simulation_result, "case_spec", None) or {}
-        case = (case_spec.get("metadata", {}) if isinstance(case_spec, dict) else {})
-        if simulation_result.scenario_id == "ecommerce_refund" and case_spec:
+        case = Evaluator._get_benchmark_case(simulation_result)
+        if simulation_result.scenario_id == "ecommerce_refund" and case:
             if getattr(simulation_result, "goal_solved", False):
                 return 1.0, {
                     "reason": "backend_expected_outcome_satisfied",
@@ -724,11 +723,27 @@ class Evaluator:
             legacy = (getattr(simulation_result, "context_data", {}) or {}).get("benchmark_case", {})
             if legacy:
                 return legacy
+        legacy_gt = metadata.get("legacy_gt", {})
+        if legacy_gt:
+            return {
+                "classification": legacy_gt.get(
+                    "classification", legacy_gt.get("classification_dict", {})
+                ),
+                "now_path": legacy_gt.get("expected_path", []),
+                "finals": legacy_gt.get("finals", {}),
+                "path_config": metadata.get(
+                    "legacy_path_config", metadata.get("path_config", {})
+                ),
+            }
         return {
-            "classification": metadata.get("classification_dict", {}),
+            "classification": metadata.get(
+                "classification_dict", metadata.get("classification", {})
+            ),
             "now_path": metadata.get("expected_path", []),
             "finals": metadata.get("finals", {}),
-            "path_config": metadata.get("path_config", {}),
+            "path_config": metadata.get(
+                "legacy_path_config", metadata.get("path_config", {})
+            ),
         }
 
     @staticmethod
@@ -791,8 +806,8 @@ class Evaluator:
         action_events = [e for e in events if e.get("event_type") == "action_execution"]
         case_spec = getattr(simulation_result, "case_spec", None) or {}
         knowledge = case_spec.get("user_knowledge", {})
-        metadata = case_spec.get("metadata", {})
-        expected_action = metadata.get("finals", {}).get("Action")
+        benchmark_case = Evaluator._get_benchmark_case(simulation_result)
+        expected_action = benchmark_case.get("finals", {}).get("Action")
         expected_order_id = knowledge.get("order_id")
         query_order_events = [e for e in tool_events if e.get("name") == "query_order"]
         valid_order_queries = [
@@ -854,8 +869,8 @@ class Evaluator:
             return []
         case_spec = getattr(simulation_result, "case_spec", None) or {}
         knowledge = case_spec.get("user_knowledge", {})
-        metadata = case_spec.get("metadata", {})
-        expected_action = metadata.get("finals", {}).get("Action")
+        benchmark_case = Evaluator._get_benchmark_case(simulation_result)
+        expected_action = benchmark_case.get("finals", {}).get("Action")
         events = getattr(simulation_result, "backend_events", []) or []
         tool_events = [e for e in events if e.get("event_type") == "tool_call"]
         action_events = [e for e in events if e.get("event_type") == "action_execution"]
@@ -1055,12 +1070,10 @@ class Evaluator:
                     # 【诊断日志】检查classification是否为空
                     if not gt_classification:
                         logger.info(f"Turn {turn_idx}:")
-                        logger.warning(f"  - gt_classification: {gt_data.get('classification')}")
-                        logger.info(f"  - agent_classification: {agent_output.classification_output if hasattr(agent_output, 'classification_output') else None}")
-                        logger.info(f"  - gt_now_path: {gt_data.get('now_path')}")
-                        logger.info(f"  - agent_path: {agent_path}")
-                        logger.info(f"  - gt_finals: {gt_data.get('finals')}")
-                        logger.info(f"  - agent_finals: {agent_finals}")
+                        logger.warning(f"  - judge_classification: {gt_classification}")
+                        logger.info(f"  - benchmark_classification: {benchmark_case.get('classification', {})}")
+                        logger.info(f"  - benchmark_path: {benchmark_case.get('now_path', [])}")
+                        logger.info(f"  - benchmark_finals: {benchmark_case.get('finals', {})}")
                         logger.warning(f"⚠️ Turn {turn_idx} 警告: classification为空或为False! comprehensive_result={comprehensive_result}")
                     else:
                         logger.debug(f"Turn {turn_idx} classification字段详情: {list(gt_classification.keys()) if isinstance(gt_classification, dict) else type(gt_classification)}")

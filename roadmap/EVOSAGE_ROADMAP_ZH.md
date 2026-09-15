@@ -204,7 +204,7 @@ Evaluator（工具核验 + 状态结果 + 对话指标）
 - `goal_solved` 由后端期望状态决定，不再只由“已解决”等关键词决定；
 - 新增 `backend_verification` 指标，检查是否用正确订单号查询并完成目标状态转移；
 - 旧版 PathList 不含 `action_*` 节点的问题已在路径评分中兼容；
-- 现有单元测试覆盖后端查询、动作前置核验、状态转移和 Agent 工具循环；本轮新增 8 个 Ecommerce E2E 验收测试。
+- 现有回归测试覆盖后端查询、动作前置核验、状态转移和 Agent 工具循环；本轮新增 8 个 Ecommerce E2E 验收测试，并增加从 `LLMEvaluationPipeline.run_single_simulation` 主入口捕获 runner 接线的集成测试。
 
 本轮验收范围锁定为 `ecommerce_refund`：runner 只为该场景创建并传递 `EcommerceBackend`，其余五个场景不进入新的 environment evaluation。仓库中保留的通用适配器不视为本轮完成项，真实 API 的电商退款 E2E trace 仍是下一步验收工作。
 
@@ -234,7 +234,7 @@ Evaluator 计算 legacy/environment 双轨结果
 
 Agent 只看到 `system_prompt`、对话历史、`initial_observation` 和公开工具结果；完整 `backend_record`、`expected_outcome`、GT path/action 和评测 metadata 只保留给 Simulator/Evaluator。`predicted_path`/`predicted_action` 来自 Agent 输出，`executed_path`/`executed_action` 由 Backend event log 重建。真实目标完成只由 `expected_outcome` 与 Backend 最终状态判断，关键词结果仅保留在 legacy `goal_fulfillment` 中。
 
-本轮新增的 Ecommerce E2E 覆盖：隐藏状态防泄漏、不同 Backend 的初始输入一致、用户错误陈述、查询结果误判、假装退款成功、真实退款成功、拒绝模型自报 executed_path，以及同一 Backend 的完整 trace。当前本地 `unittest` 结果为 14/14 通过。
+本轮新增的 Ecommerce E2E 覆盖：隐藏状态防泄漏、不同 Backend 的初始输入一致、用户错误陈述、查询结果误判、假装退款成功、真实退款成功、拒绝模型自报 executed_path、同一 Backend 的完整 trace，以及 runner 主入口接线。当前本地 `unittest discover -s tests` 结果为 15/15 通过。
 
 ## 3. 我们真正要进化什么
 

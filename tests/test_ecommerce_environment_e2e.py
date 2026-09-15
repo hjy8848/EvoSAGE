@@ -1,15 +1,19 @@
 import copy
 import json
+import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from framework import get_sop_graph
 from framework.backend import ToolCall, build_case_spec, create_backend
+from framework.backend.factory import _stable_id
 from framework.core.simulator import DialogueSimulator
 from framework.evaluator.evaluator import Evaluator
 from framework.models import UserModel, UserProfile
 from framework.models.agent_model import AgentModel
 from framework.prompts import ecommerce_refund_prompts
+import run_evaluation_with_llm as runner_module
 
 
 class ScriptedClient:
@@ -72,17 +76,6 @@ def make_case(shipping_status="Signed", credit_level="Low", expected_action="Col
     case = build_case_spec(
         "ecommerce_refund", "refund_request", path, user_id="e2e-user"
     )
-    case.metadata.update({
-        "classification_dict": {
-            "CoreIntention": "ReturnOrRefund",
-            "ProvidedDocument": True,
-            "Responsibility": "User",
-            "RefundReasonable": "Reasonable",
-            "EmotionStatus": "Calm",
-        },
-        "expected_path": path["expected_path"],
-        "finals": path["final_output"],
-    })
     return case
 
 
@@ -97,6 +90,92 @@ def make_agent(client):
 
 
 class EcommerceEnvironmentE2ETests(unittest.TestCase):
+    def test_runner_main_entry_wires_case_backend_and_legacy_gt(self):
+        path_config = {
+            "Classification_items": ["ReturnOrRefund", True, "User", "Reasonable", "Calm"],
+            "system_variables": {"ShippingStatus": "Unshipped", "CreditLevel": "High"},
+            "expected_path": ["step1", "step2", "step3"],
+            "final_output": {"Action": "Refund"},
+        }
+        captured = {}
+        case_id = _stable_id("CASE", "ecommerce_refund:refund_before_shipping:runner-test")
+        order_id = _stable_id("ORD", case_id)
+        client = ScriptedClient([
+            response_with_tools(ToolCall("q", "query_order", {"order_id": order_id})),
+            response_with_tools(ToolCall("a", "submit_refund", {"order_id": order_id})),
+            response_with_json("Refund", path_config["expected_path"], "退款已提交。"),
+        ])
+
+        class TestPipeline(runner_module.LLMEvaluationPipeline):
+            def _init_llm_clients(self, *args, **kwargs):
+                self.user_llm_client = client
+                self.agent_llm_client = client
+                self.judge_llm_client = None
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.judge_model = SimpleNamespace(
+                    evaluate_turn_comprehensive=lambda **_kwargs: {
+                        "classification": {
+                            "CoreIntention": "ReturnOrRefund",
+                            "ProvidedDocument": True,
+                            "Responsibility": "User",
+                            "RefundReasonable": "Reasonable",
+                            "EmotionStatus": "Calm",
+                        },
+                        "chat_quality_score": 0.8,
+                        "chat_quality_dimensions": {},
+                    },
+                    evaluate_chat_quality=lambda **_kwargs: (0.8, {}),
+                )
+
+        original_simulator = runner_module.DialogueSimulator
+
+        class CapturingSimulator(original_simulator):
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+                super().__init__(*args, **kwargs)
+
+            def run(self, *args, **kwargs):
+                captured["run_context_data"] = kwargs.get("context_data", {})
+                return super().run(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as output_dir, patch.object(
+            runner_module, "DialogueSimulator", CapturingSimulator
+        ):
+            pipeline = TestPipeline(
+                scenario_id="ecommerce_refund",
+                model_name="fake",
+                output_dir=output_dir,
+                max_turns=1,
+                verbose=False,
+                user_simulator_mode="rule",
+            )
+            result, report = pipeline.run_single_simulation(
+                "refund_before_shipping", user_id="runner-test", path_config=path_config
+            )
+
+        self.assertIsNotNone(captured["backend_environment"])
+        self.assertIsNotNone(captured["case_spec"])
+        self.assertIs(captured["backend_environment"].case_spec, captured["case_spec"])
+        self.assertNotIn("system_info", captured["run_context_data"])
+        self.assertNotIn("expected_outcome", captured["run_context_data"])
+        self.assertEqual(result.case_spec["metadata"]["legacy_gt"]["finals"]["Action"], "Refund")
+        self.assertTrue(result.case_spec["metadata"]["legacy_gt"]["classification"])
+        self.assertTrue(result.case_spec["metadata"]["legacy_gt"]["expected_path"])
+        first_messages = json.dumps(client.requests[0]["messages"], ensure_ascii=False)
+        self.assertNotIn("Signed", first_messages)
+        self.assertNotIn("Low", first_messages)
+        self.assertTrue(any(message.get("role") == "tool" for message in client.requests[1]["messages"]))
+        self.assertIn("Unshipped", json.dumps(client.requests[1]["messages"], ensure_ascii=False))
+        self.assertEqual([event["name"] for event in result.backend_events], [
+            "query_order", "submit_refund", "Refund"
+        ])
+        self.assertEqual(result.backend_final_state["order"]["refund_status"], "Approved")
+        self.assertGreater(report.legacy_score, 0.0)
+        self.assertGreater(report.environment_score, 0.0)
+        self.assertEqual(report.environment_goal_fulfillment, 1.0)
+
     def test_hidden_backend_state_is_not_in_initial_agent_messages(self):
         case = make_case("Signed", "Low")
         client = ScriptedClient([response_with_json("Refund")])
