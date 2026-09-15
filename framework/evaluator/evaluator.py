@@ -49,6 +49,7 @@ class EvaluationReport:
     
     # 综合得分
     overall_score: float = 0.0           # 总体得分
+    details: Dict[str, Any] = field(default_factory=dict)
     
     # 评测信息
     evaluation_timestamp: str = ""       # 评测时间戳
@@ -74,6 +75,7 @@ class EvaluationReport:
                 for score in self.metric_scores
             ],
             "overall_score": self.overall_score,
+            "details": self.details,
             "evaluation_timestamp": self.evaluation_timestamp,
         }
 
@@ -590,6 +592,68 @@ class Evaluator:
         self.sop_graph = sop_graph
         self.code_evaluator = CodeComputedEvaluator()
         self.model_evaluator = ModelJudgedEvaluator(judge_model)
+
+    @staticmethod
+    def _compute_goal_fulfillment(simulation_result, eval_turns) -> Tuple[float, Dict[str, Any]]:
+        """检查客服是否真正推进了用户目标，而不是只输出礼貌承诺。"""
+        intent = simulation_result.user_intent
+        texts = [
+            simulation_result.turns[index].agent_output.chat
+            for index in eval_turns
+            if index < len(simulation_result.turns)
+        ]
+        text = " ".join(texts).strip()
+        case = (getattr(simulation_result, "context_data", {}) or {}).get(
+            "benchmark_case", {}
+        )
+        final_actions = [
+            (turn.agent_output.final_output.Action
+             if getattr(turn.agent_output, "final_output", None) else turn.agent_output.action)
+            for turn in simulation_result.turns
+        ]
+
+        # 纯“稍后发送/为您安排/我来详细讲解”不算完成目标；必须出现
+        # 与目标相关的解释、步骤或可执行信息。
+        substantive_markers = [
+            "因为", "例如", "比如", "步骤", "代码", "参数可以",
+            "具体做法", "首先", "其次", "返回值", "调用",
+        ]
+        promise_only = (
+            len(text) < 160
+            and any(marker in text for marker in [
+                "稍后", "为您发送", "尽快", "请耐心", "我来详细讲解",
+                "详细讲解", "我来为您讲解", "我们会为您",
+            ])
+            and not any(marker in text for marker in substantive_markers)
+        )
+        if promise_only or not text:
+            return 0.0, {"reason": "only_promise_or_empty", "intent": intent}
+
+        intent_markers = {
+            "seek_answer": ["因为", "步骤", "示例", "代码", "参数", "默认", "函数", "可以"],
+            "technical_issue": ["步骤", "检查", "设置", "处理", "解决", "可以"],
+            "complaint": ["抱歉", "理解", "处理", "解决", "反馈", "安排"],
+            "refund_request": ["退款", "退费", "审核", "处理", "申请"],
+            "consultation": ["方案", "建议", "安排", "课程", "计划"],
+        }
+        markers = intent_markers.get(intent, ["处理", "解决", "建议", "方案"])
+        marker_hits = sum(marker in text for marker in markers)
+        action_ok = bool(set(final_actions) & {
+            "PLAN", "REFUND", "NEGOTIATE", "REVIEW", "COMFORT", "GUIDE",
+            "ChangeOrder", "CollectionService", "Comfort", "Repair", "Dispatch",
+        })
+        score = 1.0 if marker_hits >= 2 and action_ok else (0.5 if marker_hits >= 1 else 0.0)
+        if case.get("finals") and final_actions:
+            expected_action = case["finals"].get("Action")
+            if expected_action and final_actions[-1] == expected_action and score > 0:
+                score = min(1.0, score + 0.25)
+        return score, {
+            "intent": intent,
+            "marker_hits": marker_hits,
+            "matched_markers": [marker for marker in markers if marker in text],
+            "actions": final_actions,
+            "promise_only": promise_only,
+        }
     
     def evaluate_simulation(
         self,
@@ -604,8 +668,8 @@ class Evaluator:
         评估整个模拟 - 新版评测逻辑
         
         评测流程：
-        1. 裁判模型生成正确的 classification_output (ground truth)
-        2. SOP规则引擎根据 classification_output 计算正确的 now_path 和 finals
+        1. 优先使用 benchmark case 的固定 classification_output (ground truth)
+        2. SOP规则引擎根据 ground truth 计算/校验 now_path 和 finals
         3. 对比客服模型输出，计算各项得分
         4. 综合评分：逻辑能力(80%) + 话术能力(20%)
         
@@ -665,6 +729,9 @@ class Evaluator:
         
         # 2. 在指定轮次生成 ground truth（裁判模型 + 规则引擎）
         ground_truth_data = {}
+        benchmark_case = (getattr(simulation_result, "context_data", {}) or {}).get(
+            "benchmark_case", {}
+        )
         # logger.warning(f"【诊断】开始生成ground truth data，eval_turns={eval_turns}")
         for turn_idx in eval_turns:
             if turn_idx >= len(simulation_result.turns):
@@ -739,12 +806,21 @@ class Evaluator:
                         logger.debug(f"Turn {turn_idx} classification字段详情: {list(gt_classification.keys()) if isinstance(gt_classification, dict) else type(gt_classification)}")
                 except Exception as e:
                     logger.error(f"Turn {turn_idx} 裁判综合评估失败: {e}")
+
+            # 有 benchmark case 时，分类 gold 来自 PathList，而不是 Judge 对
+            # 当前客服回答的反推。这样“客服答得好不好”和“题目的真实标签”不会混在一起。
+            if benchmark_case:
+                gt_classification = benchmark_case.get("classification", {})
             
             # 2.2 使用规则引擎计算正确的 now_path 和 finals
             correct_now_path = []
             correct_finals = {}
             reasoning = ""
-            if rule_engine and gt_classification:
+            if benchmark_case:
+                correct_now_path = benchmark_case.get("now_path", [])
+                correct_finals = benchmark_case.get("finals", {})
+                reasoning = "benchmark_case"
+            elif rule_engine and gt_classification:
                 try:
                     # 获取额外上下文（如 isRiskUser）
                     context = {}
@@ -828,12 +904,28 @@ class Evaluator:
                 logger.warning(f"Turn {turn_idx} 缺少分类输出或ground truth")
             
             # 3.2 路径正确性 (30%)
-            # 客服模型输出可能使用 expected_path 或 now_path 字段
+            # expected_path/now_path 是客服“声明的路径”；path_taken 是根据其
+            # 分类重新执行 SOP 后得到的实际路径。评分必须使用后者。
             agent_path = None
-            if hasattr(agent_output, 'expected_path'):
-                agent_path = agent_output.expected_path if isinstance(agent_output.expected_path, list) else []
-            elif hasattr(agent_output, 'now_path'):
-                agent_path = agent_output.now_path if isinstance(agent_output.now_path, list) else []
+            if hasattr(agent_output, 'path_taken') and agent_output.path_taken:
+                agent_path = agent_output.path_taken
+            elif rule_engine and getattr(agent_output, "classification_output", None):
+                try:
+                    classification = agent_output.classification_output.to_dict()
+                    rule_result = rule_engine.compute_correct_path_and_finals(
+                        classification_output=classification,
+                        context=getattr(simulation_result, "context_data", {}) or {},
+                    )
+                    agent_path = list(rule_result.now_path)
+                    for node_id, node in self.sop_graph.nodes.items():
+                        if getattr(node, "action_name", None) == rule_result.finals.get("Action"):
+                            if node_id not in agent_path:
+                                agent_path.append(node_id)
+                            break
+                except Exception:
+                    agent_path = []
+            else:
+                agent_path = []
             
             if agent_path is not None and gt_data.get("now_path"):
                 p_score, p_details = self.code_evaluator.compute_path_correctness(
@@ -898,6 +990,9 @@ class Evaluator:
         avg_path = sum(path_scores) / len(path_scores) if path_scores else 0.0
         avg_finals = sum(finals_scores) / len(finals_scores) if finals_scores else 0.0
         avg_chat = sum(chat_scores) / len(chat_scores) if chat_scores else 0.0
+        goal_fulfillment, goal_details = self._compute_goal_fulfillment(
+            simulation_result, eval_turns
+        )
         
         # 计算话术质量五维度平均分
         dimension_names = ["linguistic_quality", "anthropomorphism_emotion", "content_utility", "user_satisfaction", "instruction_compliance"]
@@ -937,7 +1032,7 @@ class Evaluator:
                 metric_name="classification_accuracy",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_classification,
-                weight=0.4,
+                weight=0.3,
                 explanation="分类字段准确性 (classification_output)",
                 details={
                     "individual_scores": classification_scores,
@@ -950,8 +1045,8 @@ class Evaluator:
                 metric_name="path_correctness",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_path,
-                weight=0.4,
-                explanation="SOP路径正确性 (now_path)",
+                weight=0.3,
+                explanation="SOP路径正确性 (executed_path，而非模型自报的 predicted_path)",
                 details={
                     "individual_scores": path_scores,
                     "scores_by_turn": path_scores_by_turn,
@@ -960,7 +1055,7 @@ class Evaluator:
                 }
             ),
             MetricScore(
-                metric_name="finals_correctness",
+                metric_name="action_correctness",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_finals,
                 weight=0.2,
@@ -973,10 +1068,18 @@ class Evaluator:
                 }
             ),
             MetricScore(
+                metric_name="goal_fulfillment",
+                metric_type=MetricType.CODE_COMPUTED,
+                score=goal_fulfillment,
+                weight=0.1,
+                explanation="客服是否真正推进并完成用户目标",
+                details=goal_details,
+            ),
+            MetricScore(
                 metric_name="chat_quality",
                 metric_type=MetricType.MODEL_JUDGED,
                 score=avg_chat,
-                weight=0.2,
+                weight=0.1,
                 explanation="话术质量 (chat)",
                 details={
                     "individual_scores": chat_scores,
@@ -988,25 +1091,38 @@ class Evaluator:
             )
         ]
         
-        # 5. 计算综合得分 - 逻辑能力(80%) + 话术能力(20%)
-        logic_ability = (avg_classification * 0.4 + avg_path * 0.4 + avg_finals * 0.2) / 1.0
+        # 5. 计算综合得分。分类/路径/动作/目标/话术权重显式相加为1，
+        # 避免旧版“先算逻辑80%再叠加话术20%”与配置权重不一致。
+        logic_ability = (
+            avg_classification * 0.3
+            + avg_path * 0.3
+            + avg_finals * 0.2
+            + goal_fulfillment * 0.1
+        ) / 0.9
         chat_ability = avg_chat
-        report.overall_score = logic_ability * 0.8 + chat_ability * 0.2
+        report.overall_score = (
+            avg_classification * 0.3
+            + avg_path * 0.3
+            + avg_finals * 0.2
+            + goal_fulfillment * 0.1
+            + chat_ability * 0.1
+        )
         
         # 添加细分能力得分到 details
         report.details = {
             "logic_ability": {
                 "score": logic_ability,
-                "weight": 0.8,
+                "weight": 0.9,
                 "breakdown": {
-                    "classification": {"score": avg_classification, "weight": 0.4},
-                    "path": {"score": avg_path, "weight": 0.4},
-                    "finals": {"score": avg_finals, "weight": 0.2}
+                    "classification": {"score": avg_classification, "weight": 0.3},
+                    "path": {"score": avg_path, "weight": 0.3},
+                    "finals": {"score": avg_finals, "weight": 0.2},
+                    "goal_fulfillment": {"score": goal_fulfillment, "weight": 0.1},
                 }
             },
             "chat_ability": {
                 "score": chat_ability,
-                "weight": 0.2
+                "weight": 0.1
             },
             "ground_truth_data": ground_truth_data,
             "evaluated_turns": eval_turns

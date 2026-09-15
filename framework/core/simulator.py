@@ -49,6 +49,7 @@ class SimulationResult:
     # 终止信息
     termination_reason: str = ""
     final_status: str = ""  # success, failed, timeout, etc.
+    goal_solved: bool = False
     
     # 指标数据
     dialogue_length: int = 0
@@ -73,6 +74,8 @@ class SimulationResult:
             "actions_taken": self.actions_taken,
             "termination_reason": self.termination_reason,
             "final_status": self.final_status,
+            "goal_solved": self.goal_solved,
+            "context_data": self.context_data,
             "duration_seconds": self.duration_seconds,
             "turns": [
                 {
@@ -185,13 +188,29 @@ class DialogueSimulator:
                 
                 turn_count += 1
             
-            # 完成模拟
+            # 完成模拟。API 模式下 AgentModel.path_taken 可能没有被填充，
+            # 因此优先使用每轮由分类结果推导出的实际执行路径。
             result.dialogue_length = len(result.turns)
-            result.path_taken = self.agent_model.path_taken
+            if result.turns:
+                result.path_taken = result.turns[-1].agent_output.path_taken or self.agent_model.path_taken
+            else:
+                result.path_taken = self.agent_model.path_taken
             result.actions_taken = [
                 turn.agent_output.action for turn in result.turns if turn.agent_output.action
             ]
-            result.final_status = "completed"
+
+            result.goal_solved = getattr(self.user_model, "problem_status", "") == "solved"
+            if result.goal_solved:
+                result.final_status = "goal_solved"
+            elif not result.termination_reason:
+                result.termination_reason = "max_turns_reached"
+                result.final_status = "max_turns_reached"
+            elif result.termination_reason == "end_step_reached":
+                result.final_status = "workflow_end_without_goal_confirmation"
+            elif result.termination_reason == "no_more_user_messages":
+                result.final_status = "user_simulator_stopped"
+            else:
+                result.final_status = "terminated"
             
             if self.verbose:
                 print(f"\n[对话完成]")
@@ -288,7 +307,14 @@ class DialogueSimulator:
         # 检查最后的步骤是否为END
         if result.turns:
             last_agent_output = result.turns[-1].agent_output
-            if last_agent_output.next_step is None:
+            executed_path = getattr(last_agent_output, "path_taken", []) or []
+            action = getattr(last_agent_output, "action", "")
+            # 不再单独信任模型根据 predicted_path 填的 next_step；只有实际
+            # 执行路径到达 action 节点或明确输出 END 才结束流程。
+            reached_action = bool(executed_path and executed_path[-1].startswith("action_"))
+            if last_agent_output.next_step is None and (
+                reached_action or action in ["END", "end"] or not executed_path
+            ):
                 return True
         
         # 检测双方都在礼貌性结束对话 - 避免无意义的重复感谢/再见

@@ -42,6 +42,7 @@ python run_evaluation_with_llm.py \
 """
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -128,6 +129,16 @@ def get_path_list_by_scenario(scenario_id: str):
     
     module = pathlist_modules[scenario_id]
     return module.generate_path_list, module.get_intent_path_mapping
+
+
+def _path_config_to_classification(scenario_config, path_config: Dict[str, Any]) -> Dict[str, Any]:
+    """把 PathList 的有序字段转换成带字段名的 benchmark gold label。"""
+    field_names = list(scenario_config.classification_fields.keys())
+    values = path_config.get("Classification_items", [])
+    return {
+        field_name: values[index] if index < len(values) else None
+        for index, field_name in enumerate(field_names)
+    }
 
 
 def get_agent_system_prompt_by_scenario(scenario_id: str) -> str:
@@ -289,6 +300,9 @@ class LLMEvaluationPipeline:
         # 结果容器
         self.simulation_results = []
         self.evaluation_reports = []
+        self._result_lock = threading.Lock()
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._incremental_file = self.output_dir / f"incremental_results_{run_stamp}.jsonl"
         
         # 场景评测用时记录
         self.scenario_start_time = None
@@ -436,6 +450,22 @@ class LLMEvaluationPipeline:
         
         if user_id is None:
             user_id = f"user_{uuid.uuid4().hex[:8]}"
+
+        # 普通 intent 评测也必须绑定一个可复现的 benchmark case；
+        # 否则 evaluator 会再次让 Judge 猜“标准答案”，导致分数随 Judge 漂移。
+        if path_config is None:
+            generate_path_list, get_intent_path_mapping = get_path_list_by_scenario(self.scenario_id)
+            path_list = generate_path_list()
+            intent_mapping = get_intent_path_mapping()
+            candidate_indexes = intent_mapping.get(user_intent, {}).get("possible_paths", [])
+            candidate_indexes = [
+                index for index in candidate_indexes
+                if 1 <= index <= len(path_list)
+            ]
+            if candidate_indexes:
+                digest = hashlib.sha256(user_id.encode("utf-8")).hexdigest()
+                path_index = int(digest[:12], 16) % len(candidate_indexes)
+                path_config = path_list[candidate_indexes[path_index] - 1]
         
         if self.verbose:
             print(f"\n{'='*80}")
@@ -511,6 +541,15 @@ class LLMEvaluationPipeline:
         
         # context_data包含system_info,传递给simulator
         context_data = {"system_info": system_info}
+        if path_config:
+            context_data["benchmark_case"] = {
+                "classification": _path_config_to_classification(
+                    self.scenario_config, path_config
+                ),
+                "now_path": path_config.get("expected_path", []),
+                "finals": path_config.get("final_output", {}),
+                "path_config": path_config,
+            }
         
         # 运行模拟
         if self.verbose:
@@ -557,10 +596,22 @@ class LLMEvaluationPipeline:
         )
         
         # 保存结果
-        self.simulation_results.append(simulation_result)
-        self.evaluation_reports.append(evaluation_report)
+        with self._result_lock:
+            self.simulation_results.append(simulation_result)
+            self.evaluation_reports.append(evaluation_report)
+            self._append_incremental_result(simulation_result, evaluation_report)
         
         return simulation_result, evaluation_report
+
+    def _append_incremental_result(self, simulation_result, evaluation_report) -> None:
+        """每完成一个样本立即追加保存，API 超时或进程中断时仍保留已完成结果。"""
+        record = {
+            "simulation": simulation_result.to_dict(),
+            "evaluation": evaluation_report.to_dict() if evaluation_report else None,
+            "saved_at": datetime.now().isoformat(),
+        }
+        with open(self._incremental_file, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     
     def run_batch_simulations(
         self,
@@ -682,7 +733,7 @@ class LLMEvaluationPipeline:
                     print(f"  {user_intent}: 平均分 {avg_score:.4f} ({len(scores)} 个模拟)")
         
         print(f"\n{'='*80}")
-        print(f"✓ 所有评测完成: 共 {current_simulation} 个模拟")
+        print(f"✓ 所有评测完成: 共 {completed_count[0]} 个模拟")
         print(f"{'='*80}\n")
         
         # 记录场景结束时间

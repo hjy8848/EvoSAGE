@@ -166,7 +166,7 @@ ONLINE_EDUCATION_CLASSIFICATION_FIELDS = {
     "EmotionTendency": ClassificationFieldConfig(
         field_name="EmotionTendency",
         data_type="str",
-        options=["Calm", "Dissatisfied"],
+        options=["Calm", "Confused", "Dissatisfied"],
         description="学员情绪倾向 - 是否存在不满情绪表现"
     ),
     "ResolveDependency": ClassificationFieldConfig(
@@ -241,11 +241,17 @@ ONLINE_EDUCATION_EVALUATION_METRICS = {
         description="动作正确性 - 最终输出的动作是否正确",
         weight=0.2
     ),
+    "goal_fulfillment": EvaluationMetricConfig(
+        metric_name="goal_fulfillment",
+        metric_type="code_computed",
+        description="目标完成度 - 是否真正解决或推进用户问题，而非只做礼貌承诺",
+        weight=0.1
+    ),
     "chat_quality": EvaluationMetricConfig(
         metric_name="chat_quality",
         metric_type="model_judged",
         description="话术质量 - 模型回复的自然性、准确性和客户友好度",
-        weight=0.2
+        weight=0.1
     )
 }
 

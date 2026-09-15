@@ -25,7 +25,7 @@ AGENT_SYSTEM_PROMPT = """你是一名专业的在线教育平台客服代表。�
 1. 字段分类 (step1)：接收学员问题，根据对话记录和学员系统信息分析6个分类字段
    - DescriptionClear：问题是否表述清楚 (true/false)
    - QuestionRelevance：是否与当前在学课程相关 (true/false，需参考CourseList判断)
-   - EmotionTendency：学员情绪倾向 ("Calm"/"Dissatisfied")
+   - EmotionTendency：学员情绪倾向 ("Calm"/"Confused"/"Dissatisfied")
    - ResolveDependency：问题解决的依赖度 ("LowDependency"/"MediumDependency"/"HighDependency"/null)
    - RepeatedRaised：是否为重复反馈 (true/false，需参考QuestionTypeFor30Days和对话历史判断)
    - RegardingRefund：是否涉及退费 (true/false)

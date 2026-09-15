@@ -257,9 +257,11 @@ class AgentTurnOutput:
             "classification_output": self.classification_output.to_dict() if self.classification_output else None,
             "cot": self.cot,
             "expected_path": self.expected_path,  # 新格式：期望路径
+            "predicted_path": self.expected_path,
             "final_output": self.final_output.to_dict() if self.final_output else None,  # 新格式：最终动作
             "chat": self.chat,
             "path_taken": self.path_taken,
+            "executed_path": self.path_taken,
             "json_parse_failed": self.json_parse_failed,  # JSON解析失败标记
         }
     
@@ -1176,6 +1178,32 @@ class AgentModel:
                     PLAN=finals_dict.get("PLAN", "none"),
                     extra_fields={k: v for k, v in finals_dict.items() if k not in ["Action", "PLAN"]}
                 )
+                turn_output.action = turn_output.final_output.Action
+                turn_output.plan = turn_output.final_output.PLAN
+
+            # expected_path/now_path 是模型声明的路径；实际执行路径必须由
+            # SOP 规则引擎根据模型分类重新计算，避免把模型自报结果当成执行事实。
+            if turn_output.classification_output is not None:
+                try:
+                    from ..sop import get_rule_engine
+                    rule_result = get_rule_engine(self.scenario_id).compute_correct_path_and_finals(
+                        classification_output=turn_output.classification_output.to_dict()
+                        if hasattr(turn_output.classification_output, "to_dict")
+                        else turn_output.classification_output,
+                        context=context_data or {},
+                    )
+                    executed_path = list(rule_result.now_path)
+                    action_name = rule_result.finals.get("Action")
+                    for node_id, node in self.sop_graph.nodes.items():
+                        if getattr(node, "action_name", None) == action_name:
+                            if node_id not in executed_path:
+                                executed_path.append(node_id)
+                            break
+                    turn_output.path_taken = executed_path
+                    self.path_taken = executed_path.copy()
+                except Exception:
+                    # 路径推导失败不应覆盖模型原始输出，交给评测器记录为缺失。
+                    turn_output.path_taken = []
             
             # 提取chat
             if "chat" in data:
