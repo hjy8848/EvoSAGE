@@ -105,11 +105,6 @@ class EcommerceBackend(BackendEnvironment):
                     "refund_status": order.get("refund_status"),
                     "refund_eligible": order.get("refund_eligible"),
                     "return_window_open": order.get("return_window_open"),
-                    # These are authoritative policy inputs used by the SOP;
-                    # they are exposed only after a valid order lookup.
-                    "responsibility": order.get("responsibility"),
-                    "refund_reasonable": order.get("refund_reasonable"),
-                    "has_document": order.get("has_document"),
                 },
             )
 

@@ -225,8 +225,10 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
     def test_query_result_misinterpretation_is_distinguished_from_missed_query(self):
         case = make_case("Signed", "Low")
         order_id = case.user_knowledge["order_id"]
+        customer_id = case.user_knowledge["customer_id"]
         client = ScriptedClient([
             response_with_tools(ToolCall("q", "query_order", {"order_id": order_id})),
+            response_with_tools(ToolCall("c", "query_customer_profile", {"customer_id": customer_id})),
             response_with_tools(ToolCall("a", "submit_refund", {"order_id": order_id})),
             response_with_json("Refund", chat="已经为您退款。"),
         ])
@@ -242,6 +244,29 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         self.assertIn("tool_result_misinterpretation", report.error_categories)
         self.assertIn("action_execution_failure", report.error_categories)
         self.assertNotIn("missed_backend_verification", report.error_categories)
+
+    def test_credit_level_requires_customer_profile_verification(self):
+        case = make_case("Signed", "Low", "CollectionService")
+        order_id = case.user_knowledge["order_id"]
+        client = ScriptedClient([
+            response_with_tools(ToolCall("q", "query_order", {"order_id": order_id})),
+            response_with_tools(ToolCall("a", "schedule_pickup", {"order_id": order_id})),
+            response_with_json("CollectionService", chat="已为您安排上门取件。"),
+        ])
+        profile = UserProfile("u", "refund_request", "strong_conflict", "ecommerce_refund")
+        result = DialogueSimulator(
+            UserModel(profile), make_agent(client), max_turns=1,
+            backend_environment=create_backend(case), case_spec=case,
+        ).run("我要退货。", {"initial_observation": {}})
+        report = Evaluator("ecommerce_refund", get_sop_graph("ecommerce_refund")).evaluate_simulation(result)
+        self.assertEqual(result.backend_final_state["order"]["return_status"], "PickupScheduled")
+        self.assertEqual(report.environment_goal_fulfillment, 1.0)
+        self.assertLess(report.environment_score, 1.0)
+        self.assertIn("missed_backend_verification", report.error_categories)
+        self.assertEqual(
+            report.details["environment_metrics"]["required_verification_coverage"],
+            0.5,
+        )
 
     def test_pretending_refund_success_does_not_change_backend_goal(self):
         case = make_case("Unshipped", "High", "Refund")

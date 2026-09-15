@@ -30,6 +30,39 @@ def _build_legacy_gt(scenario_id: str, path_config: Dict[str, Any]) -> Dict[str,
     }
 
 
+def _build_required_backend_verifications(
+    scenario_id: str, path_config: Dict[str, Any]
+) -> list:
+    """Declare only backend facts that the selected SOP path actually uses."""
+    if scenario_id != "ecommerce_refund":
+        return []
+
+    system_variables = path_config.get("system_variables", {})
+    requirements = [
+        {
+            "backend_field": "ShippingStatus",
+            "tool": "query_order",
+            "argument": "order_id",
+            "result_field": "shipping_status",
+        },
+    ]
+    if "CreditLevel" in system_variables:
+        requirements.append({
+            "backend_field": "CreditLevel",
+            "tool": "query_customer_profile",
+            "argument": "customer_id",
+            "result_field": "credit_level",
+        })
+    if "PaymentStatus" in system_variables:
+        requirements.append({
+            "backend_field": "PaymentStatus",
+            "tool": "query_payment",
+            "argument": "order_id",
+            "result_field": "payment_status",
+        })
+    return requirements
+
+
 def build_case_spec(
     scenario_id: str,
     user_intent: str,
@@ -45,6 +78,9 @@ def build_case_spec(
     """
     path_config = path_config or {}
     legacy_gt = _build_legacy_gt(scenario_id, path_config)
+    required_backend_verifications = _build_required_backend_verifications(
+        scenario_id, path_config
+    )
     case_id = _stable_id("CASE", f"{scenario_id}:{user_intent}:{user_id}")
     expected_action = path_config.get("final_output", {}).get("Action", "")
 
@@ -130,6 +166,7 @@ def build_case_spec(
                 "expected_path": legacy_gt["expected_path"],
                 "finals": legacy_gt["finals"],
                 "classification": classification,
+                "required_backend_verifications": required_backend_verifications,
             },
         )
 
@@ -171,6 +208,7 @@ def build_case_spec(
             "classification_dict": legacy_gt["classification"],
             "expected_path": legacy_gt["expected_path"],
             "finals": legacy_gt["finals"],
+            "required_backend_verifications": required_backend_verifications,
         },
     )
 

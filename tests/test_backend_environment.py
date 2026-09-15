@@ -28,7 +28,9 @@ class EcommerceBackendTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.data["shipping_status"], "Unshipped")
-        self.assertEqual(result.data["responsibility"], "User")
+        self.assertNotIn("responsibility", result.data)
+        self.assertNotIn("refund_reasonable", result.data)
+        self.assertNotIn("has_document", result.data)
         self.assertEqual(backend.get_event_log()[0]["event_type"], "tool_call")
 
     def test_action_requires_verification_and_mutates_state(self):

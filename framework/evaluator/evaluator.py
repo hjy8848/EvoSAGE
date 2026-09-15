@@ -809,6 +809,40 @@ class Evaluator:
         benchmark_case = Evaluator._get_benchmark_case(simulation_result)
         expected_action = benchmark_case.get("finals", {}).get("Action")
         expected_order_id = knowledge.get("order_id")
+        expected_customer_id = knowledge.get("customer_id")
+        requirements = case_spec.get("metadata", {}).get(
+            "required_backend_verifications", []
+        )
+        verification_details = []
+        for requirement in requirements:
+            expected_identifier = (
+                expected_order_id
+                if requirement.get("argument") == "order_id"
+                else expected_customer_id
+            )
+            candidates = [
+                event for event in tool_events
+                if event.get("name") == requirement.get("tool")
+            ]
+            selected = bool(candidates)
+            valid = any(
+                event.get("result", {}).get("success")
+                and event.get("arguments", {}).get(requirement.get("argument"))
+                == expected_identifier
+                and Evaluator._lookup(
+                    event.get("result", {}).get("data", {}),
+                    requirement.get("result_field", ""),
+                ) is not None
+                for event in candidates
+            )
+            verification_details.append({
+                **requirement,
+                "selected": selected,
+                "verified": valid,
+            })
+        required_count = len(verification_details)
+        selected_count = sum(item["selected"] for item in verification_details)
+        verified_count = sum(item["verified"] for item in verification_details)
         query_order_events = [e for e in tool_events if e.get("name") == "query_order"]
         valid_order_queries = [
             e for e in query_order_events
@@ -823,15 +857,40 @@ class Evaluator:
             for e in successful_actions
         ) if expected_action else bool(successful_actions)
         any_action = bool(action_events)
-        query_selection = 1.0 if query_order_events else 0.0
-        argument_accuracy = 1.0 if valid_order_queries else 0.0
+        query_selection = selected_count / required_count if required_count else 1.0
+        argument_accuracy = verified_count / selected_count if selected_count else 0.0
+        backend_verification = verified_count / required_count if required_count else 1.0
         tool_result_understanding = (
-            1.0 if valid_order_queries and expected_action_executed else 0.0
+            1.0 if verified_count == required_count and expected_action_executed else 0.0
         )
-        policy_compliance = 1.0 if (not any_action or valid_order_queries) else 0.0
+        required_event_indexes = [
+            next(
+                (
+                    index for index, event in enumerate(events)
+                    if event.get("event_type") == "tool_call"
+                    and event.get("name") == item["tool"]
+                    and item["verified"]
+                ),
+                None,
+            )
+            for item in verification_details
+        ]
+        first_action_index = next(
+            (index for index, event in enumerate(events)
+             if event.get("event_type") == "action_execution"),
+            None,
+        )
+        required_before_action = (
+            all(index is not None and (first_action_index is None or index < first_action_index)
+                for index in required_event_indexes)
+            if required_count else True
+        )
+        policy_compliance = 1.0 if (
+            verified_count == required_count and required_before_action
+        ) else 0.0
         action_execution = 1.0 if expected_action_executed else 0.0
         metrics = {
-            "backend_verification": argument_accuracy,
+            "backend_verification": backend_verification,
             "tool_selection": query_selection,
             "tool_arguments": argument_accuracy,
             "tool_result_understanding": tool_result_understanding,
@@ -856,6 +915,8 @@ class Evaluator:
             "expected_action": expected_action,
             "expected_order_id": expected_order_id,
             "valid_order_query": bool(valid_order_queries),
+            "required_backend_verifications": verification_details,
+            "required_verification_coverage": backend_verification,
             "successful_actions": [
                 e.get("result", {}).get("action_name") for e in successful_actions
             ],
@@ -874,6 +935,9 @@ class Evaluator:
         events = getattr(simulation_result, "backend_events", []) or []
         tool_events = [e for e in events if e.get("event_type") == "tool_call"]
         action_events = [e for e in events if e.get("event_type") == "action_execution"]
+        requirements = case_spec.get("metadata", {}).get(
+            "required_backend_verifications", []
+        )
         categories = []
         order_queries = [e for e in tool_events if e.get("name") == "query_order"]
         valid_order_query = any(
@@ -881,6 +945,25 @@ class Evaluator:
             and e.get("arguments", {}).get("order_id") == knowledge.get("order_id")
             for e in order_queries
         )
+        for requirement in requirements:
+            expected_identifier = (
+                knowledge.get("order_id")
+                if requirement.get("argument") == "order_id"
+                else knowledge.get("customer_id")
+            )
+            verified = any(
+                event.get("name") == requirement.get("tool")
+                and event.get("result", {}).get("success")
+                and event.get("arguments", {}).get(requirement.get("argument"))
+                == expected_identifier
+                and Evaluator._lookup(
+                    event.get("result", {}).get("data", {}),
+                    requirement.get("result_field", ""),
+                ) is not None
+                for event in tool_events
+            )
+            if not verified:
+                categories.append("missed_backend_verification")
         belief = knowledge.get("believes_shipping_status")
         actual_status = (
             (getattr(simulation_result, "backend_final_state", {}) or {})
