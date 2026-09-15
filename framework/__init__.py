@@ -38,6 +38,17 @@ from .evaluator import (
     EvaluationReport,
 )
 
+from .backend import (
+    ActionResult,
+    BackendEnvironment,
+    CaseSpec,
+    EcommerceBackend,
+    ToolCall,
+    ToolResult,
+    build_case_spec,
+    create_backend,
+)
+
 __all__ = [
     "ScenarioConfig",
     "AdversarialIntensity",
@@ -54,4 +65,12 @@ __all__ = [
     "SimulationResult",
     "Evaluator",
     "EvaluationReport",
+    "ActionResult",
+    "BackendEnvironment",
+    "CaseSpec",
+    "EcommerceBackend",
+    "ToolCall",
+    "ToolResult",
+    "build_case_spec",
+    "create_backend",
 ]

@@ -63,6 +63,13 @@ CreditLevel:用户信用等级(High/Medium/Low)
 - Reject：拒绝用户的请求
 - Comfort+Compensation：安抚并赔偿用户
 
+【后台核验要求】
+- ShippingStatus 和 CreditLevel 不在对话中直接提供，不能根据用户口述或猜测填写。
+- 先使用 query_order 查询真实订单；需要信用等级时再使用 query_customer_profile。
+- 只有工具返回成功且字段明确后，才根据后台字段选择 SOP 分支和最终动作。
+- 如果订单号或客户ID不足，应在 chat 中向用户询问，不要伪造订单状态。
+- finals 中的 Action 会被环境执行并产生真实状态变更。
+
 【输出格式要求】
 你必须以以下JSON格式输出（不要有任何其他文字）：
 

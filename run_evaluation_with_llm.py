@@ -67,6 +67,7 @@ from framework import (
     Evaluator,
     AdversarialIntensity,
 )
+from framework.backend import build_case_spec, create_backend
 
 from framework.llm_integration import (
     get_llm_client,
@@ -502,6 +503,27 @@ class LLMEvaluationPipeline:
                 self.scenario_id,
                 user_intent
             )
+
+        # CaseSpec 是唯一的案例真值来源；Agent 只接收公开观察和工具结果。
+        case_spec = build_case_spec(
+            scenario_id=self.scenario_id,
+            user_intent=user_intent,
+            path_config=path_config or {},
+            user_id=user_id,
+        )
+        if path_config:
+            case_spec.metadata["classification_dict"] = _path_config_to_classification(
+                self.scenario_config, path_config
+            )
+            case_spec.metadata["expected_path"] = path_config.get("expected_path", [])
+            case_spec.metadata["finals"] = path_config.get("final_output", {})
+        # 当前闭环先落地电商退款；其他五个场景继续走原有兼容流程，
+        # 等各自的 CaseSpec/工具/状态转移适配器完成后再接入。
+        backend_environment = (
+            create_backend(case_spec)
+            if self.scenario_id == "ecommerce_refund"
+            else None
+        )
         
         # 使用LLM用户模型
         user_model = LLMUserModel(
@@ -510,6 +532,7 @@ class LLMEvaluationPipeline:
             llm_client=self.user_llm_client,
             temperature=0.8,
             max_tokens=512,
+            case_spec=case_spec,
         )
         
         # 创建客服模型
@@ -534,27 +557,22 @@ class LLMEvaluationPipeline:
             agent_model=agent_model,
             max_turns=self.max_turns,
             verbose=self.verbose,
+            backend_environment=backend_environment,
+            case_spec=case_spec,
         )
         
         # 使用LLM生成初始消息(根据用户画像动态生成,避免固定模板)
         initial_message = user_model.generate_initial_message()
         
-        # context_data包含system_info,传递给simulator
-        context_data = {"system_info": system_info}
-        if path_config:
-            context_data["benchmark_case"] = {
-                "classification": _path_config_to_classification(
-                    self.scenario_config, path_config
-                ),
-                "now_path": path_config.get("expected_path", []),
-                "finals": path_config.get("final_output", {}),
-                "path_config": path_config,
-            }
+        # 电商后台状态不再进入 Agent 上下文；其余场景在迁移完成前保留兼容视图。
+        context_data = {"initial_observation": case_spec.initial_observation}
+        if self.scenario_id != "ecommerce_refund":
+            context_data["system_info"] = system_info
         
         # 运行模拟
         if self.verbose:
             print(f"  [开始对话] 初始消息: {initial_message}")
-            print(f"  [系统信息] {system_info}")
+            print(f"  [公开初始观察] {case_spec.initial_observation}")
         
         simulation_result = simulator.run(
             initial_user_message=initial_message,
@@ -1095,16 +1113,8 @@ class LLMEvaluationPipeline:
             }
         
         elif scenario_id == "ecommerce_refund":
-            # 电商退款场景
-            # 字段顺序: CoreIntention, ProvidedDocument, Responsibility, RefundReasonable, EmotionStatus
-            core_intention = classification[0] if len(classification) > 0 else "ReturnOrRefund"
-            provided_doc = classification[1] if len(classification) > 1 else True
-            responsibility = classification[2] if len(classification) > 2 else "Merchant"
-            
-            system_info = {
-                "ShippingStatus": "Shipped" if provided_doc else "Unshipped",
-                "CreditLevel": "High" if responsibility == "Merchant" else "Low",
-            }
+            # 电商后台状态必须直接来自固定案例，而不是由分类字段反推。
+            system_info = dict(path_config.get("system_variables", {}))
         
         elif scenario_id == "telecom_package":
             # 电信套餐场景

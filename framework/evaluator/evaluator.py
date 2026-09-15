@@ -170,6 +170,15 @@ class CodeComputedEvaluator:
         # 标准化路径 - 去掉start和end
         normalized_taken = CodeComputedEvaluator.normalize_path(path_taken)
         normalized_expected = [CodeComputedEvaluator.normalize_path(p) for p in expected_paths]
+        # 旧版 PathList 的 expected_path 不包含 action_*，而 Agent 的
+        # executed_path 会记录真实动作节点。两种表示在评分前统一。
+        if normalized_expected and all(
+            not any(node.startswith("action_") for node in expected)
+            for expected in normalized_expected
+        ):
+            normalized_taken = [
+                node for node in normalized_taken if not node.startswith("action_")
+            ]
 
         details = {
             "original_path_taken": path_taken,
@@ -603,9 +612,15 @@ class Evaluator:
             if index < len(simulation_result.turns)
         ]
         text = " ".join(texts).strip()
-        case = (getattr(simulation_result, "context_data", {}) or {}).get(
-            "benchmark_case", {}
-        )
+        case_spec = getattr(simulation_result, "case_spec", None) or {}
+        case = (case_spec.get("metadata", {}) if isinstance(case_spec, dict) else {})
+        if simulation_result.scenario_id == "ecommerce_refund" and case_spec:
+            if getattr(simulation_result, "goal_solved", False):
+                return 1.0, {
+                    "reason": "backend_expected_outcome_satisfied",
+                    "intent": intent,
+                    "backend_goal_solved": True,
+                }
         final_actions = [
             (turn.agent_output.final_output.Action
              if getattr(turn.agent_output, "final_output", None) else turn.agent_output.action)
@@ -654,6 +669,71 @@ class Evaluator:
             "actions": final_actions,
             "promise_only": promise_only,
         }
+
+    @staticmethod
+    def _get_benchmark_case(simulation_result) -> Dict[str, Any]:
+        """读取评估专用真值；这些字段不会进入 Agent 的上下文。"""
+        case_spec = getattr(simulation_result, "case_spec", None) or {}
+        metadata = case_spec.get("metadata", {}) if isinstance(case_spec, dict) else {}
+        if not metadata:
+            # 兼容迁移前生成的回归样本；新 runner 不再把 benchmark_case
+            # 放入 context_data。
+            legacy = (getattr(simulation_result, "context_data", {}) or {}).get("benchmark_case", {})
+            if legacy:
+                return legacy
+        return {
+            "classification": metadata.get("classification_dict", {}),
+            "now_path": metadata.get("expected_path", []),
+            "finals": metadata.get("finals", {}),
+            "path_config": metadata.get("path_config", {}),
+        }
+
+    @staticmethod
+    def _compute_backend_verification(simulation_result) -> Tuple[float, Dict[str, Any]]:
+        """评估客服是否查询了权威后台并成功执行了状态变更。"""
+        if simulation_result.scenario_id != "ecommerce_refund":
+            return 1.0, {"applicable": False, "reason": "scenario_not_migrated"}
+
+        case_spec = getattr(simulation_result, "case_spec", None) or {}
+        knowledge = case_spec.get("user_knowledge", {})
+        expected = case_spec.get("expected_outcome", {})
+        events = getattr(simulation_result, "backend_events", []) or []
+        tool_events = [event for event in events if event.get("event_type") == "tool_call"]
+        action_events = [event for event in events if event.get("event_type") == "action_execution"]
+        order_queries = [event for event in tool_events if event.get("name") == "query_order"]
+        valid_queries = [
+            event for event in order_queries
+            if event.get("result", {}).get("success")
+            and event.get("arguments", {}).get("order_id") == knowledge.get("order_id")
+        ]
+        successful_actions = [event for event in action_events if event.get("result", {}).get("success")]
+        final_state = getattr(simulation_result, "backend_final_state", {}) or {}
+        state_ok = all(
+            Evaluator._lookup(final_state, key) == value
+            for key, value in expected.items()
+        ) if expected else bool(successful_actions)
+        query_score = 1.0 if valid_queries else 0.0
+        action_score = 1.0 if successful_actions and state_ok else 0.0
+        score = (query_score + action_score) / 2.0
+        return score, {
+            "applicable": True,
+            "query_order_called": bool(order_queries),
+            "valid_order_query": bool(valid_queries),
+            "successful_actions": [event.get("name") for event in successful_actions],
+            "expected_outcome": expected,
+            "state_satisfies_expected_outcome": state_ok,
+            "query_score": query_score,
+            "action_execution_score": action_score,
+        }
+
+    @staticmethod
+    def _lookup(data: Dict[str, Any], dotted_key: str) -> Any:
+        current = data
+        for part in dotted_key.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
     
     def evaluate_simulation(
         self,
@@ -729,9 +809,8 @@ class Evaluator:
         
         # 2. 在指定轮次生成 ground truth（裁判模型 + 规则引擎）
         ground_truth_data = {}
-        benchmark_case = (getattr(simulation_result, "context_data", {}) or {}).get(
-            "benchmark_case", {}
-        )
+        benchmark_case = self._get_benchmark_case(simulation_result)
+        has_benchmark_case = bool(benchmark_case.get("classification") or benchmark_case.get("now_path") or benchmark_case.get("finals"))
         # logger.warning(f"【诊断】开始生成ground truth data，eval_turns={eval_turns}")
         for turn_idx in eval_turns:
             if turn_idx >= len(simulation_result.turns):
@@ -751,7 +830,19 @@ class Evaluator:
                     # 使用新的综合评估方法
                     context_data = {}
                     if hasattr(simulation_result, 'context_data'):
-                        context_data = simulation_result.context_data or {}
+                        context_data = dict(simulation_result.context_data or {})
+                    # Judge 只能看到公开对话/工具观察，不能读取隐藏系统真值。
+                    context_data.pop("system_info", None)
+                    context_data.pop("benchmark_case", None)
+                    context_data["backend_events"] = [
+                        {
+                            "event_type": event.get("event_type"),
+                            "name": event.get("name"),
+                            "arguments": event.get("arguments", {}),
+                            "result": event.get("result", {}),
+                        }
+                        for event in (getattr(simulation_result, "backend_events", []) or [])[-10:]
+                    ]
                     
                     # 【投票模式】检查是否为 MultiModelVotingJudge，决定是否使用规则验证
                     use_rule_verification = True  # 默认使用规则验证
@@ -809,14 +900,14 @@ class Evaluator:
 
             # 有 benchmark case 时，分类 gold 来自 PathList，而不是 Judge 对
             # 当前客服回答的反推。这样“客服答得好不好”和“题目的真实标签”不会混在一起。
-            if benchmark_case:
+            if has_benchmark_case:
                 gt_classification = benchmark_case.get("classification", {})
             
             # 2.2 使用规则引擎计算正确的 now_path 和 finals
             correct_now_path = []
             correct_finals = {}
             reasoning = ""
-            if benchmark_case:
+            if has_benchmark_case:
                 correct_now_path = benchmark_case.get("now_path", [])
                 correct_finals = benchmark_case.get("finals", {})
                 reasoning = "benchmark_case"
@@ -990,6 +1081,7 @@ class Evaluator:
         avg_path = sum(path_scores) / len(path_scores) if path_scores else 0.0
         avg_finals = sum(finals_scores) / len(finals_scores) if finals_scores else 0.0
         avg_chat = sum(chat_scores) / len(chat_scores) if chat_scores else 0.0
+        backend_verification, backend_details = self._compute_backend_verification(simulation_result)
         goal_fulfillment, goal_details = self._compute_goal_fulfillment(
             simulation_result, eval_turns
         )
@@ -1032,7 +1124,7 @@ class Evaluator:
                 metric_name="classification_accuracy",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_classification,
-                weight=0.3,
+                weight=0.25,
                 explanation="分类字段准确性 (classification_output)",
                 details={
                     "individual_scores": classification_scores,
@@ -1045,7 +1137,7 @@ class Evaluator:
                 metric_name="path_correctness",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_path,
-                weight=0.3,
+                weight=0.25,
                 explanation="SOP路径正确性 (executed_path，而非模型自报的 predicted_path)",
                 details={
                     "individual_scores": path_scores,
@@ -1058,7 +1150,7 @@ class Evaluator:
                 metric_name="action_correctness",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_finals,
-                weight=0.2,
+                weight=0.15,
                 explanation="最终动作正确性 (finals)",
                 details={
                     "individual_scores": finals_scores,
@@ -1066,6 +1158,14 @@ class Evaluator:
                     "average_score": avg_finals,
                     "evaluated_turns": eval_turns,
                 }
+            ),
+            MetricScore(
+                metric_name="backend_verification",
+                metric_type=MetricType.CODE_COMPUTED,
+                score=backend_verification,
+                weight=0.15,
+                explanation="是否通过权威工具核验订单并成功完成后端状态转移",
+                details=backend_details,
             ),
             MetricScore(
                 metric_name="goal_fulfillment",
@@ -1091,19 +1191,20 @@ class Evaluator:
             )
         ]
         
-        # 5. 计算综合得分。分类/路径/动作/目标/话术权重显式相加为1，
-        # 避免旧版“先算逻辑80%再叠加话术20%”与配置权重不一致。
+        # 5. 计算综合得分。后端核验作为独立能力纳入总分。
         logic_ability = (
-            avg_classification * 0.3
-            + avg_path * 0.3
-            + avg_finals * 0.2
+            avg_classification * 0.25
+            + avg_path * 0.25
+            + avg_finals * 0.15
+            + backend_verification * 0.15
             + goal_fulfillment * 0.1
         ) / 0.9
         chat_ability = avg_chat
         report.overall_score = (
-            avg_classification * 0.3
-            + avg_path * 0.3
-            + avg_finals * 0.2
+            avg_classification * 0.25
+            + avg_path * 0.25
+            + avg_finals * 0.15
+            + backend_verification * 0.15
             + goal_fulfillment * 0.1
             + chat_ability * 0.1
         )
@@ -1114,9 +1215,10 @@ class Evaluator:
                 "score": logic_ability,
                 "weight": 0.9,
                 "breakdown": {
-                    "classification": {"score": avg_classification, "weight": 0.3},
-                    "path": {"score": avg_path, "weight": 0.3},
-                    "finals": {"score": avg_finals, "weight": 0.2},
+                    "classification": {"score": avg_classification, "weight": 0.25},
+                    "path": {"score": avg_path, "weight": 0.25},
+                    "finals": {"score": avg_finals, "weight": 0.15},
+                    "backend_verification": {"score": backend_verification, "weight": 0.15},
                     "goal_fulfillment": {"score": goal_fulfillment, "weight": 0.1},
                 }
             },

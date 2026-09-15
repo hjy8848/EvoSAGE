@@ -248,6 +248,11 @@ class AgentTurnOutput:
     
     # 元数据
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # 后端交互轨迹
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    tool_results: List[Dict[str, Any]] = field(default_factory=list)
+    action_result: Optional[Dict[str, Any]] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典 - 按新格式输出"""
@@ -263,6 +268,9 @@ class AgentTurnOutput:
             "path_taken": self.path_taken,
             "executed_path": self.path_taken,
             "json_parse_failed": self.json_parse_failed,  # JSON解析失败标记
+            "tool_calls": self.tool_calls,
+            "tool_results": self.tool_results,
+            "action_result": self.action_result,
         }
     
     def to_dict_legacy(self) -> Dict[str, Any]:
@@ -279,6 +287,9 @@ class AgentTurnOutput:
             "plan": self.plan,
             "chat": self.chat,
             "path_taken": self.path_taken,
+            "tool_calls": self.tool_calls,
+            "tool_results": self.tool_results,
+            "action_result": self.action_result,
         }
 
 
@@ -356,7 +367,9 @@ class AgentModel:
         self,
         user_message: str,
         context_data: Optional[Dict[str, Any]] = None,
-        classification_output: Optional[ClassificationOutput] = None
+        classification_output: Optional[ClassificationOutput] = None,
+        backend_environment=None,
+        max_tool_steps: int = 8,
     ) -> AgentTurnOutput:
         """
         处理一轮对话
@@ -391,7 +404,13 @@ class AgentModel:
         # print(f"[DEBUG] 检查条件: use_llm={self.use_llm_for_full_output} and llm_client={self.llm_client is not None}")
         if self.use_llm_for_full_output and self.llm_client:
             # print("[DEBUG] 条件满足,调用_process_turn_with_llm")
-            return self._process_turn_with_llm(user_message, context_data, turn_output)
+            return self._process_turn_with_llm(
+                user_message,
+                context_data,
+                turn_output,
+                backend_environment=backend_environment,
+                max_tool_steps=max_tool_steps,
+            )
         # else:
         #     print(f"[DEBUG] ❌ 条件不满足! use_llm={self.use_llm_for_full_output}, has_client={self.llm_client is not None}")
         #     print(f"[DEBUG] 将使用规则引擎而不是LLM")
@@ -906,7 +925,9 @@ class AgentModel:
         self,
         user_message: str,
         context_data: Optional[Dict[str, Any]],
-        turn_output: AgentTurnOutput
+        turn_output: AgentTurnOutput,
+        backend_environment=None,
+        max_tool_steps: int = 8,
     ) -> AgentTurnOutput:
         """
         使用LLM生成完整的JSON输出
@@ -936,9 +957,16 @@ class AgentModel:
         ])
         
         # 构建消息列表
+        public_observations = json.dumps(
+            {
+                "tool_results": self.context_data.get("tool_observations", [])[-6:],
+                "action_results": self.context_data.get("backend_action_results", [])[-3:],
+            },
+            ensure_ascii=False,
+        )
         messages = [
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": f"【对话历史】\n{dialogue_context}\n\n【当前用户消息】\n{user_message}"}
+            {"role": "user", "content": f"【对话历史】\n{dialogue_context}\n\n【当前用户消息】\n{user_message}\n\n【已获得的公开后台观察】\n{public_observations}"}
         ]
         
         # 调试日志:记录发送给LLM的消息
@@ -952,13 +980,84 @@ class AgentModel:
             # print(f"[DEBUG] LLM Client类型: {type(self.llm_client)}")
             # print(f"[DEBUG] Messages数量: {len(messages)}")
             
-            response = self.llm_client.generate(
-                prompt="",  # 使用messages参数
-                messages=messages,
-                temperature=0.1,  # 较低温度保证输出格式稳定
-                max_tokens=8192  # 增加到8192以确保即使think很长也不会被截断
-                # repetition_penalty= 1.2
-            )
+            # Agent 只能通过工具观察后台；完整 backend_record 永远不注入 prompt。
+            tool_round = 0
+            while True:
+                generation_kwargs = {
+                    "prompt": "",
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "max_tokens": 8192,
+                }
+                if backend_environment is not None:
+                    generation_kwargs["tools"] = backend_environment.get_tool_definitions()
+                    generation_kwargs["tool_choice"] = "auto"
+                response = self.llm_client.generate(**generation_kwargs)
+                response_tool_calls = list(getattr(response, "tool_calls", []) or [])
+                # 兼容尚未实现原生 tool_calls 的 OpenAI-compatible 服务。
+                if not response_tool_calls and backend_environment is not None:
+                    try:
+                        fallback_data = json.loads(
+                            (getattr(response, "text", "") or "")
+                            .replace("```json", "")
+                            .replace("```", "")
+                            .strip()
+                        )
+                        from ..backend.types import ToolCall
+                        for index, raw_call in enumerate(fallback_data.get("tool_calls", [])):
+                            response_tool_calls.append(
+                                ToolCall(
+                                    call_id=raw_call.get("call_id") or raw_call.get("id") or f"text_call_{index}",
+                                    name=raw_call.get("name", ""),
+                                    arguments=raw_call.get("arguments", {})
+                                    if isinstance(raw_call.get("arguments", {}), dict)
+                                    else {},
+                                )
+                            )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        response_tool_calls = []
+                if not response_tool_calls or backend_environment is None or tool_round >= max_tool_steps:
+                    break
+
+                assistant_message = None
+                if hasattr(response, "metadata"):
+                    assistant_message = response.metadata.get("assistant_message")
+                if assistant_message:
+                    messages.append(assistant_message)
+                else:
+                    messages.append({
+                        "role": "assistant",
+                        "content": response.text or "",
+                        "tool_calls": [
+                            {
+                                "id": call.call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": call.name,
+                                    "arguments": json.dumps(call.arguments, ensure_ascii=False),
+                                },
+                            }
+                            for call in response_tool_calls
+                        ],
+                    })
+
+                for call in response_tool_calls:
+                    tool_result = backend_environment.execute_tool(
+                        call.name,
+                        call.arguments,
+                        turn_index=turn_output.turn_id,
+                        call_id=call.call_id,
+                    )
+                    turn_output.tool_calls.append(call.to_dict())
+                    turn_output.tool_results.append(tool_result.to_dict())
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.call_id,
+                        "name": call.name,
+                        "content": json.dumps(tool_result.to_dict(), ensure_ascii=False),
+                    })
+                    self.context_data.setdefault("tool_observations", []).append(tool_result.to_dict())
+                tool_round += 1
             
             # print(f"[DEBUG] === LLM调用成功 ===")
             # print(f"[DEBUG] Response type: {type(response)}")
@@ -1186,11 +1285,29 @@ class AgentModel:
             if turn_output.classification_output is not None:
                 try:
                     from ..sop import get_rule_engine
+                    rule_context = context_data or {}
+                    # 规则路径只使用 Agent 已经通过工具拿到的公开字段。
+                    # 这不是读取 backend_record：没有成功查询就没有这些字段。
+                    observations = self.context_data.get("tool_observations", [])
+                    system_info = {}
+                    for observation in observations:
+                        if not observation.get("success"):
+                            continue
+                        data_fields = observation.get("data", {})
+                        if observation.get("tool_name") == "query_order":
+                            if data_fields.get("shipping_status") is not None:
+                                system_info["ShippingStatus"] = data_fields["shipping_status"]
+                        if observation.get("tool_name") == "query_customer_profile":
+                            if data_fields.get("credit_level") is not None:
+                                system_info["CreditLevel"] = data_fields["credit_level"]
+                    if system_info:
+                        rule_context = dict(rule_context)
+                        rule_context["system_info"] = system_info
                     rule_result = get_rule_engine(self.scenario_id).compute_correct_path_and_finals(
                         classification_output=turn_output.classification_output.to_dict()
                         if hasattr(turn_output.classification_output, "to_dict")
                         else turn_output.classification_output,
-                        context=context_data or {},
+                        context=rule_context,
                     )
                     executed_path = list(rule_result.now_path)
                     action_name = rule_result.finals.get("Action")

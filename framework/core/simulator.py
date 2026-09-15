@@ -17,6 +17,7 @@ from datetime import datetime
 import json
 
 from ..models import UserModel, AgentModel, AgentTurnOutput
+from ..backend import BackendEnvironment, CaseSpec
 
 
 @dataclass
@@ -45,6 +46,11 @@ class SimulationResult:
     
     # 上下文数据(包含system_info等)
     context_data: Dict[str, Any] = field(default_factory=dict)
+
+    # 结构化案例与后端审计轨迹。案例可供评估器使用，但不会注入 Agent prompt。
+    case_spec: Optional[Dict[str, Any]] = None
+    backend_events: List[Dict[str, Any]] = field(default_factory=list)
+    backend_final_state: Dict[str, Any] = field(default_factory=dict)
     
     # 终止信息
     termination_reason: str = ""
@@ -76,6 +82,9 @@ class SimulationResult:
             "final_status": self.final_status,
             "goal_solved": self.goal_solved,
             "context_data": self.context_data,
+            "case_spec": self.case_spec,
+            "backend_events": self.backend_events,
+            "backend_final_state": self.backend_final_state,
             "duration_seconds": self.duration_seconds,
             "turns": [
                 {
@@ -102,7 +111,10 @@ class DialogueSimulator:
         user_model: UserModel,
         agent_model: AgentModel,
         max_turns: int = 10,
-        verbose: bool = False
+        verbose: bool = False,
+        backend_environment: Optional[BackendEnvironment] = None,
+        case_spec: Optional[CaseSpec] = None,
+        max_tool_steps: int = 8,
     ):
         """
         初始化对话模拟器
@@ -117,6 +129,9 @@ class DialogueSimulator:
         self.agent_model = agent_model
         self.max_turns = max_turns
         self.verbose = verbose
+        self.backend_environment = backend_environment
+        self.case_spec = case_spec
+        self.max_tool_steps = max_tool_steps
         
         self.simulation_turn = 0
     
@@ -147,7 +162,8 @@ class DialogueSimulator:
             model_name="unknown",
             user_intent=self.user_model.profile.user_intent,
             adversarial_intensity=self.user_model.profile.adversarial_intensity,
-            context_data=context_data or {},  # 保存上下文数据(包含system_info)
+            context_data=context_data or {},
+            case_spec=self.case_spec.to_dict() if self.case_spec else None,
         )
         
         start_time = time.time()
@@ -199,7 +215,12 @@ class DialogueSimulator:
                 turn.agent_output.action for turn in result.turns if turn.agent_output.action
             ]
 
-            result.goal_solved = getattr(self.user_model, "problem_status", "") == "solved"
+            if self.backend_environment is not None:
+                result.backend_events = self.backend_environment.get_event_log()
+                result.backend_final_state = self.backend_environment.get_state_snapshot()
+                result.goal_solved = self.backend_environment.goal_satisfied()
+            else:
+                result.goal_solved = getattr(self.user_model, "problem_status", "") == "solved"
             if result.goal_solved:
                 result.final_status = "goal_solved"
             elif not result.termination_reason:
@@ -258,7 +279,9 @@ class DialogueSimulator:
         # 客服处理
         agent_output = self.agent_model.process_turn(
             user_message=user_message,
-            context_data=context_data
+            context_data=context_data,
+            backend_environment=self.backend_environment,
+            max_tool_steps=self.max_tool_steps,
         )
         
         # 检查agent_output是否为None
@@ -269,8 +292,30 @@ class DialogueSimulator:
                 f"可能是LLM生成或JSON解析失败,请检查日志中的详细错误信息。"
             )
         
+        # 结构化动作执行：只有模型明确给出最终动作时，才触发真实后端状态转移。
+        if self.backend_environment is not None and agent_output.action:
+            action_result = self.backend_environment.execute_action(
+                agent_output.action,
+                arguments=agent_output.action_parameters,
+                turn_index=turn_id,
+            )
+            agent_output.action_result = action_result.to_dict()
+            self.agent_model.context_data.setdefault("backend_action_results", []).append(
+                action_result.to_dict()
+            )
+
         # 客服回复
         self.user_model.add_assistant_message(agent_output.chat)
+
+        # 用户模拟器只看到公开的工具/动作结果，不看到完整后台状态。
+        new_events = self.backend_environment.get_event_log() if self.backend_environment else []
+        if self.backend_environment:
+            result.backend_events = new_events
+            result.backend_final_state = self.backend_environment.get_state_snapshot()
+        if self.backend_environment and hasattr(self.user_model, "observe_backend_event"):
+            for event in new_events:
+                if event.get("turn_index") == turn_id:
+                    self.user_model.observe_backend_event(event)
         
         if self.verbose:
             print(f"客服: {agent_output.chat}")
@@ -302,6 +347,9 @@ class DialogueSimulator:
             bool: 是否应该终止
         """
         if len(result.turns) >= self.max_turns:
+            return True
+
+        if self.backend_environment is not None and self.backend_environment.goal_satisfied():
             return True
         
         # 检查最后的步骤是否为END
@@ -437,6 +485,9 @@ class DialogueSimulator:
         """获取终止原因"""
         if len(result.turns) >= self.max_turns:
             return "max_turns_reached"
+
+        if self.backend_environment is not None and self.backend_environment.goal_satisfied():
+            return "backend_goal_satisfied"
         
         if result.turns:
             last_turn = result.turns[-1]
@@ -533,7 +584,8 @@ class DialogueSimulator:
             return user_message_generator(
                 user_model=self.user_model,
                 agent_last_message=result.turns[-1].agent_output.chat if result.turns else "",
-                turn_count=len(result.turns)
+                turn_count=len(result.turns),
+                backend_events=result.backend_events[-10:],
             )
         
         # 默认行为：如果客服要求更多信息，用户提供

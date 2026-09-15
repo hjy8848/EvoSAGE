@@ -13,6 +13,7 @@ import logging
 
 from ..models import UserModel, UserProfile
 from .llm_client import LLMClient
+from ..backend.types import CaseSpec
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class LLMUserModel(UserModel):
         llm_client: Optional[LLMClient] = None,
         temperature: float = 0.7,
         max_tokens: int = 512,
+        case_spec: Optional[CaseSpec] = None,
     ):
         """
         初始化LLM用户模型
@@ -46,6 +48,8 @@ class LLMUserModel(UserModel):
         self.llm_client = llm_client
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.case_spec = case_spec
+        self.backend_events = []
         
         # 新增: 追踪问题是否已解决
         self.problem_status = "unsolved"  # unsolved, partially_solved, solved
@@ -53,6 +57,28 @@ class LLMUserModel(UserModel):
         
         if llm_client is None:
             logger.warning("No LLM client provided. User message generation may be limited.")
+
+    def attach_case_spec(self, case_spec: CaseSpec) -> None:
+        """Bind this customer simulator to one deterministic benchmark case."""
+        self.case_spec = case_spec
+
+    def observe_backend_event(self, event: Dict[str, Any]) -> None:
+        """Observe only the public result of a backend event.
+
+        The customer simulator may know its own case facts, but it should not
+        receive evaluator-only state snapshots through this method.
+        """
+        public_event = {
+            "event_type": event.get("event_type"),
+            "name": event.get("name"),
+            "result": event.get("result", {}),
+        }
+        self.backend_events.append(public_event)
+        if public_event["event_type"] == "action_execution":
+            result = public_event["result"] or {}
+            if result.get("success"):
+                self.problem_status = "solved"
+                self.problem_resolved = True
     
     def generate_initial_message(self) -> str:
         """
@@ -182,6 +208,9 @@ class LLMUserModel(UserModel):
 【你的背景和问题】
 {self.system_prompt}
 
+【你实际知道的信息】
+{self._known_case_facts_text()}
+
 【要求】
 1. 根据你的身份和背景,生成第一条开场消息
 2. 消息应该自然、简洁(30-60字),直接表达你的问题或诉求
@@ -258,6 +287,12 @@ class LLMUserModel(UserModel):
 【对话上下文】
 {dialogue_context}
 
+【你实际知道的信息】
+{self._known_case_facts_text()}
+
+【最近的业务事件】
+{self._recent_backend_event_text()}
+
 【客服最后的消息】
 {agent_last_message}
 
@@ -273,6 +308,34 @@ class LLMUserModel(UserModel):
 【你的下一条消息】
 """
         return prompt
+
+    def _known_case_facts_text(self) -> str:
+        """Render only customer-known facts, never the full backend record."""
+        if not self.case_spec:
+            return "暂无额外结构化信息。"
+        knowledge = self.case_spec.user_knowledge or {}
+        policy = self.case_spec.user_policy or {}
+        visible = {}
+        if knowledge.get("knows_order_id") and knowledge.get("order_id"):
+            visible["order_id"] = knowledge["order_id"]
+        if knowledge.get("knows_customer_id") and knowledge.get("customer_id"):
+            visible["customer_id"] = knowledge["customer_id"]
+        if knowledge.get("product_name"):
+            visible["product_name"] = knowledge["product_name"]
+        if knowledge.get("believes_shipping_status"):
+            visible["user_belief_about_shipping"] = knowledge["believes_shipping_status"]
+        visible["can_reveal_order_id_on_request"] = policy.get(
+            "reveal_order_id_on_request", False
+        )
+        visible["can_reveal_customer_id_on_request"] = policy.get(
+            "reveal_customer_id_on_request", False
+        )
+        return json.dumps(visible, ensure_ascii=False)
+
+    def _recent_backend_event_text(self) -> str:
+        if not self.backend_events:
+            return "暂无。"
+        return json.dumps(self.backend_events[-3:], ensure_ascii=False)
     
     def _update_problem_status(self, agent_message: str) -> None:
         """

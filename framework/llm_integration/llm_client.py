@@ -17,6 +17,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import logging
 
+from ..backend.types import ToolCall
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +29,36 @@ class LLMResponse:
     model: str                          # 使用的模型
     tokens: int = 0                     # token数
     metadata: Dict[str, Any] = None     # 额外元数据
+    tool_calls: list = None             # 标准化工具调用列表
+    raw_response: Any = None            # provider原始响应
+
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
+        if self.tool_calls is None:
+            self.tool_calls = []
+
+
+def _parse_tool_calls(message: Dict[str, Any]) -> list:
+    """Normalize OpenAI-compatible tool calls."""
+    parsed = []
+    for index, item in enumerate(message.get("tool_calls") or []):
+        function = item.get("function", {}) if isinstance(item, dict) else {}
+        arguments = function.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        parsed.append(
+            ToolCall(
+                call_id=(item.get("id") if isinstance(item, dict) else None)
+                or f"call_{index}",
+                name=function.get("name", ""),
+                arguments=arguments if isinstance(arguments, dict) else {},
+            )
+        )
+    return parsed
 
 
 class LLMClient(ABC):
@@ -275,6 +307,10 @@ class VLLMChatClient(LLMClient):
             "max_tokens": max_tokens,
             "top_p": top_p,
         }
+        if kwargs.get("tools") is not None:
+            payload["tools"] = kwargs["tools"]
+        if kwargs.get("tool_choice") is not None:
+            payload["tool_choice"] = kwargs["tool_choice"]
         
         # Qwen3模型:thinking模式应该在vLLM服务器启动时通过--chat-template-kwargs参数禁用
         # API调用时通过extra_body传递该参数无效,vLLM不支持运行时动态修改chat_template_kwargs
@@ -302,8 +338,10 @@ class VLLMChatClient(LLMClient):
                 data = response.json()
                 
                 if "choices" in data and len(data["choices"]) > 0:
-                    text = data["choices"][0]["message"]["content"]
+                    message = data["choices"][0]["message"]
+                    text = message.get("content") or ""
                     tokens = data.get("usage", {}).get("completion_tokens", 0)
+                    tool_calls = _parse_tool_calls(message)
                     
                     # 过滤 Qwen3 think 模式的 <think> 标签内容（仅保留实际输出）
                     text = self._filter_think_tags(text)
@@ -314,7 +352,10 @@ class VLLMChatClient(LLMClient):
                         tokens=tokens,
                         metadata={
                             "finish_reason": data["choices"][0].get("finish_reason"),
-                        }
+                            "assistant_message": message,
+                        },
+                        tool_calls=tool_calls,
+                        raw_response=data,
                     )
                 else:
                     raise ValueError("No choices in response")
@@ -431,6 +472,10 @@ class OpenAIAPIClient(LLMClient):
             "max_tokens": max_tokens,
             "top_p": top_p,
         }
+        if kwargs.get("tools") is not None:
+            payload["tools"] = kwargs["tools"]
+        if kwargs.get("tool_choice") is not None:
+            payload["tool_choice"] = kwargs["tool_choice"]
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -450,8 +495,10 @@ class OpenAIAPIClient(LLMClient):
                 data = response.json()
                 
                 if "choices" in data and len(data["choices"]) > 0:
-                    text = data["choices"][0]["message"]["content"]
+                    message = data["choices"][0]["message"]
+                    text = message.get("content") or ""
                     tokens = data.get("usage", {}).get("completion_tokens", 0)
+                    tool_calls = _parse_tool_calls(message)
                     
                     # 过滤 Qwen3 think 模式的 <think> 标签内容（仅保留实际输出）
                     text = self._filter_think_tags(text)
@@ -460,6 +507,12 @@ class OpenAIAPIClient(LLMClient):
                         text=text,
                         model=self.model_name,
                         tokens=tokens,
+                        metadata={
+                            "finish_reason": data["choices"][0].get("finish_reason"),
+                            "assistant_message": message,
+                        },
+                        tool_calls=tool_calls,
+                        raw_response=data,
                     )
                 else:
                     raise ValueError("No choices in response")
