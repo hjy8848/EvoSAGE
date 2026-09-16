@@ -101,6 +101,13 @@ def _csv_write(path: Path, rows: List[Dict[str, Any]], fieldnames: List[str]) ->
         writer.writerows(rows)
 
 
+def _append_jsonl(path: Path, value: Dict[str, Any]) -> None:
+    """Append one complete, secret-free case record and flush immediately."""
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, ensure_ascii=False) + "\n")
+        handle.flush()
+
+
 def _resolve_api_key(args) -> str:
     if args.api_key:
         return args.api_key
@@ -448,6 +455,7 @@ def run(args) -> int:
             if evaluation.predicted_action and evaluation.predicted_action != evaluation.executed_action and evaluation.task_success:
                 sanity["action_errors"].append(record["case_id"])
             records.append(record)
+            _append_jsonl(run_dir / "results.jsonl", record)
             (raw_dir / f"path_{path_id:02d}_rep_{repetition:02d}.json").write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
             (traces_dir / f"path_{path_id:02d}_rep_{repetition:02d}.txt").write_text(_simple_trace(record), encoding="utf-8")
             print(f"[{len(records)}/{len(tasks)}] path={path_id} level={simulation.adversarial_intensity} task_success={evaluation.task_success}")
@@ -465,9 +473,11 @@ def run(args) -> int:
         "model": args.model,
         "provider": args.api_url,
         "api_url": args.api_url,
-        "temperature": "pipeline defaults",
-        "top_p": "provider default",
+        "temperature": {"user": 0.8, "agent": 0.1, "judge": 0.2},
+        "top_p": 0.95,
         "max_tokens": args.max_output_tokens,
+        "request_timeout_seconds": args.request_timeout,
+        "proxy": args.proxy,
         "tool_calling_mode": "OpenAI-compatible tools",
         "seed": None,
         "repetitions": args.repetitions,
