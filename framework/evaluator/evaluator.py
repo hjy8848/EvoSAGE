@@ -985,7 +985,13 @@ class Evaluator:
             if expected_action and verification_score >= 1.0:
                 add_error("tool_result_misinterpretation")
         executed_action = Evaluator._event_action_name(successful_actions[-1]) if successful_actions else ""
-        action_score = 1.0 if successful_actions else 0.0
+        allowed_actions = case_spec.get("metadata", {}).get("allowed_actions")
+        if allowed_actions is None:
+            allowed_actions = [expected_action] if expected_action else []
+        action_score = 1.0 if (
+            successful_actions
+            and (executed_action in allowed_actions if allowed_actions else True)
+        ) else 0.0
         if expected_action and successful_actions and executed_action != expected_action:
             add_error("wrong_final_action")
 
@@ -1011,6 +1017,8 @@ class Evaluator:
             add_error("wrong_final_action")
 
         policy_score = 1.0 if prerequisites_ok and not authoritative_conflicts and not failed_actions else 0.0
+        if allowed_actions and successful_actions and executed_action not in allowed_actions:
+            policy_score = 0.0
         if not requirements and action_events and not any(
             (event.get("result", {}) or {}).get("success") for event in action_events
         ):
@@ -1019,12 +1027,14 @@ class Evaluator:
             verification_score >= 1.0 and policy_score >= 1.0
             and action_score >= 1.0 and goal_score >= 1.0
         )
-        execution_score = (
-            0.25 * verification_score
-            + 0.20 * policy_score
-            + 0.25 * action_score
-            + 0.30 * goal_score
-        )
+        from ..config.scenario_config import ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
+        execution_weights = ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
+        execution_score = sum([
+            execution_weights["required_verification"] * verification_score,
+            execution_weights["policy_compliance"] * policy_score,
+            execution_weights["action_execution"] * action_score,
+            execution_weights["goal_fulfillment"] * goal_score,
+        ])
         trace = [
             event.get("name", "") for event in events
             if event.get("event_type") in {"tool_call", "action_execution"}
@@ -1052,13 +1062,10 @@ class Evaluator:
     @staticmethod
     def _compute_environment_metrics(simulation_result, *unused):
         """Compatibility wrapper: Environment Score is strictly V/P/A/G."""
+        from ..config.scenario_config import ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
+
         assessment = Evaluator._execution_assessment(simulation_result)
-        weights = {
-            "required_verification": 0.25,
-            "policy_compliance": 0.20,
-            "action_execution": 0.25,
-            "goal_fulfillment": 0.30,
-        }
+        weights = ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
         metrics = {
             "required_verification": assessment["verification"],
             "policy_compliance": assessment["policy"],
@@ -1554,6 +1561,8 @@ class Evaluator:
         execution_score, environment_details = self._compute_environment_metrics(
             simulation_result
         )
+        from ..config.scenario_config import ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
+        execution_weights = ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
         report.overall_score = sage_style_score
         report.legacy_score = sage_style_score
         report.environment_score = execution_score
@@ -1600,12 +1609,7 @@ class Evaluator:
                 "goal_fulfillment": execution_assessment["goal_fulfillment"],
                 "execution_score": execution_assessment["execution_score"],
                 "task_success": execution_assessment["task_success"],
-                "weights": {
-                    "required_verification": 0.25,
-                    "policy_compliance": 0.20,
-                    "action_execution": 0.25,
-                    "goal_fulfillment": 0.30,
-                },
+                "weights": dict(execution_weights),
             },
             "decision_track": {
                 "classification_accuracy": avg_classification,

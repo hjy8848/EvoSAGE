@@ -190,6 +190,19 @@ class EcommerceEvaluationTrackTests(unittest.TestCase):
         self.assertEqual(report.goal_fulfillment, 1.0)
         self.assertTrue(report.task_success)
 
+    def test_successful_wrong_action_is_not_action_execution_success(self):
+        report = self._evaluate(self._simulation(
+            events=[
+                self._tool("query_order", {"order_id": "order-1"}, {"shipping_status": "Unshipped"}),
+                self._action("Interception"),
+            ],
+            final_state={"order": {"last_action": "Interception"}},
+        ))
+        self.assertEqual(report.action_execution_score, 0.0)
+        self.assertEqual(report.policy_compliance_score, 0.0)
+        self.assertIn("wrong_final_action", report.error_categories)
+        self.assertFalse(report.task_success)
+
     def test_decision_right_execution_wrong_is_not_task_success(self):
         report = self._evaluate(self._simulation(
             events=[self._tool("query_order", {"order_id": "order-1"}, {"shipping_status": "Unshipped"})],
