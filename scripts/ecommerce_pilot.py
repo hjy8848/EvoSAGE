@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -43,18 +44,42 @@ LEAKAGE_KEYS = (
 class RecordingClient:
     """Record provider requests without recording API keys or headers."""
 
-    def __init__(self, client, role: str):
+    def __init__(self, client, role: str, max_output_tokens: Optional[int] = None):
         self.client = client
         self.role = role
+        self.max_output_tokens = max_output_tokens
         self.requests: List[Dict[str, Any]] = []
 
     def generate(self, prompt: str, **kwargs):
-        self.requests.append({
+        requested_tokens = kwargs.get("max_tokens") or self.max_output_tokens
+        if self.max_output_tokens and requested_tokens > self.max_output_tokens:
+            kwargs["max_tokens"] = self.max_output_tokens
+        request = {
+            "request_id": uuid.uuid4().hex[:12],
             "role": self.role,
             "messages": copy.deepcopy(kwargs.get("messages", [])),
             "tools": copy.deepcopy(kwargs.get("tools", [])),
-        })
-        return self.client.generate(prompt, **kwargs)
+            "max_tokens": kwargs.get("max_tokens"),
+        }
+        started = time.perf_counter()
+        try:
+            response = self.client.generate(prompt, **kwargs)
+            request.update({
+                "status": "success",
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+                "attempts": (getattr(response, "metadata", {}) or {}).get("attempts", 1),
+            })
+            self.requests.append(request)
+            return response
+        except Exception as exc:
+            request.update({
+                "status": "error",
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:500],
+            })
+            self.requests.append(request)
+            raise
 
     def __getattr__(self, name):
         return getattr(self.client, name)
@@ -83,9 +108,10 @@ def _resolve_api_key(args) -> str:
     if env_key:
         return env_key
     if args.keychain_service:
-        command = ["security", "find-generic-password", "-s", args.keychain_service, "-w"]
+        command = ["security", "find-generic-password"]
         if args.keychain_account:
-            command[3:3] = ["-a", args.keychain_account]
+            command.extend(["-a", args.keychain_account])
+        command.extend(["-s", args.keychain_service, "-w"])
         try:
             return subprocess.check_output(command, stderr=subprocess.DEVNULL, text=True).strip()
         except (subprocess.CalledProcessError, FileNotFoundError):
@@ -95,8 +121,12 @@ def _resolve_api_key(args) -> str:
     )
 
 
-def _path_tasks(repetitions: int) -> List[Tuple[int, str, Dict[str, Any], int]]:
+def _path_tasks(repetitions: int, path_ids: Optional[List[int]] = None) -> List[Tuple[int, str, Dict[str, Any], int]]:
     path_list = generate_path_list()
+    selected_path_ids = path_ids or list(range(1, len(path_list) + 1))
+    invalid = sorted(set(selected_path_ids) - set(range(1, len(path_list) + 1)))
+    if invalid:
+        raise RuntimeError(f"PathList 编号无效: {invalid}")
     mapping = get_intent_path_mapping()
     path_to_intent = {}
     for intent, config in mapping.items():
@@ -107,14 +137,22 @@ def _path_tasks(repetitions: int) -> List[Tuple[int, str, Dict[str, Any], int]]:
         raise RuntimeError(f"PathList 没有 intent 映射: {missing}")
     tasks = []
     for repetition in range(1, repetitions + 1):
-        for path_id, path_config in enumerate(path_list, start=1):
+        for path_id in selected_path_ids:
+            path_config = path_list[path_id - 1]
             config = copy.deepcopy(path_config)
             config["pilot_path_id"] = path_id
             tasks.append((path_id, path_to_intent[path_id], config, repetition))
     return tasks
 
 
-def _case_record(path_id: int, intent: str, repetition: int, simulation, report) -> Dict[str, Any]:
+def _case_record(
+    path_id: int,
+    intent: str,
+    repetition: int,
+    simulation,
+    report,
+    request_log: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     case = simulation.case_spec or {}
     metadata = case.get("metadata", {})
     path_config = metadata.get("path_config", {})
@@ -169,6 +207,7 @@ def _case_record(path_id: int, intent: str, repetition: int, simulation, report)
             item for item in report.required_backend_verifications if item.get("verified")
         ],
         "termination_reason": simulation.termination_reason,
+        "api_request_log": request_log or [],
         "decision_metrics": {
             "classification_accuracy": report.classification_accuracy,
             "canonical_path_correctness": report.canonical_path_correctness,
@@ -304,7 +343,7 @@ def _write_reports(run_dir: Path, records: List[Dict[str, Any]], config: Dict[st
         f"- Run ID: `{config['run_id']}`",
         f"- Model: `{config['model']}`",
         f"- Cases: `{len(records)}`",
-        f"- Path coverage: `{len({r['path_id'] for r in records})}/15`",
+        f"- Path coverage: `{len({r['path_id'] for r in records})}/{config['target_path_count']}`",
         f"- Adversarial levels: {level_counts}",
         "",
         "## Core metrics",
@@ -369,19 +408,34 @@ def run(args) -> int:
     recorders = []
     for role in ("user", "agent", "judge"):
         attribute = {"user": "user_llm_client", "agent": "agent_llm_client", "judge": "judge_llm_client"}[role]
-        recorder = RecordingClient(getattr(pipeline, attribute), role)
+        client = getattr(pipeline, attribute)
+        # A pilot must fail one slow provider request and preserve the case
+        # error record; the library default of 300s x 3 retries is too long
+        # for a controlled smoke stage.
+        if hasattr(client, "timeout"):
+            client.timeout = args.request_timeout
+        if hasattr(client, "max_retries"):
+            client.max_retries = 1
+        recorder = RecordingClient(client, role, args.max_output_tokens)
         setattr(pipeline, attribute, recorder)
         recorders.append(recorder)
 
-    tasks = _path_tasks(args.repetitions)
+    default_smoke_paths = [1, 6, 8]
+    path_ids = args.path_ids or (default_smoke_paths if args.stage == "smoke" else None)
+    tasks = _path_tasks(args.repetitions, path_ids)
     records = []
     sanity = {"gt_leakage": [], "termination_errors": [], "verification_errors": [], "action_errors": [], "case_errors": []}
     for path_id, intent, path_config, repetition in tasks:
         user_id = f"pilot-{run_id}-path-{path_id}-rep-{repetition}"
+        request_offsets = {id(recorder): len(recorder.requests) for recorder in recorders}
         try:
             simulation, evaluation = pipeline.run_single_simulation(intent, user_id=user_id, path_config=path_config)
-            record = _case_record(path_id, intent, repetition, simulation, evaluation)
-            request_log = [request for recorder in recorders for request in recorder.requests]
+            request_log = [
+                request
+                for recorder in recorders
+                for request in recorder.requests[request_offsets[id(recorder)]:]
+            ]
+            record = _case_record(path_id, intent, repetition, simulation, evaluation, request_log)
             leakage = _leakage_check(record, request_log)
             if leakage:
                 sanity["gt_leakage"].extend(leakage)
@@ -404,6 +458,7 @@ def run(args) -> int:
             if "CRITICAL GT leakage" in str(exc):
                 break
 
+    target_path_ids = path_ids or list(range(1, 16))
     config = {
         "run_id": run_id,
         "git_commit": git_commit,
@@ -412,22 +467,24 @@ def run(args) -> int:
         "api_url": args.api_url,
         "temperature": "pipeline defaults",
         "top_p": "provider default",
-        "max_tokens": "pipeline defaults",
+        "max_tokens": args.max_output_tokens,
         "tool_calling_mode": "OpenAI-compatible tools",
         "seed": None,
         "repetitions": args.repetitions,
         "max_turns": args.max_turns,
         "user_simulator_mode": args.user_simulator_mode,
         "user_policy_mode": args.user_policy_mode,
+        "stage": args.stage,
+        "target_path_count": len(target_path_ids),
     }
-    coverage = {str(path_id): sum(1 for record in records if record["path_id"] == path_id) for path_id in range(1, 16)}
+    coverage = {str(path_id): sum(1 for record in records if record["path_id"] == path_id) for path_id in target_path_ids}
     sanity["covered_paths"] = sum(count > 0 for count in coverage.values())
     sanity["coverage"] = coverage
     _write_reports(run_dir, records, config, sanity)
-    (run_dir / "coverage_report.json").write_text(json.dumps({"covered_paths": sanity["covered_paths"], "total_paths": 15, "paths": coverage}, ensure_ascii=False, indent=2), encoding="utf-8")
+    (run_dir / "coverage_report.json").write_text(json.dumps({"covered_paths": sanity["covered_paths"], "total_paths": len(target_path_ids), "paths": coverage}, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Pilot output: {run_dir}")
-    print(f"Coverage: {sanity['covered_paths']}/15")
-    if sanity["covered_paths"] != 15:
+    print(f"Coverage: {sanity['covered_paths']}/{len(target_path_ids)}")
+    if sanity["covered_paths"] != len(target_path_ids):
         return 2
     if sanity["gt_leakage"] or sanity["termination_errors"]:
         return 3
@@ -436,6 +493,8 @@ def run(args) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a reproducible Ecommerce Refund pilot")
+    parser.add_argument("--stage", choices=["smoke", "pilot"], default="pilot")
+    parser.add_argument("--path-ids", type=int, nargs="+", help="仅运行指定 PathList 编号；Smoke 默认运行 1、6、8")
     parser.add_argument("--api-url", default="http://10.130.138.46:8010/v1")
     parser.add_argument("--model", default="dashscope/qwen3.7-plus")
     parser.add_argument("--api-key")
@@ -446,6 +505,8 @@ def main() -> int:
     parser.add_argument("--output", default="results/ecommerce_pilot")
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--max-turns", type=int, default=6)
+    parser.add_argument("--request-timeout", type=int, default=90, help="单次 API 请求超时秒数")
+    parser.add_argument("--max-output-tokens", type=int, default=2048, help="Pilot 对每次生成设置的最大 token 上限")
     parser.add_argument("--user-simulator-mode", choices=["llm", "rule", "rewrite"], default="llm")
     parser.add_argument("--user-policy-mode", choices=["truthful", "mistaken", "withholding", "adversarial_false_claim"], default="truthful")
     parser.add_argument("--verbose", action="store_true")
