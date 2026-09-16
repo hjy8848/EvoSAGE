@@ -51,6 +51,7 @@ class EvaluationReport:
     overall_score: float = 0.0           # 总体得分
     legacy_score: float = 0.0            # 兼容旧版评分
     environment_score: float = 0.0       # 后端闭环评分
+    environment_goal_fulfillment: float = 0.0  # 兼容旧环境结果字段
     execution_score: float = 0.0         # V/P/A/G 后端执行分
     sage_style_score: float = 0.0        # 0.8 * Logic + 0.2 * Chat
     classification_accuracy: float = 0.0
@@ -103,6 +104,7 @@ class EvaluationReport:
             "overall_score": self.overall_score,
             "legacy_score": self.legacy_score,
             "environment_score": self.environment_score,
+            "environment_goal_fulfillment": self.environment_goal_fulfillment,
             "execution_score": self.execution_score,
             "sage_style_score": self.sage_style_score,
             "classification_accuracy": self.classification_accuracy,
@@ -806,6 +808,26 @@ class Evaluator:
         system_variables = path_config.get("system_variables", {})
         knowledge = case_spec.get("user_knowledge", {})
         requirements = []
+        # Newer runner versions declare the exact backend facts used by the
+        # selected path.  Prefer that declaration so PaymentStatus and future
+        # ecommerce checks remain auditable without changing this evaluator.
+        declared = case_spec.get("metadata", {}).get("required_backend_verifications", [])
+        for item in declared:
+            backend_field = item.get("backend_field") or item.get("field")
+            tool = item.get("tool")
+            public_field = item.get("result_field") or item.get("public_field")
+            argument = item.get("argument")
+            if not backend_field or not tool or not public_field or not argument:
+                continue
+            requirements.append({
+                "field": backend_field,
+                "tool": tool,
+                "public_field": public_field,
+                "expected_value": system_variables.get(backend_field),
+                "arguments": {argument: knowledge.get(argument)},
+            })
+        if requirements:
+            return requirements
         if "ShippingStatus" in system_variables:
             requirements.append({
                 "field": "ShippingStatus",
@@ -923,6 +945,28 @@ class Evaluator:
         if authoritative_conflicts and action_events:
             add_error("user_claim_overtrusted")
 
+        # A customer claim that contradicts the backend is a diagnostic only
+        # when the Agent actually relies on it (for example, acts without a
+        # successful verification).  Keep this separate from a query-result
+        # misinterpretation.
+        believed_status = case_spec.get("user_knowledge", {}).get("believes_shipping_status")
+        actual_status = Evaluator._lookup(
+            getattr(simulation_result, "backend_final_state", {}) or {},
+            "order.shipping_status",
+        ) or Evaluator._lookup(case_spec.get("backend_record", {}), "order.shipping_status")
+        if believed_status and actual_status and believed_status != actual_status:
+            verified_shipping = any(
+                item["field"] == "ShippingStatus" and item["verified"]
+                for item in verification_results
+            )
+            has_declared_action = any(
+                getattr(getattr(turn, "agent_output", None), "action", "")
+                or getattr(getattr(getattr(turn, "agent_output", None), "final_output", None), "Action", "")
+                for turn in getattr(simulation_result, "turns", []) or []
+            )
+            if (action_events or has_declared_action) and not verified_shipping:
+                add_error("user_claim_overtrusted")
+
         if any(event.get("name") == "query_order" for event in tool_events) and not any(
             item["tool"] == "query_order" and item["verified"] for item in verification_results
         ) and requirements:
@@ -938,6 +982,8 @@ class Evaluator:
         ]
         if failed_actions:
             add_error("action_execution_failure")
+            if expected_action and verification_score >= 1.0:
+                add_error("tool_result_misinterpretation")
         executed_action = Evaluator._event_action_name(successful_actions[-1]) if successful_actions else ""
         action_score = 1.0 if successful_actions else 0.0
         if expected_action and successful_actions and executed_action != expected_action:
@@ -1019,10 +1065,18 @@ class Evaluator:
             "action_execution": assessment["action_execution"],
             "goal_fulfillment": assessment["goal_fulfillment"],
         }
-        return assessment["execution_score"], {
+        details = {
             name: {"score": metrics[name], "weight": weights[name]}
             for name in metrics
         }
+        details.update({
+            "applicable": simulation_result.scenario_id == "ecommerce_refund",
+            "required_verification_coverage": assessment["verification"],
+            "required_backend_verifications": assessment["required_backend_verifications"],
+            "expected_action": assessment["expected_action"],
+            "successful_actions": [assessment["executed_action"]] if assessment["executed_action"] else [],
+        })
+        return assessment["execution_score"], details
     
     def evaluate_simulation(
         self,
@@ -1503,6 +1557,7 @@ class Evaluator:
         report.overall_score = sage_style_score
         report.legacy_score = sage_style_score
         report.environment_score = execution_score
+        report.environment_goal_fulfillment = execution_assessment["goal_fulfillment"]
         report.execution_score = execution_score
         report.sage_style_score = sage_style_score
         report.classification_accuracy = avg_classification
