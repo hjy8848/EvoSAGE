@@ -51,9 +51,23 @@ class EvaluationReport:
     overall_score: float = 0.0           # 总体得分
     legacy_score: float = 0.0            # 兼容旧版评分
     environment_score: float = 0.0       # 后端闭环评分
-    environment_goal_fulfillment: float = 0.0
-    error_categories: List[str] = field(default_factory=list)
+    execution_score: float = 0.0         # V/P/A/G 后端执行分
+    sage_style_score: float = 0.0        # 0.8 * Logic + 0.2 * Chat
+    classification_accuracy: float = 0.0
+    canonical_path_correctness: float = 0.0
+    predicted_action_correctness: float = 0.0
+    logic_score: float = 0.0
+    chat_quality: float = 0.0
+    required_verification_score: float = 0.0
+    policy_compliance_score: float = 0.0
+    action_execution_score: float = 0.0
+    goal_fulfillment: float = 0.0
+    task_success: bool = False
+    predicted_action: str = ""
     executed_action: str = ""
+    executed_trace: List[str] = field(default_factory=list)
+    required_backend_verifications: List[Dict[str, Any]] = field(default_factory=list)
+    error_categories: List[str] = field(default_factory=list)
     gold_path: List[str] = field(default_factory=list)
     predicted_path: List[str] = field(default_factory=list)
     executed_path: List[str] = field(default_factory=list)
@@ -89,12 +103,30 @@ class EvaluationReport:
             "overall_score": self.overall_score,
             "legacy_score": self.legacy_score,
             "environment_score": self.environment_score,
-            "environment_goal_fulfillment": self.environment_goal_fulfillment,
+            "execution_score": self.execution_score,
+            "sage_style_score": self.sage_style_score,
+            "classification_accuracy": self.classification_accuracy,
+            "canonical_path_correctness": self.canonical_path_correctness,
+            "predicted_action_correctness": self.predicted_action_correctness,
+            "logic_score": self.logic_score,
+            "chat_quality": self.chat_quality,
+            "required_verification_score": self.required_verification_score,
+            "policy_compliance_score": self.policy_compliance_score,
+            "action_execution_score": self.action_execution_score,
+            "goal_fulfillment": self.goal_fulfillment,
+            "task_success": self.task_success,
+            "predicted_action": self.predicted_action,
+            "executed_action": self.executed_action,
+            "executed_trace": self.executed_trace,
+            "required_backend_verifications": self.required_backend_verifications,
             "error_categories": self.error_categories,
+            "decision_track": self.details.get("decision_track", {}),
+            "execution_track": self.details.get("execution_track", {}),
+            "chat": self.details.get("chat", {}),
+            "diagnostics": self.details.get("diagnostics", {}),
             "gold_path": self.gold_path,
             "predicted_path": self.predicted_path,
             "executed_path": self.executed_path,
-            "executed_action": self.executed_action,
             "tool_events": self.tool_events,
             "action_events": self.action_events,
             "backend_final_state": self.backend_final_state,
@@ -636,8 +668,9 @@ class Evaluator:
             if index < len(simulation_result.turns)
         ]
         text = " ".join(texts).strip()
-        case = Evaluator._get_benchmark_case(simulation_result)
-        if simulation_result.scenario_id == "ecommerce_refund" and case:
+        case_spec = getattr(simulation_result, "case_spec", None) or {}
+        case = (case_spec.get("metadata", {}) if isinstance(case_spec, dict) else {})
+        if simulation_result.scenario_id == "ecommerce_refund" and case_spec:
             if getattr(simulation_result, "goal_solved", False):
                 return 1.0, {
                     "reason": "backend_expected_outcome_satisfied",
@@ -694,25 +727,6 @@ class Evaluator:
         }
 
     @staticmethod
-    def _compute_environment_goal_fulfillment(simulation_result) -> Tuple[float, Dict[str, Any]]:
-        """Only the authoritative Backend final state can satisfy this metric."""
-        if simulation_result.scenario_id != "ecommerce_refund":
-            return 0.0, {"applicable": False, "reason": "scenario_not_migrated"}
-        case_spec = getattr(simulation_result, "case_spec", None) or {}
-        expected = case_spec.get("expected_outcome", {})
-        final_state = getattr(simulation_result, "backend_final_state", {}) or {}
-        state_ok = bool(expected) and all(
-            Evaluator._lookup(final_state, key) == value
-            for key, value in expected.items()
-        )
-        return (1.0 if state_ok else 0.0), {
-            "applicable": True,
-            "expected_outcome": expected,
-            "final_state": final_state,
-            "state_satisfies_expected_outcome": state_ok,
-        }
-
-    @staticmethod
     def _get_benchmark_case(simulation_result) -> Dict[str, Any]:
         """读取评估专用真值；这些字段不会进入 Agent 的上下文。"""
         case_spec = getattr(simulation_result, "case_spec", None) or {}
@@ -723,27 +737,11 @@ class Evaluator:
             legacy = (getattr(simulation_result, "context_data", {}) or {}).get("benchmark_case", {})
             if legacy:
                 return legacy
-        legacy_gt = metadata.get("legacy_gt", {})
-        if legacy_gt:
-            return {
-                "classification": legacy_gt.get(
-                    "classification", legacy_gt.get("classification_dict", {})
-                ),
-                "now_path": legacy_gt.get("expected_path", []),
-                "finals": legacy_gt.get("finals", {}),
-                "path_config": metadata.get(
-                    "legacy_path_config", metadata.get("path_config", {})
-                ),
-            }
         return {
-            "classification": metadata.get(
-                "classification_dict", metadata.get("classification", {})
-            ),
+            "classification": metadata.get("classification_dict", {}),
             "now_path": metadata.get("expected_path", []),
             "finals": metadata.get("finals", {}),
-            "path_config": metadata.get(
-                "legacy_path_config", metadata.get("path_config", {})
-            ),
+            "path_config": metadata.get("path_config", {}),
         }
 
     @staticmethod
@@ -794,213 +792,237 @@ class Evaluator:
         return current
 
     @staticmethod
-    def _compute_environment_metrics(simulation_result, avg_chat, environment_goal_fulfillment):
-        """Compute the authoritative ecommerce score from Backend events/state."""
-        from ..config.scenario_config import ECOMMERCE_ENVIRONMENT_EVALUATION_WEIGHTS
+    def _required_verifications(simulation_result) -> List[Dict[str, Any]]:
+        """Return the authoritative checks required by the fixed case.
 
-        if simulation_result.scenario_id != "ecommerce_refund":
-            return 0.0, {"applicable": False, "reason": "scenario_not_migrated"}
-
-        events = getattr(simulation_result, "backend_events", []) or []
-        tool_events = [e for e in events if e.get("event_type") == "tool_call"]
-        action_events = [e for e in events if e.get("event_type") == "action_execution"]
-        case_spec = getattr(simulation_result, "case_spec", None) or {}
-        knowledge = case_spec.get("user_knowledge", {})
-        benchmark_case = Evaluator._get_benchmark_case(simulation_result)
-        expected_action = benchmark_case.get("finals", {}).get("Action")
-        expected_order_id = knowledge.get("order_id")
-        expected_customer_id = knowledge.get("customer_id")
-        requirements = case_spec.get("metadata", {}).get(
-            "required_backend_verifications", []
-        )
-        verification_details = []
-        for requirement in requirements:
-            expected_identifier = (
-                expected_order_id
-                if requirement.get("argument") == "order_id"
-                else expected_customer_id
-            )
-            candidates = [
-                event for event in tool_events
-                if event.get("name") == requirement.get("tool")
-            ]
-            selected = bool(candidates)
-            valid = any(
-                event.get("result", {}).get("success")
-                and event.get("arguments", {}).get(requirement.get("argument"))
-                == expected_identifier
-                and Evaluator._lookup(
-                    event.get("result", {}).get("data", {}),
-                    requirement.get("result_field", ""),
-                ) is not None
-                for event in candidates
-            )
-            verification_details.append({
-                **requirement,
-                "selected": selected,
-                "verified": valid,
-            })
-        required_count = len(verification_details)
-        selected_count = sum(item["selected"] for item in verification_details)
-        verified_count = sum(item["verified"] for item in verification_details)
-        query_order_events = [e for e in tool_events if e.get("name") == "query_order"]
-        valid_order_queries = [
-            e for e in query_order_events
-            if e.get("result", {}).get("success")
-            and e.get("arguments", {}).get("order_id") == expected_order_id
-        ]
-        successful_actions = [
-            e for e in action_events if e.get("result", {}).get("success")
-        ]
-        expected_action_executed = any(
-            e.get("result", {}).get("action_name") == expected_action
-            for e in successful_actions
-        ) if expected_action else bool(successful_actions)
-        any_action = bool(action_events)
-        query_selection = selected_count / required_count if required_count else 1.0
-        argument_accuracy = verified_count / selected_count if selected_count else 0.0
-        backend_verification = verified_count / required_count if required_count else 1.0
-        tool_result_understanding = (
-            1.0 if verified_count == required_count and expected_action_executed else 0.0
-        )
-        required_event_indexes = [
-            next(
-                (
-                    index for index, event in enumerate(events)
-                    if event.get("event_type") == "tool_call"
-                    and event.get("name") == item["tool"]
-                    and item["verified"]
-                ),
-                None,
-            )
-            for item in verification_details
-        ]
-        first_action_index = next(
-            (index for index, event in enumerate(events)
-             if event.get("event_type") == "action_execution"),
-            None,
-        )
-        required_before_action = (
-            all(index is not None and (first_action_index is None or index < first_action_index)
-                for index in required_event_indexes)
-            if required_count else True
-        )
-        policy_compliance = 1.0 if (
-            verified_count == required_count and required_before_action
-        ) else 0.0
-        action_execution = 1.0 if expected_action_executed else 0.0
-        metrics = {
-            "backend_verification": backend_verification,
-            "tool_selection": query_selection,
-            "tool_arguments": argument_accuracy,
-            "tool_result_understanding": tool_result_understanding,
-            "policy_compliance": policy_compliance,
-            "action_execution": action_execution,
-            "goal_fulfillment": environment_goal_fulfillment,
-            "chat_quality": avg_chat,
-        }
-        score = sum(
-            metrics[name] * ECOMMERCE_ENVIRONMENT_EVALUATION_WEIGHTS[name]
-            for name in metrics
-        )
-        details = {
-            name: {
-                "score": metrics[name],
-                "weight": ECOMMERCE_ENVIRONMENT_EVALUATION_WEIGHTS[name],
-            }
-            for name in metrics
-        }
-        details.update({
-            "applicable": True,
-            "expected_action": expected_action,
-            "expected_order_id": expected_order_id,
-            "valid_order_query": bool(valid_order_queries),
-            "required_backend_verifications": verification_details,
-            "required_verification_coverage": backend_verification,
-            "successful_actions": [
-                e.get("result", {}).get("action_name") for e in successful_actions
-            ],
-        })
-        return score, details
-
-    @staticmethod
-    def _compute_error_categories(simulation_result, legacy_goal_fulfillment) -> List[str]:
-        """Classify observable failures without asking Judge to invent backend truth."""
+        This is intentionally deterministic for the Ecommerce MVP.  The
+        values come from CaseSpec only inside the evaluator; they are never
+        copied into the Agent or Judge prompt.
+        """
         if simulation_result.scenario_id != "ecommerce_refund":
             return []
         case_spec = getattr(simulation_result, "case_spec", None) or {}
+        path_config = case_spec.get("metadata", {}).get("path_config", {})
+        system_variables = path_config.get("system_variables", {})
         knowledge = case_spec.get("user_knowledge", {})
-        benchmark_case = Evaluator._get_benchmark_case(simulation_result)
-        expected_action = benchmark_case.get("finals", {}).get("Action")
+        requirements = []
+        if "ShippingStatus" in system_variables:
+            requirements.append({
+                "field": "ShippingStatus",
+                "tool": "query_order",
+                "public_field": "shipping_status",
+                "expected_value": system_variables["ShippingStatus"],
+                "arguments": {"order_id": knowledge.get("order_id")},
+            })
+        if "CreditLevel" in system_variables:
+            requirements.append({
+                "field": "CreditLevel",
+                "tool": "query_customer_profile",
+                "public_field": "credit_level",
+                "expected_value": system_variables["CreditLevel"],
+                "arguments": {"customer_id": knowledge.get("customer_id")},
+            })
+        return requirements
+
+    @staticmethod
+    def _event_action_name(event: Dict[str, Any]) -> str:
+        result = event.get("result", {}) or {}
+        return result.get("action_name") or event.get("name", "")
+
+    @staticmethod
+    def _execution_assessment(simulation_result) -> Dict[str, Any]:
+        """Compute V/P/A/G and diagnostics from auditable backend events."""
         events = getattr(simulation_result, "backend_events", []) or []
         tool_events = [e for e in events if e.get("event_type") == "tool_call"]
         action_events = [e for e in events if e.get("event_type") == "action_execution"]
-        requirements = case_spec.get("metadata", {}).get(
-            "required_backend_verifications", []
-        )
-        categories = []
-        order_queries = [e for e in tool_events if e.get("name") == "query_order"]
-        valid_order_query = any(
-            e.get("result", {}).get("success")
-            and e.get("arguments", {}).get("order_id") == knowledge.get("order_id")
-            for e in order_queries
-        )
+        requirements = Evaluator._required_verifications(simulation_result)
+        case_spec = getattr(simulation_result, "case_spec", None) or {}
+        expected_outcome = case_spec.get("expected_outcome", {})
+        expected_action = case_spec.get("metadata", {}).get("finals", {}).get("Action", "")
+        errors = []
+        verification_results = []
+        authoritative_conflicts = []
+
+        def add_error(name: str) -> None:
+            if name not in errors:
+                errors.append(name)
+
         for requirement in requirements:
-            expected_identifier = (
-                knowledge.get("order_id")
-                if requirement.get("argument") == "order_id"
-                else knowledge.get("customer_id")
-            )
-            verified = any(
-                event.get("name") == requirement.get("tool")
-                and event.get("result", {}).get("success")
-                and event.get("arguments", {}).get(requirement.get("argument"))
-                == expected_identifier
-                and Evaluator._lookup(
-                    event.get("result", {}).get("data", {}),
-                    requirement.get("result_field", ""),
-                ) is not None
-                for event in tool_events
-            )
-            if not verified:
-                categories.append("missed_backend_verification")
-        belief = knowledge.get("believes_shipping_status")
-        actual_status = (
-            (getattr(simulation_result, "backend_final_state", {}) or {})
-            .get("order", {}).get("shipping_status")
+            candidates = [event for event in tool_events if event.get("name") == requirement["tool"]]
+            valid = None
+            conflict = None
+            for event in candidates:
+                result = event.get("result", {}) or {}
+                args = event.get("arguments", {}) or {}
+                expected_args = {
+                    key: value for key, value in requirement["arguments"].items()
+                    if value is not None
+                }
+                args_ok = all(args.get(key) == value for key, value in expected_args.items())
+                if not result.get("success"):
+                    add_error("tool_call_failure")
+                    continue
+                if not args_ok:
+                    add_error("wrong_tool_arguments")
+                    continue
+                public_data = result.get("data", {}) or {}
+                if requirement["public_field"] not in public_data:
+                    add_error("tool_result_misinterpretation")
+                    continue
+                observed = public_data.get(requirement["public_field"])
+                if observed != requirement["expected_value"]:
+                    conflict = observed
+                    add_error("tool_result_misinterpretation")
+                    continue
+                valid = event
+                break
+            if not candidates:
+                add_error("missed_backend_verification")
+                if tool_events:
+                    add_error("wrong_tool_selection")
+            elif valid is None and conflict is None:
+                add_error("wrong_tool_selection")
+            if conflict is not None:
+                authoritative_conflicts.append({
+                    "field": requirement["field"],
+                    "expected": requirement["expected_value"],
+                    "observed": conflict,
+                })
+            verification_results.append({
+                **requirement,
+                "called": bool(candidates),
+                "verified": valid is not None,
+                "conflict": conflict,
+            })
+
+        verification_score = (
+            sum(1.0 for item in verification_results if item["verified"])
+            / len(verification_results)
+            if verification_results else 1.0
         )
-        if order_queries and not valid_order_query:
-            categories.append("wrong_tool_arguments")
-        if tool_events and not order_queries:
-            categories.append("wrong_tool_selection")
-        if not order_queries and action_events:
-            categories.extend(["missed_backend_verification", "user_claim_overtrusted"])
-        elif belief and actual_status and belief != actual_status and not valid_order_query:
-            categories.extend(["missed_backend_verification", "user_claim_overtrusted"])
-        if any(not e.get("result", {}).get("success") for e in tool_events):
-            categories.append("tool_call_failure")
-        if any(not e.get("result", {}).get("success") for e in action_events):
-            categories.append("action_execution_failure")
+
+        first_action_index = min(
+            (index for index, event in enumerate(events)
+             if event.get("event_type") == "action_execution"),
+            default=None,
+        )
+        prerequisites_ok = True
+        for item in verification_results:
+            if item["verified"] and first_action_index is not None:
+                matching_index = next(
+                    (index for index, event in enumerate(events)
+                     if event is not None and event.get("event_type") == "tool_call"
+                     and event.get("name") == item["tool"]
+                     and event.get("result", {}).get("success")
+                     and event.get("result", {}).get("data", {}).get(item["public_field"]) == item["expected_value"]),
+                    None,
+                )
+                if matching_index is None or matching_index > first_action_index:
+                    prerequisites_ok = False
+                    add_error("missed_backend_verification")
+        if authoritative_conflicts and action_events:
+            add_error("user_claim_overtrusted")
+
+        if any(event.get("name") == "query_order" for event in tool_events) and not any(
+            item["tool"] == "query_order" and item["verified"] for item in verification_results
+        ) and requirements:
+            add_error("wrong_tool_selection")
+
         successful_actions = [
-            e.get("result", {}).get("action_name")
-            for e in action_events if e.get("result", {}).get("success")
+            event for event in action_events
+            if (event.get("result", {}) or {}).get("success")
         ]
-        if valid_order_query and expected_action and expected_action not in successful_actions:
-            categories.append("tool_result_misinterpretation")
-        predicted_action = getattr(simulation_result, "predicted_action", "")
-        if expected_action and predicted_action and predicted_action != expected_action:
-            categories.append("wrong_final_action")
-        claimed_action = predicted_action or expected_action
-        if claimed_action and not successful_actions:
-            categories.append("claimed_action_not_executed")
-        if not getattr(simulation_result, "goal_solved", False):
-            categories.append("goal_not_fulfilled")
+        failed_actions = [
+            event for event in action_events
+            if not (event.get("result", {}) or {}).get("success")
+        ]
+        if failed_actions:
+            add_error("action_execution_failure")
+        executed_action = Evaluator._event_action_name(successful_actions[-1]) if successful_actions else ""
+        action_score = 1.0 if successful_actions else 0.0
+        if expected_action and successful_actions and executed_action != expected_action:
+            add_error("wrong_final_action")
+
+        final_state = getattr(simulation_result, "backend_final_state", {}) or {}
+        goal_score = 1.0 if expected_outcome and all(
+            Evaluator._lookup(final_state, key) == value
+            for key, value in expected_outcome.items()
+        ) else (1.0 if not expected_outcome and getattr(simulation_result, "goal_solved", False) else 0.0)
+        if expected_outcome and goal_score == 0.0:
+            add_error("goal_not_fulfilled")
+
+        claimed_action = ""
         for turn in getattr(simulation_result, "turns", []) or []:
-            if not (turn.agent_output.chat or "").strip():
-                categories.append("chat_quality_error")
-        if legacy_goal_fulfillment and not getattr(simulation_result, "goal_solved", False):
-            categories.append("chat_quality_error")
-        return sorted(set(categories))
+            output = getattr(turn, "agent_output", None)
+            final_output = getattr(output, "final_output", None) if output else None
+            if final_output:
+                claimed_action = getattr(final_output, "Action", "") or claimed_action
+            elif output:
+                claimed_action = getattr(output, "action", "") or claimed_action
+        if claimed_action and not successful_actions and claimed_action not in {"PLAN", ""}:
+            add_error("claimed_action_not_executed")
+        if claimed_action and expected_action and claimed_action != expected_action:
+            add_error("wrong_final_action")
+
+        policy_score = 1.0 if prerequisites_ok and not authoritative_conflicts and not failed_actions else 0.0
+        if not requirements and action_events and not any(
+            (event.get("result", {}) or {}).get("success") for event in action_events
+        ):
+            policy_score = 0.0
+        task_success = (
+            verification_score >= 1.0 and policy_score >= 1.0
+            and action_score >= 1.0 and goal_score >= 1.0
+        )
+        execution_score = (
+            0.25 * verification_score
+            + 0.20 * policy_score
+            + 0.25 * action_score
+            + 0.30 * goal_score
+        )
+        trace = [
+            event.get("name", "") for event in events
+            if event.get("event_type") in {"tool_call", "action_execution"}
+        ]
+        return {
+            "required_backend_verifications": verification_results,
+            "verification": verification_score,
+            "policy": policy_score,
+            "action_execution": action_score,
+            "goal_fulfillment": goal_score,
+            "execution_score": execution_score,
+            "task_success": task_success,
+            "errors": errors,
+            "executed_action": executed_action,
+            "claimed_action": claimed_action,
+            "executed_trace": trace,
+            "expected_action": expected_action,
+            "expected_outcome": expected_outcome,
+            "state_satisfies_expected_outcome": goal_score == 1.0,
+            "authoritative_conflicts": authoritative_conflicts,
+            "successful_action_count": len(successful_actions),
+            "failed_action_count": len(failed_actions),
+        }
+
+    @staticmethod
+    def _compute_environment_metrics(simulation_result, *unused):
+        """Compatibility wrapper: Environment Score is strictly V/P/A/G."""
+        assessment = Evaluator._execution_assessment(simulation_result)
+        weights = {
+            "required_verification": 0.25,
+            "policy_compliance": 0.20,
+            "action_execution": 0.25,
+            "goal_fulfillment": 0.30,
+        }
+        metrics = {
+            "required_verification": assessment["verification"],
+            "policy_compliance": assessment["policy"],
+            "action_execution": assessment["action_execution"],
+            "goal_fulfillment": assessment["goal_fulfillment"],
+        }
+        return assessment["execution_score"], {
+            name: {"score": metrics[name], "weight": weights[name]}
+            for name in metrics
+        }
     
     def evaluate_simulation(
         self,
@@ -1153,10 +1175,12 @@ class Evaluator:
                     # 【诊断日志】检查classification是否为空
                     if not gt_classification:
                         logger.info(f"Turn {turn_idx}:")
-                        logger.warning(f"  - judge_classification: {gt_classification}")
-                        logger.info(f"  - benchmark_classification: {benchmark_case.get('classification', {})}")
-                        logger.info(f"  - benchmark_path: {benchmark_case.get('now_path', [])}")
-                        logger.info(f"  - benchmark_finals: {benchmark_case.get('finals', {})}")
+                        logger.warning(f"  - gt_classification: {gt_data.get('classification')}")
+                        logger.info(f"  - agent_classification: {agent_output.classification_output if hasattr(agent_output, 'classification_output') else None}")
+                        logger.info(f"  - gt_now_path: {gt_data.get('now_path')}")
+                        logger.info(f"  - agent_path: {agent_path}")
+                        logger.info(f"  - gt_finals: {gt_data.get('finals')}")
+                        logger.info(f"  - agent_finals: {agent_finals}")
                         logger.warning(f"⚠️ Turn {turn_idx} 警告: classification为空或为False! comprehensive_result={comprehensive_result}")
                     else:
                         logger.debug(f"Turn {turn_idx} classification字段详情: {list(gt_classification.keys()) if isinstance(gt_classification, dict) else type(gt_classification)}")
@@ -1259,29 +1283,11 @@ class Evaluator:
             else:
                 logger.warning(f"Turn {turn_idx} 缺少分类输出或ground truth")
             
-            # 3.2 路径正确性 (30%)
-            # expected_path/now_path 是客服“声明的路径”；path_taken 是根据其
-            # 分类重新执行 SOP 后得到的实际路径。评分必须使用后者。
-            agent_path = None
-            if hasattr(agent_output, 'path_taken') and agent_output.path_taken:
-                agent_path = agent_output.path_taken
-            elif rule_engine and getattr(agent_output, "classification_output", None):
-                try:
-                    classification = agent_output.classification_output.to_dict()
-                    rule_result = rule_engine.compute_correct_path_and_finals(
-                        classification_output=classification,
-                        context=getattr(simulation_result, "context_data", {}) or {},
-                    )
-                    agent_path = list(rule_result.now_path)
-                    for node_id, node in self.sop_graph.nodes.items():
-                        if getattr(node, "action_name", None) == rule_result.finals.get("Action"):
-                            if node_id not in agent_path:
-                                agent_path.append(node_id)
-                            break
-                except Exception:
-                    agent_path = []
-            else:
-                agent_path = []
+            # 3.2 Canonical policy path (30% in the SAGE-style score).
+            # expected_path is the model's declared policy decision.  The
+            # executed tool/action trace is deliberately kept separate and is
+            # never substituted here.
+            agent_path = list(getattr(agent_output, "expected_path", []) or [])
             
             if agent_path is not None and gt_data.get("now_path"):
                 p_score, p_details = self.code_evaluator.compute_path_correctness(
@@ -1346,12 +1352,35 @@ class Evaluator:
         avg_path = sum(path_scores) / len(path_scores) if path_scores else 0.0
         avg_finals = sum(finals_scores) / len(finals_scores) if finals_scores else 0.0
         avg_chat = sum(chat_scores) / len(chat_scores) if chat_scores else 0.0
-        backend_verification, backend_details = self._compute_backend_verification(simulation_result)
-        goal_fulfillment, goal_details = self._compute_goal_fulfillment(
+        # LLMJudge normalizes the five 3/6/9 dimensions to 0-1.  Clamp here
+        # as a defensive compatibility boundary for older/custom Judges.
+        avg_chat = max(0.0, min(1.0, avg_chat))
+        execution_assessment = self._execution_assessment(simulation_result)
+        backend_verification = execution_assessment["verification"]
+        backend_details = {
+            "required_backend_verifications": execution_assessment["required_backend_verifications"],
+            "errors": execution_assessment["errors"],
+        }
+        legacy_goal_fulfillment, legacy_goal_details = self._compute_goal_fulfillment(
             simulation_result, eval_turns
         )
-        environment_goal_fulfillment, environment_goal_details = (
-            self._compute_environment_goal_fulfillment(simulation_result)
+        # For the migrated Ecommerce scenario, goal fulfillment is only the
+        # CaseSpec expected_outcome comparison.  The old text heuristic is
+        # retained solely for non-migrated scenarios and compatibility data.
+        goal_fulfillment = (
+            execution_assessment["goal_fulfillment"]
+            if simulation_result.scenario_id == "ecommerce_refund"
+            else legacy_goal_fulfillment
+        )
+        goal_details = (
+            {
+                "source": "case_spec.expected_outcome",
+                "expected_outcome": execution_assessment["expected_outcome"],
+                "backend_final_state": getattr(simulation_result, "backend_final_state", {}) or {},
+                "state_satisfies_expected_outcome": execution_assessment["state_satisfies_expected_outcome"],
+            }
+            if simulation_result.scenario_id == "ecommerce_refund"
+            else legacy_goal_details
         )
         
         # 计算话术质量五维度平均分
@@ -1392,7 +1421,7 @@ class Evaluator:
                 metric_name="classification_accuracy",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_classification,
-                weight=0.25,
+                weight=0.4,
                 explanation="分类字段准确性 (classification_output)",
                 details={
                     "individual_scores": classification_scores,
@@ -1405,8 +1434,8 @@ class Evaluator:
                 metric_name="path_correctness",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_path,
-                weight=0.25,
-                explanation="SOP路径正确性 (executed_path，而非模型自报的 predicted_path)",
+                weight=0.4,
+                explanation="Canonical SOP policy path correctness (predicted_path; executed trace is separate)",
                 details={
                     "individual_scores": path_scores,
                     "scores_by_turn": path_scores_by_turn,
@@ -1418,8 +1447,8 @@ class Evaluator:
                 metric_name="action_correctness",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=avg_finals,
-                weight=0.15,
-                explanation="最终动作正确性 (finals)",
+                weight=0.2,
+                explanation="Predicted final action correctness (model declaration; not execution success)",
                 details={
                     "individual_scores": finals_scores,
                     "scores_by_turn": finals_scores_by_turn,
@@ -1431,32 +1460,24 @@ class Evaluator:
                 metric_name="backend_verification",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=backend_verification,
-                weight=0.15,
-                explanation="是否通过权威工具核验订单并成功完成后端状态转移",
+                weight=0.0,
+                explanation="Required authoritative backend verification (diagnostic alias; execution score uses V/P/A/G)",
                 details=backend_details,
             ),
             MetricScore(
                 metric_name="goal_fulfillment",
                 metric_type=MetricType.CODE_COMPUTED,
                 score=goal_fulfillment,
-                weight=0.1,
-                explanation="客服是否真正推进并完成用户目标",
-                details=goal_details,
-            ),
-            MetricScore(
-                metric_name="environment_goal_fulfillment",
-                metric_type=MetricType.CODE_COMPUTED,
-                score=environment_goal_fulfillment,
                 weight=0.0,
-                explanation="仅依据 Backend expected_outcome 和最终状态计算",
-                details=environment_goal_details,
+                explanation="Strict CaseSpec expected_outcome fulfillment; excluded from SAGE-style score",
+                details=goal_details,
             ),
             MetricScore(
                 metric_name="chat_quality",
                 metric_type=MetricType.MODEL_JUDGED,
                 score=avg_chat,
-                weight=0.1,
-                explanation="话术质量 (chat)",
+                weight=0.2,
+                explanation="Chat quality, normalized to 0-1 and independent from execution score",
                 details={
                     "individual_scores": chat_scores,
                     "scores_by_turn": chat_scores_by_turn,
@@ -1467,63 +1488,96 @@ class Evaluator:
             )
         ]
         
-        # 5. Legacy Score 保持原有权重，Environment Score 单独计算。
+        # 5. Decision/Policy Track.  This is the SAGE-style score and is
+        # intentionally independent of execution success and text heuristics.
         logic_ability = (
-            avg_classification * 0.25
-            + avg_path * 0.25
-            + avg_finals * 0.15
-            + backend_verification * 0.15
-            + goal_fulfillment * 0.1
-        ) / 0.9
+            avg_classification * 0.4
+            + avg_path * 0.4
+            + avg_finals * 0.2
+        )
         chat_ability = avg_chat
-        report.legacy_score = (
-            avg_classification * 0.25
-            + avg_path * 0.25
-            + avg_finals * 0.15
-            + backend_verification * 0.15
-            + goal_fulfillment * 0.1
-            + chat_ability * 0.1
+        sage_style_score = 0.8 * logic_ability + 0.2 * chat_ability
+        execution_score, environment_details = self._compute_environment_metrics(
+            simulation_result
         )
-        report.overall_score = report.legacy_score
-        report.environment_score, environment_details = self._compute_environment_metrics(
-            simulation_result, avg_chat, environment_goal_fulfillment
-        )
-        report.environment_goal_fulfillment = environment_goal_fulfillment
-        report.error_categories = self._compute_error_categories(
-            simulation_result, goal_fulfillment
-        )
-        if avg_classification < 1.0:
-            report.error_categories.append("classification_error")
-        if avg_path < 1.0:
-            report.error_categories.append("wrong_sop_path")
-        report.error_categories = sorted(set(report.error_categories))
+        report.overall_score = sage_style_score
+        report.legacy_score = sage_style_score
+        report.environment_score = execution_score
+        report.execution_score = execution_score
+        report.sage_style_score = sage_style_score
+        report.classification_accuracy = avg_classification
+        report.canonical_path_correctness = avg_path
+        report.predicted_action_correctness = avg_finals
+        report.logic_score = logic_ability
+        report.chat_quality = chat_ability
+        report.required_verification_score = execution_assessment["verification"]
+        report.policy_compliance_score = execution_assessment["policy"]
+        report.action_execution_score = execution_assessment["action_execution"]
+        report.goal_fulfillment = execution_assessment["goal_fulfillment"]
+        report.task_success = execution_assessment["task_success"]
+        report.predicted_action = execution_assessment["claimed_action"]
+        report.executed_action = execution_assessment["executed_action"]
+        report.executed_trace = execution_assessment["executed_trace"]
+        report.required_backend_verifications = execution_assessment["required_backend_verifications"]
+        report.error_categories = execution_assessment["errors"]
         
         # 添加细分能力得分到 details
         report.details = {
             "logic_ability": {
                 "score": logic_ability,
-                "weight": 0.9,
+                "weight": 0.8,
                 "breakdown": {
-                    "classification": {"score": avg_classification, "weight": 0.25},
-                    "path": {"score": avg_path, "weight": 0.25},
-                    "finals": {"score": avg_finals, "weight": 0.15},
-                    "backend_verification": {"score": backend_verification, "weight": 0.15},
-                    "goal_fulfillment": {"score": goal_fulfillment, "weight": 0.1},
+                    "classification": {"score": avg_classification, "weight": 0.4},
+                    "canonical_policy_path": {"score": avg_path, "weight": 0.4},
+                    "finals": {"score": avg_finals, "weight": 0.2},
                 }
             },
             "chat_ability": {
                 "score": chat_ability,
-                "weight": 0.1
+                "weight": 0.2
             },
             "ground_truth_data": ground_truth_data,
             "environment_score": report.environment_score,
+            "execution_track": {
+                "required_verification": execution_assessment["verification"],
+                "policy_compliance": execution_assessment["policy"],
+                "action_execution": execution_assessment["action_execution"],
+                "goal_fulfillment": execution_assessment["goal_fulfillment"],
+                "execution_score": execution_assessment["execution_score"],
+                "task_success": execution_assessment["task_success"],
+                "weights": {
+                    "required_verification": 0.25,
+                    "policy_compliance": 0.20,
+                    "action_execution": 0.25,
+                    "goal_fulfillment": 0.30,
+                },
+            },
+            "decision_track": {
+                "classification_accuracy": avg_classification,
+                "canonical_path_correctness": avg_path,
+                "predicted_action_correctness": avg_finals,
+                "logic_score": logic_ability,
+                "sage_style_score": sage_style_score,
+            },
+            "chat": {
+                "quality": avg_chat,
+                "scale": "0_1",
+                "independent_from_execution": True,
+                "average_dimensions": avg_dimensions,
+            },
+            "task_success": execution_assessment["task_success"],
+            "diagnostics": {
+                "error_categories": execution_assessment["errors"],
+                "claimed_action": execution_assessment["claimed_action"],
+                "executed_action": execution_assessment["executed_action"],
+                "executed_trace": execution_assessment["executed_trace"],
+                "authoritative_conflicts": execution_assessment["authoritative_conflicts"],
+            },
+            "required_backend_verifications": execution_assessment["required_backend_verifications"],
             "environment_metrics": environment_details,
-            "environment_goal_fulfillment": environment_goal_details,
-            "error_categories": report.error_categories,
-            "gold_path": [ground_truth_data.get(eval_turns[-1], {}).get("now_path", [])] if eval_turns else [],
-            "predicted_path": simulation_result.predicted_path if simulation_result.turns else [],
-            "executed_path": simulation_result.executed_path,
-            "executed_action": simulation_result.executed_action,
+            "gold_path": ground_truth_data.get(eval_turns[-1], {}).get("now_path", []) if eval_turns else [],
+            "predicted_path": simulation_result.turns[-1].agent_output.expected_path if simulation_result.turns else [],
+            "executed_path": execution_assessment["executed_trace"],
             "tool_events": getattr(simulation_result, "backend_events", []),
             "action_events": [
                 event for event in (getattr(simulation_result, "backend_events", []) or [])
@@ -1537,11 +1591,10 @@ class Evaluator:
             if eval_turns else []
         )
         report.predicted_path = (
-            simulation_result.predicted_path
+            simulation_result.turns[-1].agent_output.expected_path
             if simulation_result.turns else []
         )
-        report.executed_path = list(getattr(simulation_result, "executed_path", []) or [])
-        report.executed_action = getattr(simulation_result, "executed_action", "")
+        report.executed_path = list(execution_assessment["executed_trace"])
         report.tool_events = list(getattr(simulation_result, "backend_events", []) or [])
         report.action_events = [
             event for event in report.tool_events
@@ -1552,7 +1605,12 @@ class Evaluator:
         )
         report.termination_reason = simulation_result.termination_reason
         
-        logger.info(f"评测完成 - 逻辑能力: {logic_ability:.3f}, 话术能力: {chat_ability:.3f}, 总分: {report.overall_score:.3f}")
+        logger.info(
+            "评测完成 - Decision Logic: %.3f, Chat: %.3f, SAGE: %.3f, "
+            "Execution: %.3f, TaskSuccess: %s",
+            logic_ability, chat_ability, sage_style_score,
+            execution_score, execution_assessment["task_success"],
+        )
         
         # 7. 存储轮次级评测结果（只在指定轮次评测）
         turn_evaluations = []

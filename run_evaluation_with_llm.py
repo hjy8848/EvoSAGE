@@ -1252,9 +1252,16 @@ class LLMEvaluationPipeline:
                 "eval_mode": self.eval_mode,
                 "total_simulations": 0,
                 "overall_avg_score": 0.0,
+                "overall_sage_style_score": 0.0,
+                "overall_execution_score": 0.0,
+                "overall_task_success_rate": 0.0,
                 "overall_avg_metric_scores": {},
                 "by_intent": {},
                 "by_adversarial_intensity": {},
+                "by_adversarial_level": {
+                    level: {"count": 0} for level in
+                    ("zero_conflict", "weak_conflict", "strong_conflict", "all")
+                },
                 "by_turn": {},
                 "scenario_duration_seconds": 0.0,
             }
@@ -1407,11 +1414,11 @@ class LLMEvaluationPipeline:
             # 计算逻辑得分
             if 'classification_accuracy' in intent_stats[key]["avg_metric_scores"] and \
                'path_correctness' in intent_stats[key]["avg_metric_scores"] and \
-               'finals_correctness' in intent_stats[key]["avg_metric_scores"]:
+               'action_correctness' in intent_stats[key]["avg_metric_scores"]:
                 logic_score = (
                     intent_stats[key]["avg_metric_scores"]['classification_accuracy'] * 0.4 +
                     intent_stats[key]["avg_metric_scores"]['path_correctness'] * 0.4 +
-                    intent_stats[key]["avg_metric_scores"]['finals_correctness'] * 0.2
+                    intent_stats[key]["avg_metric_scores"]['action_correctness'] * 0.2
                 ) / 1.0
                 intent_stats[key]["avg_metric_scores"]['logic_ability'] = logic_score
             
@@ -1437,11 +1444,11 @@ class LLMEvaluationPipeline:
             # 计算逻辑得分
             if 'classification_accuracy' in intensity_stats[key]["avg_metric_scores"] and \
                'path_correctness' in intensity_stats[key]["avg_metric_scores"] and \
-               'finals_correctness' in intensity_stats[key]["avg_metric_scores"]:
+               'action_correctness' in intensity_stats[key]["avg_metric_scores"]:
                 logic_score = (
                     intensity_stats[key]["avg_metric_scores"]['classification_accuracy'] * 0.4 +
                     intensity_stats[key]["avg_metric_scores"]['path_correctness'] * 0.4 +
-                    intensity_stats[key]["avg_metric_scores"]['finals_correctness'] * 0.2
+                    intensity_stats[key]["avg_metric_scores"]['action_correctness'] * 0.2
                 ) / 1.0
                 intensity_stats[key]["avg_metric_scores"]['logic_ability'] = logic_score
             
@@ -1452,6 +1459,51 @@ class LLMEvaluationPipeline:
         
         all_scores = [r.overall_score for r in self.evaluation_reports]
         overall_avg = sum(all_scores) / len(all_scores) if all_scores else 0.0
+
+        def track_aggregate(reports):
+            """Aggregate the two tracks without mixing Chat into Execution."""
+            if not reports:
+                return {
+                    "count": 0,
+                    "sage_style_score": 0.0,
+                    "execution_score": 0.0,
+                    "task_success_rate": 0.0,
+                    "decision_track": {},
+                    "execution_track": {},
+                    "chat": {"quality": 0.0, "scale": "0_1"},
+                }
+
+            def average(attr):
+                values = [float(getattr(report, attr, 0.0)) for report in reports]
+                return sum(values) / len(values) if values else 0.0
+
+            return {
+                "count": len(reports),
+                "sage_style_score": average("sage_style_score"),
+                "execution_score": average("execution_score"),
+                "task_success_rate": sum(1 for report in reports if report.task_success) / len(reports),
+                "decision_track": {
+                    "classification_accuracy": average("classification_accuracy"),
+                    "canonical_path_correctness": average("canonical_path_correctness"),
+                    "predicted_action_correctness": average("predicted_action_correctness"),
+                    "logic_score": average("logic_score"),
+                },
+                "execution_track": {
+                    "required_verification": average("required_verification_score"),
+                    "policy_compliance": average("policy_compliance_score"),
+                    "action_execution": average("action_execution_score"),
+                    "goal_fulfillment": average("goal_fulfillment"),
+                },
+                "chat": {"quality": average("chat_quality"), "scale": "0_1"},
+            }
+
+        track_by_adversarial_level = {}
+        for level in ("zero_conflict", "weak_conflict", "strong_conflict"):
+            track_by_adversarial_level[level] = track_aggregate(
+                [report for report in self.evaluation_reports
+                 if report.adversarial_intensity == level]
+            )
+        track_by_adversarial_level["all"] = track_aggregate(self.evaluation_reports)
         
         # 计算全局指标平均分
         global_metric_scores = {}
@@ -1484,11 +1536,11 @@ class LLMEvaluationPipeline:
         logic_score = 0.0
         if 'classification_accuracy' in global_avg_metric_scores and \
            'path_correctness' in global_avg_metric_scores and \
-           'finals_correctness' in global_avg_metric_scores:
+           'action_correctness' in global_avg_metric_scores:
             logic_score = (
                 global_avg_metric_scores['classification_accuracy'] * 0.4 +
                 global_avg_metric_scores['path_correctness'] * 0.4 +
-                global_avg_metric_scores['finals_correctness'] * 0.2
+                global_avg_metric_scores['action_correctness'] * 0.2
             ) / 1.0
             global_avg_metric_scores['logic_ability'] = logic_score
         
@@ -1510,11 +1562,11 @@ class LLMEvaluationPipeline:
             # 计算逻辑得分
             if 'classification_accuracy' in turn_stats[turn_count]["avg_metric_scores"] and \
                'path_correctness' in turn_stats[turn_count]["avg_metric_scores"] and \
-               'finals_correctness' in turn_stats[turn_count]["avg_metric_scores"]:
+               'action_correctness' in turn_stats[turn_count]["avg_metric_scores"]:
                 logic_score = (
                     turn_stats[turn_count]["avg_metric_scores"]['classification_accuracy'] * 0.4 +
                     turn_stats[turn_count]["avg_metric_scores"]['path_correctness'] * 0.4 +
-                    turn_stats[turn_count]["avg_metric_scores"]['finals_correctness'] * 0.2
+                    turn_stats[turn_count]["avg_metric_scores"]['action_correctness'] * 0.2
                 ) / 1.0
                 turn_stats[turn_count]["avg_metric_scores"]['logic_ability'] = logic_score
             
@@ -1530,10 +1582,14 @@ class LLMEvaluationPipeline:
             "total_simulations": len(self.evaluation_reports),
             "scenario_duration_seconds": self.scenario_duration,
             "overall_avg_score": overall_avg,
+            "overall_sage_style_score": track_by_adversarial_level["all"]["sage_style_score"],
+            "overall_execution_score": track_by_adversarial_level["all"]["execution_score"],
+            "overall_task_success_rate": track_by_adversarial_level["all"]["task_success_rate"],
             "overall_avg_metric_scores": global_avg_metric_scores,
             "overall_avg_chat_quality_dimensions": global_avg_chat_quality_dimensions,
             "by_intent": intent_stats,
             "by_adversarial_intensity": intensity_stats,
+            "by_adversarial_level": track_by_adversarial_level,
             "by_turn": turn_stats,
         }
     
@@ -1581,6 +1637,19 @@ class LLMEvaluationPipeline:
                     for metric_name, score in stats['avg_metric_scores'].items():
                         if metric_name != "turn_level_evaluations":
                             print(f"    - {metric_name}: {score:.4f}")
+
+        if summary.get('by_adversarial_level'):
+            print(f"\n双轨评分（按对抗等级）:")
+            for level in ("zero_conflict", "weak_conflict", "strong_conflict"):
+                stats = summary['by_adversarial_level'].get(level, {})
+                if stats.get("count", 0) == 0:
+                    continue
+                print(
+                    f"  【{level}】: SAGE={stats.get('sage_style_score', 0.0):.4f}, "
+                    f"Execution={stats.get('execution_score', 0.0):.4f}, "
+                    f"TaskSuccess={stats.get('task_success_rate', 0.0):.2%} "
+                    f"({stats['count']}次)"
+                )
         
         if summary.get('by_turn'):
             print(f"\n按评测轮次统计:")

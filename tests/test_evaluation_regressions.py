@@ -50,7 +50,7 @@ class EvaluationRegressionTests(unittest.TestCase):
             turns=[SimulationTurn(0, "如何设置参数？", output)],
         )
 
-    def test_path_score_uses_executed_path_and_action_schema_is_stable(self):
+    def test_path_score_uses_predicted_canonical_path_and_action_schema_is_stable(self):
         simulation = self._make_simulation(
             "默认参数会在调用时省略该参数时生效。例如 def f(x=1): return x。"
         )
@@ -58,7 +58,7 @@ class EvaluationRegressionTests(unittest.TestCase):
             "online_education", get_sop_graph("online_education")
         ).evaluate_simulation(simulation)
         metrics = {metric.metric_name: metric.score for metric in report.metric_scores}
-        self.assertEqual(metrics["path_correctness"], 1.0)
+        self.assertEqual(metrics["path_correctness"], 0.0)
         self.assertEqual(metrics["action_correctness"], 1.0)
         self.assertIn("goal_fulfillment", metrics)
 
