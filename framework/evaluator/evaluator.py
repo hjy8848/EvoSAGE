@@ -771,7 +771,17 @@ class Evaluator:
             for key, value in expected.items()
         ) if expected else bool(successful_actions)
         query_score = 1.0 if valid_queries else 0.0
-        action_score = 1.0 if successful_actions and state_ok else 0.0
+        expected_action = case_spec.get("metadata", {}).get("finals", {}).get("Action", "")
+        executed_action = (
+            successful_actions[-1].get("result", {}).get("action_name")
+            if successful_actions else ""
+        )
+        action_score = 1.0 if (
+            successful_actions
+            and expected_action
+            and executed_action == expected_action
+            and state_ok
+        ) else 0.0
         score = (query_score + action_score) / 2.0
         return score, {
             "applicable": True,
@@ -1016,9 +1026,16 @@ class Evaluator:
         if claimed_action and expected_action and claimed_action != expected_action:
             add_error("wrong_final_action")
 
-        policy_score = 1.0 if prerequisites_ok and not authoritative_conflicts and not failed_actions else 0.0
-        if allowed_actions and successful_actions and executed_action not in allowed_actions:
-            policy_score = 0.0
+        correct_action_executed = bool(successful_actions) and (
+            executed_action in allowed_actions if allowed_actions else bool(executed_action)
+        )
+        policy_score = 1.0 if (
+            verification_score >= 1.0
+            and prerequisites_ok
+            and not authoritative_conflicts
+            and not failed_actions
+            and correct_action_executed
+        ) else 0.0
         if not requirements and action_events and not any(
             (event.get("result", {}) or {}).get("success") for event in action_events
         ):

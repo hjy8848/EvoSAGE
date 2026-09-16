@@ -155,6 +155,7 @@ class EcommerceEvaluationTrackTests(unittest.TestCase):
         report = self._evaluate(simulation)
         self.assertEqual(report.predicted_action_correctness, 1.0)
         self.assertLess(report.required_verification_score, 1.0)
+        self.assertEqual(report.policy_compliance_score, 0.0)
         self.assertIn("missed_backend_verification", report.error_categories)
         self.assertFalse(report.task_success)
 
