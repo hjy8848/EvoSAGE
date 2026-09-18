@@ -264,6 +264,19 @@ online_education
 
 当前边界仍需明确：这些 Backend 是 benchmark 内的确定性模拟后台，不是真实业务数据库；凭证上传、文件解析和凭证真实性核验仍未实现，`request_document` 只表示“要求用户补充材料”。
 
+### 2.9 2026-09-18：完成六场景 122 条 Path 静态闭环核查
+
+新增 `tests/test_pathlist_backend_sanity.py`，对全部 canonical PathList 做无 LLM 的闭环检查：
+
+- Ecommerce 15 条、Telecom 26 条、Property 23 条、Logistics 18 条、Airline 19 条、Education 21 条，共 122 条；
+- 每条路径都必须有非空的 `required_backend_verifications`；
+- 每个权威字段都必须通过对应 query tool 获取，返回结果不得包含 `private_state` 或聚合 `system_info`；
+- 每个 GT Action 都必须映射到正式 action tool；
+- 正确查询后执行动作必须成功，并产生预期的 Backend 状态迁移；
+- `goal_satisfied()`、`expected_outcome` 和 `action_execution` event 必须同时成立。
+
+本轮结果：全部 122 条路径通过，完整回归测试为 37 passed（保留 1 个既有 urllib3/LibreSSL 警告）。这证明六场景的静态 Backend contract 已闭合；下一步重点从“能否执行”转向“真实 API 逐场景冒烟、用户模拟器事件驱动和凭证流程”。
+
 ## 3. 我们真正要进化什么
 
 EvoSAGE 的进化目标应定义为：
@@ -494,7 +507,7 @@ Agent 提出 SOP 修改
 - 已区分 `predicted_path`、`executed_path`，并记录详细终止状态；
 - 已加入 `goal_fulfillment`，并修复纯承诺话术不能直接算目标完成；
 - 已完成电商退款场景的最小隐藏状态后端，而不是继续把 `system_info` 直接暴露给 Agent；
-- `online_education` 和其他四个场景的真正后端环境仍未实现。
+- 五个非 Ecommerce 场景已经完成第一版 `ScenarioBackend` 迁移，并通过六场景 122 条 Path 静态闭环核查；仍需真实 API 冒烟和更细的业务规则审计。
 
 ## 7. 接下来要做的事情
 
