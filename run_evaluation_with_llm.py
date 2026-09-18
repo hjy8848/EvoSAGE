@@ -44,6 +44,7 @@ python run_evaluation_with_llm.py \
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -1817,6 +1818,13 @@ def main():
     )
     
     args = parser.parse_args()
+
+    # Prefer an explicitly supplied key, but allow API-mode runs to load it
+    # from the process environment.  Passing a secret through --api-key makes
+    # it visible in the macOS process list; OPENAI_API_KEY keeps it out of
+    # argv and therefore out of normal process inspection and shell history.
+    if args.eval_mode == "api" and not args.api_key:
+        args.api_key = os.environ.get("OPENAI_API_KEY")
     
     # 【投票模式】处理多模型参数
     if args.eval_mode == "voting":
