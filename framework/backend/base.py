@@ -141,10 +141,11 @@ class BackendEnvironment:
     def get_rule_context(self) -> Dict[str, Any]:
         """Compatibility view for the existing rule engine.
 
-        New evaluators should derive this from the authoritative state instead
-        of constructing a separate hidden system_info object.
+        Only the backend's explicitly public projection is returned.  The
+        evaluator may inspect the full state directly, but Agent-facing code
+        must never obtain hidden backend truth through this compatibility API.
         """
-        return {"system_info": copy.deepcopy(self.state)}
+        return {"system_info": copy.deepcopy(self.state.get("public_state", {}))}
 
     def get_public_state(self) -> Dict[str, Any]:
         """Public state explicitly allowed as an initial Agent observation."""
@@ -161,9 +162,14 @@ class BackendEnvironment:
         if (
             self.case_spec.scenario == "online_education"
             and self._lookup(self.state, "interaction.last_action") == "PLAN"
-            and not self._lookup(self.state, "interaction.answer_completed")
+            and not (
+                self._lookup(self.state, "interaction.answer_completed")
+                or self._lookup(self.state, "interaction.plan_created")
+            )
         ):
-            # Resource allocation is not itself an answer to a knowledge question.
+            # A resource allocation must be recorded by the backend.  The
+            # formal PLAN action is therefore sufficient for a resource goal,
+            # but a text-only promise is not.
             return False
         return all(self._lookup(self.state, key) == value for key, value in expected.items())
 

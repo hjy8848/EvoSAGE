@@ -5,7 +5,7 @@ import hashlib
 
 from .base import BackendEnvironment
 from .ecommerce import EcommerceBackend
-from .scenario import ScenarioBackend
+from .scenario import SCENARIO_ACTION_STATE_UPDATES, ScenarioBackend
 from .types import CaseSpec
 from ..config import get_scenario_config
 
@@ -33,34 +33,108 @@ def _build_legacy_gt(scenario_id: str, path_config: Dict[str, Any]) -> Dict[str,
 def _build_required_backend_verifications(
     scenario_id: str, path_config: Dict[str, Any]
 ) -> list:
-    """Declare only backend facts that the selected SOP path actually uses."""
-    if scenario_id != "ecommerce_refund":
-        return []
+    """Declare authoritative checks required by the selected path.
 
-    system_variables = path_config.get("system_variables", {})
-    requirements = [
-        {
-            "backend_field": "ShippingStatus",
-            "tool": "query_order",
-            "argument": "order_id",
-            "result_field": "shipping_status",
+    These declarations drive execution scoring only.  They are stored in the
+    CaseSpec for the evaluator and are never copied into the Agent prompt.
+    """
+    system_variables = dict(path_config.get("system_variables") or {})
+    # Education PathList stores the risk branch as a top-level path field.
+    # Do not require a risk query for paths whose branch does not use it.
+    if scenario_id == "online_education" and isinstance(path_config.get("isRiskUser"), bool):
+        system_variables["isRiskUser"] = path_config["isRiskUser"]
+    requirements = []
+    mappings = {
+        "ecommerce_refund": {
+            "ShippingStatus": ("query_order", "order_id", "shipping_status", "order_id"),
+            "CreditLevel": ("query_customer_profile", "customer_id", "credit_level", "customer_id"),
+            "PaymentStatus": ("query_payment", "order_id", "payment_status", "order_id"),
         },
-    ]
-    if "CreditLevel" in system_variables:
+        "telecom_package": {
+            "PackageStatus": ("query_package", "record_id", "package_status", "record_id"),
+            "Penalty": ("query_penalty", "record_id", "penalty", "record_id"),
+        },
+        "property_service": {
+            "HouseStatus": ("query_property_account", "record_id", "house_status", "record_id"),
+            "FeePaymentStatus": ("query_fee_status", "record_id", "fee_payment_status", "record_id"),
+        },
+        "logistics_delivery": {
+            "orderStatus": ("query_delivery_order", "record_id", "order_status", "record_id"),
+            "hasInsurance": ("query_insurance", "record_id", "has_insurance", "record_id"),
+        },
+        "airline_refund": {
+            "memberLevel": ("query_member_profile", "record_id", "member_level", "record_id"),
+            "hasInsurance": ("query_ticket_rules", "record_id", "has_insurance", "record_id"),
+        },
+        "online_education": {
+            "isRiskUser": ("query_user_risk", "record_id", "is_risk_user", "record_id"),
+        },
+    }
+    for backend_field, (tool, argument, result_field, knowledge_key) in mappings.get(scenario_id, {}).items():
+        if backend_field not in system_variables:
+            continue
         requirements.append({
-            "backend_field": "CreditLevel",
-            "tool": "query_customer_profile",
-            "argument": "customer_id",
-            "result_field": "credit_level",
+            "backend_field": backend_field,
+            "tool": tool,
+            "argument": argument,
+            "result_field": result_field,
+            "knowledge_key": knowledge_key,
         })
-    if "PaymentStatus" in system_variables:
-        requirements.append({
-            "backend_field": "PaymentStatus",
-            "tool": "query_payment",
-            "argument": "order_id",
-            "result_field": "payment_status",
-        })
+
+    # Paths without a branching system variable still require a record lookup;
+    # otherwise an Agent could receive credit for an action on an unverified ID.
+    if not requirements:
+        default_tools = {
+            "ecommerce_refund": ("query_order", "order_id", "order_id", "order_id"),
+            "telecom_package": ("query_package", "record_id", "record_id", "record_id"),
+            "property_service": ("query_property_account", "record_id", "record_id", "record_id"),
+            "logistics_delivery": ("query_delivery_order", "record_id", "record_id", "record_id"),
+            "airline_refund": ("query_booking", "record_id", "record_id", "record_id"),
+            "online_education": ("query_course_enrollment", "record_id", "record_id", "record_id"),
+        }
+        if scenario_id in default_tools:
+            tool, argument, result_field, knowledge_key = default_tools[scenario_id]
+            requirements.append({
+                "backend_field": "RecordIdentity",
+                "tool": tool,
+                "argument": argument,
+                "result_field": result_field,
+                "knowledge_key": knowledge_key,
+            })
     return requirements
+
+
+def _effective_system_variables(scenario_id: str, path_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize PathList truth into backend-owned, queryable fields."""
+    values = dict(path_config.get("system_variables") or {})
+    if scenario_id == "online_education" and "isRiskUser" in path_config:
+        values["isRiskUser"] = path_config["isRiskUser"] is True
+    defaults = {
+        "telecom_package": {
+            "PackageStatus": "NoContract", "Penalty": 0,
+            "AccountStatus": "Active", "CurrentPlan": "Standard",
+        },
+        "property_service": {
+            "HouseStatus": "Occupied", "FeePaymentStatus": "Settled",
+            "RepairTicketStatus": "None", "EmergencyLevel": "Normal",
+        },
+        "logistics_delivery": {
+            "orderStatus": "Undelivered", "hasInsurance": False,
+            "deliveryAddress": "已登记", "packageRisk": "Normal",
+        },
+        "airline_refund": {
+            "BookingStatus": "Confirmed", "memberLevel": "Regular",
+            "hasInsurance": False, "flightStatus": "Scheduled", "ticketType": "Standard",
+        },
+        "online_education": {
+            "CourseStatus": "Enrolled", "HistoricalComplaintRecords": False,
+            "RefundEligibility": True, "KnowledgeResources": ["课程资料"],
+            "isRiskUser": False,
+        },
+    }
+    for key, value in defaults.get(scenario_id, {}).items():
+        values.setdefault(key, value)
+    return values
 
 
 def build_case_spec(
@@ -72,9 +146,9 @@ def build_case_spec(
 ) -> CaseSpec:
     """Build a deterministic case from the existing PathList.
 
-    Ecommerce is fully backed by EcommerceBackend in this migration. Other
-    scenarios receive a compatible CaseSpec so the pipeline can migrate them
-    incrementally without changing the public runner API.
+    Every supported scenario receives a deterministic CaseSpec with a hidden
+    backend record, a public projection, required verification declarations,
+    and an expected backend outcome.
     """
     path_config = path_config or {}
     legacy_gt = _build_legacy_gt(scenario_id, path_config)
@@ -174,6 +248,7 @@ def build_case_spec(
                 "finals": legacy_gt["finals"],
                 "classification": classification,
                 "required_backend_verifications": required_backend_verifications,
+                "backend_system_variables": dict(system_variables),
             },
         )
 
@@ -181,20 +256,24 @@ def build_case_spec(
     # adapter exposes only scenario-specific tools and public fields.
     record_id = _stable_id("REC", f"{case_id}:record")
     customer_id = _stable_id("CUS", case_id)
+    system_variables = _effective_system_variables(scenario_id, path_config)
     expected_outcome = {"interaction.last_action": expected_action} if expected_action else {}
     if expected_action == "PLAN":
         expected_outcome["interaction.plan_created"] = True
+    for field, value in SCENARIO_ACTION_STATE_UPDATES.get(scenario_id, {}).get(expected_action, {}).items():
+        expected_outcome[f"interaction.{field}"] = value
     return CaseSpec(
         case_id=case_id,
         scenario=scenario_id,
         backend_record={
             "record": {"record_id": record_id, "customer_id": customer_id},
-            "system_info": dict(path_config.get("system_variables", {})),
-            "status": {},
+            "private_state": {"system_variables": system_variables},
+            "public_state": system_variables,
             "interaction": {
                 "last_action": None,
                 "status": "open",
                 "answer_completed": False,
+                "plan_created": False,
             },
         },
         user_goal={"type": user_intent, "desired_action": expected_action},
@@ -204,7 +283,12 @@ def build_case_spec(
             "knows_record_id": True,
             "knows_customer_id": True,
         },
-        user_policy={"truthfulness": "truthful", "reveal_record_id_on_request": True},
+        user_policy={
+            "mode": user_policy_mode,
+            "truthfulness": "truthful" if user_policy_mode == "truthful" else "unreliable",
+            "reveal_record_id_on_request": True,
+            "reveal_customer_id_on_request": True,
+        },
         initial_observation={},
         expected_outcome=expected_outcome,
         metadata={
@@ -216,6 +300,7 @@ def build_case_spec(
             "expected_path": legacy_gt["expected_path"],
             "finals": legacy_gt["finals"],
             "required_backend_verifications": required_backend_verifications,
+            "backend_system_variables": dict(system_variables),
         },
     )
 
@@ -223,4 +308,12 @@ def build_case_spec(
 def create_backend(case_spec: CaseSpec) -> BackendEnvironment:
     if case_spec.scenario == "ecommerce_refund":
         return EcommerceBackend(case_spec)
-    return ScenarioBackend(case_spec)
+    if case_spec.scenario in {
+        "telecom_package",
+        "property_service",
+        "logistics_delivery",
+        "airline_refund",
+        "online_education",
+    }:
+        return ScenarioBackend(case_spec)
+    raise ValueError(f"No authoritative backend registered for scenario: {case_spec.scenario}")

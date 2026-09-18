@@ -672,7 +672,7 @@ class Evaluator:
         text = " ".join(texts).strip()
         case_spec = getattr(simulation_result, "case_spec", None) or {}
         case = (case_spec.get("metadata", {}) if isinstance(case_spec, dict) else {})
-        if simulation_result.scenario_id == "ecommerce_refund" and case_spec:
+        if case_spec and getattr(simulation_result, "backend_final_state", None):
             if getattr(simulation_result, "goal_solved", False):
                 return 1.0, {
                     "reason": "backend_expected_outcome_satisfied",
@@ -748,50 +748,17 @@ class Evaluator:
 
     @staticmethod
     def _compute_backend_verification(simulation_result) -> Tuple[float, Dict[str, Any]]:
-        """评估客服是否查询了权威后台并成功执行了状态变更。"""
-        if simulation_result.scenario_id != "ecommerce_refund":
-            return 1.0, {"applicable": False, "reason": "scenario_not_migrated"}
-
-        case_spec = getattr(simulation_result, "case_spec", None) or {}
-        knowledge = case_spec.get("user_knowledge", {})
-        expected = case_spec.get("expected_outcome", {})
-        events = getattr(simulation_result, "backend_events", []) or []
-        tool_events = [event for event in events if event.get("event_type") == "tool_call"]
-        action_events = [event for event in events if event.get("event_type") == "action_execution"]
-        order_queries = [event for event in tool_events if event.get("name") == "query_order"]
-        valid_queries = [
-            event for event in order_queries
-            if event.get("result", {}).get("success")
-            and event.get("arguments", {}).get("order_id") == knowledge.get("order_id")
-        ]
-        successful_actions = [event for event in action_events if event.get("result", {}).get("success")]
-        final_state = getattr(simulation_result, "backend_final_state", {}) or {}
-        state_ok = all(
-            Evaluator._lookup(final_state, key) == value
-            for key, value in expected.items()
-        ) if expected else bool(successful_actions)
-        query_score = 1.0 if valid_queries else 0.0
-        expected_action = case_spec.get("metadata", {}).get("finals", {}).get("Action", "")
-        executed_action = (
-            successful_actions[-1].get("result", {}).get("action_name")
-            if successful_actions else ""
-        )
-        action_score = 1.0 if (
-            successful_actions
-            and expected_action
-            and executed_action == expected_action
-            and state_ok
-        ) else 0.0
-        score = (query_score + action_score) / 2.0
-        return score, {
-            "applicable": True,
-            "query_order_called": bool(order_queries),
-            "valid_order_query": bool(valid_queries),
-            "successful_actions": [event.get("name") for event in successful_actions],
-            "expected_outcome": expected,
-            "state_satisfies_expected_outcome": state_ok,
-            "query_score": query_score,
-            "action_execution_score": action_score,
+        """Compatibility view over the unified V/P/A/G assessment."""
+        assessment = Evaluator._execution_assessment(simulation_result)
+        return assessment["verification"], {
+            "applicable": bool(getattr(simulation_result, "case_spec", None)),
+            "required_backend_verifications": assessment["required_backend_verifications"],
+            "successful_actions": [assessment["executed_action"]]
+            if assessment["executed_action"] else [],
+            "expected_outcome": assessment["expected_outcome"],
+            "state_satisfies_expected_outcome": assessment["state_satisfies_expected_outcome"],
+            "verification_score": assessment["verification"],
+            "action_execution_score": assessment["action_execution"],
         }
 
     @staticmethod
@@ -805,17 +772,19 @@ class Evaluator:
 
     @staticmethod
     def _required_verifications(simulation_result) -> List[Dict[str, Any]]:
-        """Return the authoritative checks required by the fixed case.
+        """Return authoritative checks required by the fixed CaseSpec.
 
-        This is intentionally deterministic for the Ecommerce MVP.  The
-        values come from CaseSpec only inside the evaluator; they are never
-        copied into the Agent or Judge prompt.
+        The values come from CaseSpec only inside the evaluator; they are
+        never copied into the Agent or Judge prompt.  All migrated scenarios
+        use the same declaration contract.
         """
-        if simulation_result.scenario_id != "ecommerce_refund":
-            return []
         case_spec = getattr(simulation_result, "case_spec", None) or {}
         path_config = case_spec.get("metadata", {}).get("path_config", {})
-        system_variables = path_config.get("system_variables", {})
+        metadata = case_spec.get("metadata", {})
+        system_variables = metadata.get(
+            "backend_system_variables",
+            path_config.get("system_variables", {}),
+        ) or {}
         knowledge = case_spec.get("user_knowledge", {})
         requirements = []
         # Newer runner versions declare the exact backend facts used by the
@@ -833,7 +802,11 @@ class Evaluator:
                 "field": backend_field,
                 "tool": tool,
                 "public_field": public_field,
-                "expected_value": system_variables.get(backend_field),
+                "expected_value": (
+                    knowledge.get(argument)
+                    if backend_field == "RecordIdentity"
+                    else system_variables.get(backend_field)
+                ),
                 "arguments": {argument: knowledge.get(argument)},
             })
         if requirements:
@@ -1094,7 +1067,7 @@ class Evaluator:
             for name in metrics
         }
         details.update({
-            "applicable": simulation_result.scenario_id == "ecommerce_refund",
+            "applicable": bool(getattr(simulation_result, "case_spec", None)),
             "required_verification_coverage": assessment["verification"],
             "required_backend_verifications": assessment["required_backend_verifications"],
             "expected_action": assessment["expected_action"],
@@ -1442,12 +1415,12 @@ class Evaluator:
         legacy_goal_fulfillment, legacy_goal_details = self._compute_goal_fulfillment(
             simulation_result, eval_turns
         )
-        # For the migrated Ecommerce scenario, goal fulfillment is only the
-        # CaseSpec expected_outcome comparison.  The old text heuristic is
-        # retained solely for non-migrated scenarios and compatibility data.
+        # All six migrated scenarios use strict CaseSpec/backend goal
+        # fulfillment.  The text heuristic remains only for legacy samples
+        # that do not carry an authoritative backend CaseSpec.
         goal_fulfillment = (
             execution_assessment["goal_fulfillment"]
-            if simulation_result.scenario_id == "ecommerce_refund"
+            if getattr(simulation_result, "case_spec", None)
             else legacy_goal_fulfillment
         )
         goal_details = (
@@ -1457,7 +1430,7 @@ class Evaluator:
                 "backend_final_state": getattr(simulation_result, "backend_final_state", {}) or {},
                 "state_satisfies_expected_outcome": execution_assessment["state_satisfies_expected_outcome"],
             }
-            if simulation_result.scenario_id == "ecommerce_refund"
+            if getattr(simulation_result, "case_spec", None)
             else legacy_goal_details
         )
         

@@ -509,12 +509,10 @@ class LLMEvaluationPipeline:
             user_id=user_id,
             user_policy_mode=self.user_policy_mode,
         )
-        # 本轮只把 ecommerce_refund 接入 authoritative backend 闭环。
-        # 其他场景继续使用原兼容路径，避免在本轮扩大迁移范围。
-        backend_environment = (
-            create_backend(case_spec)
-            if self.scenario_id == "ecommerce_refund" else None
-        )
+        # All supported benchmark scenarios use the authoritative backend
+        # contract.  The Agent sees only initial public observations and
+        # formal tool results; complete CaseSpec/backend truth stays hidden.
+        backend_environment = create_backend(case_spec)
         if backend_environment is not None:
             backend_environment.reset(case_spec)
 
@@ -569,18 +567,9 @@ class LLMEvaluationPipeline:
         # 使用LLM生成初始消息(根据用户画像动态生成,避免固定模板)
         initial_message = user_model.generate_initial_message()
         
-        # Ecommerce 的后台状态只通过正式工具返回，不进入 Agent 上下文；
-        # 未迁移场景保留旧 system_info 兼容视图。
+        # Backend state is never injected into Agent context.  Scenario facts
+        # become visible only after a successful formal query tool call.
         context_data = {"initial_observation": case_spec.initial_observation}
-        if backend_environment is None:
-            if path_config:
-                system_info = self._generate_system_info_from_path_config(path_config)
-            else:
-                system_info = get_initial_state_for_intent_by_scenario(
-                    self.scenario_id,
-                    user_intent
-                )
-            context_data["system_info"] = system_info
         
         # 运行模拟
         if self.verbose:

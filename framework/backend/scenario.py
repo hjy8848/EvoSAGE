@@ -1,4 +1,4 @@
-"""Generic deterministic backend adapters for the five non-ecommerce scenarios."""
+"""Deterministic authoritative backend adapters for the non-ecommerce scenarios."""
 
 from typing import Any, Dict, List
 import re
@@ -65,13 +65,94 @@ SCENARIO_ACTION_TOOLS = {
     },
 }
 
+# Only these fields may be returned by a query.  The complete backend record
+# remains evaluator-only; a tool never returns the private state wholesale.
+SCENARIO_PUBLIC_FIELDS = {
+    "telecom_package": {
+        "query_package": ("PackageStatus", "package_status"),
+        "query_account": ("AccountStatus", "account_status"),
+        "query_penalty": ("Penalty", "penalty"),
+    },
+    "property_service": {
+        "query_property_account": ("HouseStatus", "house_status"),
+        "query_fee_status": ("FeePaymentStatus", "fee_payment_status"),
+        "query_repair_ticket": ("RepairTicketStatus", "repair_ticket_status"),
+    },
+    "logistics_delivery": {
+        "query_delivery_order": ("orderStatus", "order_status"),
+        "query_insurance": ("hasInsurance", "has_insurance"),
+        "query_delivery_details": ("deliveryAddress", "delivery_address"),
+    },
+    "airline_refund": {
+        "query_booking": ("BookingStatus", "booking_status"),
+        "query_member_profile": ("memberLevel", "member_level"),
+        "query_ticket_rules": ("hasInsurance", "has_insurance"),
+        "query_flight_status": ("flightStatus", "flight_status"),
+    },
+    "online_education": {
+        "query_course_enrollment": ("CourseStatus", "course_status"),
+        "query_learning_history": ("HistoricalComplaintRecords", "historical_complaints"),
+        "query_user_risk": ("isRiskUser", "is_risk_user"),
+        "query_refund_eligibility": ("RefundEligibility", "refund_eligibility"),
+        "search_course_content": ("KnowledgeResources", "knowledge_resources"),
+    },
+}
+
+SCENARIO_ACTION_STATE_UPDATES = {
+    "telecom_package": {
+        "ChangeOrder": {"package_status": "Changed"},
+        "TransHuman": {"escalation_status": "Requested"},
+        "GoodBye": {"interaction_status": "Closed"},
+    },
+    "property_service": {
+        "Payment": {"fee_payment_status": "Paid"},
+        "Registration": {"repair_ticket_status": "Registered"},
+        "TransHuman": {"escalation_status": "Requested"},
+        "Reject": {"request_status": "Rejected"},
+        "PayInformation": {"information_status": "Provided"},
+    },
+    "logistics_delivery": {
+        "Interception": {"interception_status": "Requested"},
+        "Modify": {"delivery_modification_status": "Requested"},
+        "Registration": {"claim_status": "Registered"},
+        "Supplementary": {"supplement_status": "Requested"},
+        "MakeUpDifference": {"difference_status": "Paid"},
+        "Detail": {"delivery_detail_status": "Provided"},
+        "Compensation": {"compensation_status": "Approved"},
+        "TransHuman": {"escalation_status": "Requested"},
+        "Reject": {"request_status": "Rejected"},
+        "Comfort": {"comfort_status": "Recorded"},
+    },
+    "airline_refund": {
+        "RescheduleOrRefund": {"booking_action_status": "Completed"},
+        "RescheduleOrRefund+HandlingFee": {"booking_action_status": "CompletedWithFee"},
+        "RescheduleOrRefund+Compensation": {"booking_action_status": "CompletedWithCompensation"},
+        "Supplementary": {"supplement_status": "Requested"},
+        "Compensation": {"compensation_status": "Approved"},
+        "Comfort": {"comfort_status": "Recorded"},
+        "TransHuman": {"escalation_status": "Requested"},
+        "Reject": {"request_status": "Rejected"},
+        "Enquiry": {"enquiry_status": "Answered"},
+    },
+    "online_education": {
+        "ANSWER": {"answer_completed": True},
+        "GUIDE": {"guidance_status": "Provided"},
+        "REVIEW": {"review_status": "Opened"},
+        "COMFORT": {"comfort_status": "Recorded"},
+        "PLAN": {"plan_created": True, "resource_status": "Allocated"},
+        "NEGOTIATE": {"negotiation_status": "Opened"},
+        "REFUND": {"refund_status": "Submitted"},
+        "TRANSFER_HUMAN": {"escalation_status": "Requested"},
+    },
+}
+
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_")
 
 
 class ScenarioBackend(BackendEnvironment):
-    """Deterministic backend that preserves each scenario's existing variables."""
+    """Scenario-specific public projections over a hidden deterministic state."""
 
     def __init__(self, case_spec: CaseSpec):
         self._query_tools = SCENARIO_QUERY_TOOLS.get(case_spec.scenario, [])
@@ -114,15 +195,23 @@ class ScenarioBackend(BackendEnvironment):
             )
         if tool_name not in dict(self._query_tools):
             return super()._execute_tool(tool_name, arguments)
+        public_field = SCENARIO_PUBLIC_FIELDS.get(self.case_spec.scenario, {}).get(tool_name)
+        if public_field is None:
+            return super()._execute_tool(tool_name, arguments)
+        backend_key, public_key = public_field
+        public_state = self.state.get("public_state", {})
+        data = {
+            "record_id": self._record().get("record_id"),
+            "customer_id": self._record().get("customer_id"),
+            public_key: public_state.get(backend_key),
+            # This is a deliberately limited projection.  AgentModel uses it
+            # to derive the legacy SOP context from observed tool results.
+            "system_info": {backend_key: public_state.get(backend_key)},
+        }
         return ToolResult(
             success=True,
             tool_name=tool_name,
-            data={
-                "record_id": self._record().get("record_id"),
-                "customer_id": self._record().get("customer_id"),
-                "system_info": dict(self.state.get("system_info", {})),
-                "status": dict(self.state.get("status", {})),
-            },
+            data=data,
         )
 
     def _execute_action(self, action_name: str, arguments: Dict[str, Any]) -> ActionResult:
@@ -138,12 +227,8 @@ class ScenarioBackend(BackendEnvironment):
         interaction["last_action"] = action_name
         interaction["status"] = "closed" if action_name in {"GoodBye", "END"} else "processed"
         interaction["repeated"] = previous == action_name
-        if action_name == "ANSWER":
-            interaction["answer_completed"] = True
-        if action_name == "PLAN":
-            interaction["plan_created"] = True
-        if action_name in {"TransHuman", "TRANSFER_HUMAN"}:
-            interaction["escalation_status"] = "Requested"
+        updates = SCENARIO_ACTION_STATE_UPDATES.get(self.case_spec.scenario, {}).get(action_name, {})
+        interaction.update(updates)
         self.state.setdefault("action_status", {})[_safe_name(action_name)] = "completed"
         return ActionResult(
             success=True,
@@ -152,5 +237,6 @@ class ScenarioBackend(BackendEnvironment):
                 "record_id": self._record().get("record_id"),
                 "last_action": action_name,
                 "repeated": interaction["repeated"],
+                **updates,
             },
         )
