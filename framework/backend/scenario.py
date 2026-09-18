@@ -204,9 +204,6 @@ class ScenarioBackend(BackendEnvironment):
             "record_id": self._record().get("record_id"),
             "customer_id": self._record().get("customer_id"),
             public_key: public_state.get(backend_key),
-            # This is a deliberately limited projection.  AgentModel uses it
-            # to derive the legacy SOP context from observed tool results.
-            "system_info": {backend_key: public_state.get(backend_key)},
         }
         return ToolResult(
             success=True,

@@ -1366,6 +1366,23 @@ class AgentModel:
                         if observation.get("tool_name") == "query_customer_profile":
                             if data_fields.get("credit_level") is not None:
                                 system_info["CreditLevel"] = data_fields["credit_level"]
+                        # Non-ecommerce backends expose scenario-specific
+                        # public fields directly in the tool result.  Map
+                        # only those observed fields into the legacy rule
+                        # context; never copy a complete backend record.
+                        public_field_map = {
+                            "package_status": "PackageStatus",
+                            "penalty": "Penalty",
+                            "house_status": "HouseStatus",
+                            "fee_payment_status": "FeePaymentStatus",
+                            "order_status": "orderStatus",
+                            "has_insurance": "hasInsurance",
+                            "member_level": "memberLevel",
+                            "is_risk_user": "isRiskUser",
+                        }
+                        for public_field, legacy_field in public_field_map.items():
+                            if data_fields.get(public_field) is not None:
+                                system_info[legacy_field] = data_fields[public_field]
                         if isinstance(data_fields.get("system_info"), dict):
                             system_info.update(data_fields["system_info"])
                     if system_info:

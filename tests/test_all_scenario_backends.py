@@ -97,6 +97,7 @@ class AllScenarioBackendTests(unittest.TestCase):
             self.assertTrue(result.success)
             self.assertNotIn("private_state", result.data)
             self.assertNotIn("backend_record", result.data)
+            self.assertNotIn("system_info", result.data)
 
     def test_execution_track_uses_backend_events_for_all_scenarios(self):
         for scenario in MIGRATED_SCENARIOS:
