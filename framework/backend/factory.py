@@ -81,6 +81,57 @@ def _build_required_backend_verifications(
             "knowledge_key": knowledge_key,
         })
 
+    # Some actions have an authoritative precondition even when the selected
+    # PathList does not branch on that field.  Declare those checks as well so
+    # the evaluator can distinguish "the action happened" from "the action
+    # was authorized by the backend state".
+    expected_action = path_config.get("final_output", {}).get("Action", "")
+    action_requirements = {
+        "telecom_package": {
+            "ChangeOrder": ("AccountStatus", "query_account", "account_status"),
+        },
+        "property_service": {
+            "Payment": ("FeePaymentStatus", "query_fee_status", "fee_payment_status"),
+            "Reject": ("FeePaymentStatus", "query_fee_status", "fee_payment_status"),
+            "Registration": ("FeePaymentStatus", "query_fee_status", "fee_payment_status"),
+        },
+        "logistics_delivery": {
+            "Interception": ("orderStatus", "query_delivery_order", "order_status"),
+            "Modify": ("orderStatus", "query_delivery_order", "order_status"),
+            "Registration": ("orderStatus", "query_delivery_order", "order_status"),
+            "MakeUpDifference": ("orderStatus", "query_delivery_order", "order_status"),
+            "Compensation": ("hasInsurance", "query_insurance", "has_insurance"),
+            "TransHuman": ("orderStatus", "query_delivery_order", "order_status"),
+            "Reject": ("orderStatus", "query_delivery_order", "order_status"),
+            "Comfort": ("orderStatus", "query_delivery_order", "order_status"),
+        },
+        "airline_refund": {
+            "RescheduleOrRefund": ("BookingStatus", "query_booking", "booking_status"),
+            "RescheduleOrRefund+HandlingFee": ("BookingStatus", "query_booking", "booking_status"),
+            "RescheduleOrRefund+Compensation": ("BookingStatus", "query_booking", "booking_status"),
+            "Compensation": ("memberLevel", "query_member_profile", "member_level"),
+            "TransHuman": ("memberLevel", "query_member_profile", "member_level"),
+            "Reject": ("memberLevel", "query_member_profile", "member_level"),
+        },
+        "online_education": {
+            "REVIEW": ("HistoricalComplaintRecords", "query_learning_history", "historical_complaints"),
+            "NEGOTIATE": ("isRiskUser", "query_user_risk", "is_risk_user"),
+            "REFUND": ("RefundEligibility", "query_refund_eligibility", "refund_eligibility"),
+            "PLAN": ("KnowledgeResources", "search_course_content", "knowledge_resources"),
+        },
+    }
+    action_requirement = action_requirements.get(scenario_id, {}).get(expected_action)
+    if action_requirement:
+        backend_field, tool, result_field = action_requirement
+        if not any(item["tool"] == tool and item["result_field"] == result_field for item in requirements):
+            requirements.append({
+                "backend_field": backend_field,
+                "tool": tool,
+                "argument": "record_id",
+                "result_field": result_field,
+                "knowledge_key": "record_id",
+            })
+
     # Paths without a branching system variable still require a record lookup;
     # otherwise an Agent could receive credit for an action on an unverified ID.
     if not requirements:
@@ -109,6 +160,14 @@ def _effective_system_variables(scenario_id: str, path_config: Dict[str, Any]) -
     values = dict(path_config.get("system_variables") or {})
     if scenario_id == "online_education" and "isRiskUser" in path_config:
         values["isRiskUser"] = path_config["isRiskUser"] is True
+    if scenario_id == "online_education":
+        classification = path_config.get("Classification_items") or []
+        # Education PathList's fifth classification field is the repeated-
+        # complaint branch.  Promote it into backend state so REVIEW can be
+        # verified through query_learning_history instead of inferred from
+        # the model's classification claim.
+        if len(classification) > 4 and isinstance(classification[4], bool):
+            values["HistoricalComplaintRecords"] = classification[4]
     defaults = {
         "telecom_package": {
             "PackageStatus": "NoContract", "Penalty": 0,

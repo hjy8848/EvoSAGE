@@ -1017,8 +1017,8 @@ class Evaluator:
             verification_score >= 1.0 and policy_score >= 1.0
             and action_score >= 1.0 and goal_score >= 1.0
         )
-        from ..config.scenario_config import ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
-        execution_weights = ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
+        from ..config.scenario_config import EXECUTION_EVALUATION_WEIGHTS
+        execution_weights = EXECUTION_EVALUATION_WEIGHTS
         execution_score = sum([
             execution_weights["required_verification"] * verification_score,
             execution_weights["policy_compliance"] * policy_score,
@@ -1052,10 +1052,10 @@ class Evaluator:
     @staticmethod
     def _compute_environment_metrics(simulation_result, *unused):
         """Compatibility wrapper: Environment Score is strictly V/P/A/G."""
-        from ..config.scenario_config import ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
+        from ..config.scenario_config import EXECUTION_EVALUATION_WEIGHTS
 
         assessment = Evaluator._execution_assessment(simulation_result)
-        weights = ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
+        weights = EXECUTION_EVALUATION_WEIGHTS
         metrics = {
             "required_verification": assessment["verification"],
             "policy_compliance": assessment["policy"],
@@ -1551,8 +1551,8 @@ class Evaluator:
         execution_score, environment_details = self._compute_environment_metrics(
             simulation_result
         )
-        from ..config.scenario_config import ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
-        execution_weights = ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
+        from ..config.scenario_config import EXECUTION_EVALUATION_WEIGHTS
+        execution_weights = EXECUTION_EVALUATION_WEIGHTS
         report.overall_score = sage_style_score
         report.legacy_score = sage_style_score
         report.environment_score = execution_score

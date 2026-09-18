@@ -997,6 +997,7 @@ class AgentModel:
         # logging.debug(f"System: {self.system_prompt[:200]}...")
         # logging.debug(f"User: {messages[1]['content'][:200]}...")
         
+        response = None
         try:
             # 调用LLM
             # print(f"[DEBUG] === 开始调用LLM ===")
@@ -1016,6 +1017,20 @@ class AgentModel:
                     generation_kwargs["tools"] = backend_environment.get_tool_definitions()
                     generation_kwargs["tool_choice"] = "auto"
                 response = self.llm_client.generate(**generation_kwargs)
+                # Preserve the exact response available to the benchmark
+                # client before parsing or fallback handling.  This is
+                # essential for diagnosing whether a failure came from the
+                # provider, malformed JSON, or our parser.
+                raw_text = getattr(response, "text", "")
+                turn_output.metadata["raw_llm_response"] = raw_text or ""
+                provider_response = getattr(response, "raw_response", None)
+                if provider_response is not None:
+                    turn_output.metadata["raw_provider_response"] = provider_response
+                response_metadata = getattr(response, "metadata", None)
+                if isinstance(response_metadata, dict):
+                    assistant_message = response_metadata.get("assistant_message")
+                    if assistant_message is not None:
+                        turn_output.metadata["raw_final_assistant_message"] = assistant_message
                 response_tool_calls = list(getattr(response, "tool_calls", []) or [])
                 # 兼容尚未实现原生 tool_calls 的 OpenAI-compatible 服务。
                 if not response_tool_calls and backend_environment is not None:
@@ -1372,19 +1387,30 @@ class AgentModel:
                         # context; never copy a complete backend record.
                         public_field_map = {
                             "package_status": "PackageStatus",
+                            "account_status": "AccountStatus",
                             "penalty": "Penalty",
                             "house_status": "HouseStatus",
                             "fee_payment_status": "FeePaymentStatus",
+                            "repair_ticket_status": "RepairTicketStatus",
                             "order_status": "orderStatus",
                             "has_insurance": "hasInsurance",
+                            "delivery_address": "deliveryAddress",
+                            "booking_status": "BookingStatus",
                             "member_level": "memberLevel",
+                            "flight_status": "flightStatus",
+                            "course_status": "CourseStatus",
+                            "historical_complaints": "HistoricalComplaintRecords",
+                            "refund_eligibility": "RefundEligibility",
+                            "knowledge_resources": "KnowledgeResources",
                             "is_risk_user": "isRiskUser",
                         }
                         for public_field, legacy_field in public_field_map.items():
                             if data_fields.get(public_field) is not None:
                                 system_info[legacy_field] = data_fields[public_field]
-                        if isinstance(data_fields.get("system_info"), dict):
-                            system_info.update(data_fields["system_info"])
+                        # A backend adapter must never smuggle an aggregate
+                        # ``system_info`` object through a query result.  Do
+                        # not merge that legacy shape into rule context even
+                        # if an old external adapter still returns it.
                     if system_info:
                         rule_context = dict(rule_context)
                         rule_context["system_info"] = system_info
@@ -1460,6 +1486,12 @@ class AgentModel:
             
             # 标记JSON解析失败
             turn_output.json_parse_failed = True
+            turn_output.metadata["parse_error"] = {
+                "type": type(e).__name__,
+                "message": str(e),
+            }
+            if response is not None and "raw_llm_response" not in turn_output.metadata:
+                turn_output.metadata["raw_llm_response"] = getattr(response, "text", "") or ""
             
             # ⚠️ 关键修复: 返回带有失败标记的turn_output,而不是抛出异常
             # 这样评估器可以统计JSON解析错误率

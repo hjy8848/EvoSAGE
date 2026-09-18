@@ -141,11 +141,13 @@ class BackendEnvironment:
     def get_rule_context(self) -> Dict[str, Any]:
         """Compatibility view for the existing rule engine.
 
-        Only the backend's explicitly public projection is returned.  The
-        evaluator may inspect the full state directly, but Agent-facing code
-        must never obtain hidden backend truth through this compatibility API.
+        Rule context must be assembled from successful, field-scoped tool
+        observations by the AgentModel.  Returning the whole public
+        projection here would still let a caller bypass those query-level
+        permissions, so this compatibility method intentionally returns an
+        empty observation set.
         """
-        return {"system_info": copy.deepcopy(self.state.get("public_state", {}))}
+        return {"system_info": {}}
 
     def get_public_state(self) -> Dict[str, Any]:
         """Public state explicitly allowed as an initial Agent observation."""

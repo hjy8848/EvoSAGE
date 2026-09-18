@@ -515,15 +515,17 @@ ECOMMERCE_REFUND_EVALUATION_METRICS = {
 # Execution-track weights are kept in one configuration object so the
 # evaluator cannot silently redefine the benchmark policy in multiple places.
 # Chat and Decision-track weights are intentionally not part of this object.
-ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS = {
+EXECUTION_EVALUATION_WEIGHTS = {
     "required_verification": 0.25,
     "policy_compliance": 0.20,
     "action_execution": 0.25,
     "goal_fulfillment": 0.30,
 }
 
-# Compatibility alias for callers that used the earlier constant name.
-ECOMMERCE_ENVIRONMENT_EVALUATION_WEIGHTS = ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS
+# Compatibility aliases for callers that used the earlier ecommerce-specific
+# names before Execution Track was shared by all scenarios.
+ECOMMERCE_EXECUTION_EVALUATION_WEIGHTS = EXECUTION_EVALUATION_WEIGHTS
+ECOMMERCE_ENVIRONMENT_EVALUATION_WEIGHTS = EXECUTION_EVALUATION_WEIGHTS
 
 ECOMMERCE_REFUND_SOP_STEPS = [
     "step1_classification",

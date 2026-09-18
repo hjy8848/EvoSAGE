@@ -347,6 +347,36 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         self.assertEqual(result.turns[0].backend_state_before["order"]["refund_status"], "None")
         self.assertEqual(result.turns[0].backend_state_after["order"]["refund_status"], "Approved")
 
+    def test_json_parse_failure_preserves_raw_response_and_error(self):
+        case = make_case("Unshipped", "High", "Refund")
+        client = ScriptedClient([
+            SimpleNamespace(
+                text="{this is not valid json",
+                model="fake",
+                tool_calls=[],
+                metadata={
+                    "finish_reason": "stop",
+                    "assistant_message": {
+                        "role": "assistant",
+                        "content": "{this is not valid json",
+                    },
+                },
+            )
+        ])
+        output = make_agent(client).process_turn(
+            "我要退款。",
+            context_data={"initial_observation": {}},
+            backend_environment=create_backend(case),
+        )
+        self.assertTrue(output.json_parse_failed)
+        self.assertEqual(output.metadata["raw_llm_response"], "{this is not valid json")
+        self.assertEqual(
+            output.metadata["raw_final_assistant_message"]["content"],
+            "{this is not valid json",
+        )
+        self.assertEqual(output.metadata["parse_error"]["type"], "ValueError")
+        self.assertIn("does not contain JSON", output.metadata["parse_error"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

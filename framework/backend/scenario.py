@@ -146,6 +146,33 @@ SCENARIO_ACTION_STATE_UPDATES = {
     },
 }
 
+# State changes are applied to the authoritative public projection as well as
+# the interaction audit record.  This makes a second query observe the
+# business outcome instead of only seeing ``last_action`` in an evaluator
+# side-channel.
+SCENARIO_ACTION_PUBLIC_STATE_UPDATES = {
+    "telecom_package": {
+        "ChangeOrder": {"PackageStatus": "Changed", "CurrentPlan": "Changed"},
+    },
+    "property_service": {
+        "Payment": {"FeePaymentStatus": "Paid"},
+        "Registration": {"RepairTicketStatus": "Registered"},
+    },
+    "logistics_delivery": {
+        "Interception": {"orderStatus": "InterceptionRequested"},
+        "Modify": {"orderStatus": "ModificationRequested"},
+    },
+    "airline_refund": {
+        "RescheduleOrRefund": {"BookingStatus": "Rescheduled"},
+        "RescheduleOrRefund+HandlingFee": {"BookingStatus": "RescheduledWithFee"},
+        "RescheduleOrRefund+Compensation": {"BookingStatus": "RescheduledWithCompensation"},
+    },
+    "online_education": {
+        "REFUND": {"RefundEligibility": False},
+        "PLAN": {"ResourceStatus": "Allocated"},
+    },
+}
+
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[^a-z0-9_]+", "_", value.lower()).strip("_")
@@ -219,6 +246,17 @@ class ScenarioBackend(BackendEnvironment):
                 error_code="record_not_verified",
                 error_message="执行动作前必须先查询有效业务记录。",
             )
+
+        precondition_error = self._action_precondition_error(action_name)
+        if precondition_error is not None:
+            error_code, error_message = precondition_error
+            return ActionResult(
+                success=False,
+                action_name=action_name,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
         interaction = self.state.setdefault("interaction", {})
         previous = interaction.get("last_action")
         interaction["last_action"] = action_name
@@ -227,6 +265,14 @@ class ScenarioBackend(BackendEnvironment):
         updates = SCENARIO_ACTION_STATE_UPDATES.get(self.case_spec.scenario, {}).get(action_name, {})
         interaction.update(updates)
         self.state.setdefault("action_status", {})[_safe_name(action_name)] = "completed"
+        public_updates = SCENARIO_ACTION_PUBLIC_STATE_UPDATES.get(
+            self.case_spec.scenario, {}
+        ).get(action_name, {})
+        if public_updates:
+            self.state.setdefault("public_state", {}).update(public_updates)
+            self.state.setdefault("private_state", {}).setdefault(
+                "system_variables", {}
+            ).update(public_updates)
         return ActionResult(
             success=True,
             action_name=action_name,
@@ -235,5 +281,85 @@ class ScenarioBackend(BackendEnvironment):
                 "last_action": action_name,
                 "repeated": interaction["repeated"],
                 **updates,
+                **public_updates,
             },
         )
+
+    def _action_precondition_error(self, action_name: str):
+        """Return an error for a state-invalid action, otherwise ``None``.
+
+        These checks deliberately use only authoritative backend state.  They
+        do not inspect the Agent's declared path or final action, so a wrong
+        action cannot become valid merely because it matches hidden gold.
+        """
+        public = self.state.get("public_state", {})
+        scenario = self.case_spec.scenario
+
+        def fail(code, message):
+            return code, message
+
+        if scenario == "telecom_package":
+            if action_name == "ChangeOrder" and public.get("AccountStatus") != "Active":
+                return fail("account_inactive", "账户当前状态不支持变更套餐。")
+
+        elif scenario == "property_service":
+            fee_status = public.get("FeePaymentStatus")
+            if action_name in {"Payment", "Reject"} and fee_status != "Unpaid":
+                return fail("payment_action_unavailable", "当前物业缴费状态不支持该动作。")
+            if action_name == "Registration" and fee_status == "Unpaid":
+                return fail("repair_requires_settled_fees", "物业费未结清，当前不能登记该维修工单。")
+
+        elif scenario == "logistics_delivery":
+            order_status = public.get("orderStatus")
+            insured = public.get("hasInsurance")
+            if action_name == "Interception" and order_status == "Delivered":
+                return fail("interception_unavailable", "包裹已送达，当前不能申请拦截。")
+            if action_name == "Modify" and order_status != "Undelivered":
+                return fail("modification_unavailable", "只有未送达订单可以修改配送信息。")
+            if action_name == "MakeUpDifference" and order_status != "Delivered":
+                return fail("difference_payment_unavailable", "只有已送达订单可以支付改派差额。")
+            if action_name == "Registration" and order_status not in {"Delivered", "Undelivered"}:
+                return fail("claim_unavailable", "当前物流状态不能登记理赔或异常工单。")
+            if action_name == "Compensation" and not (
+                order_status == "Arrived" and insured is True
+            ):
+                return fail("compensation_unavailable", "只有已到达且已投保的包裹才能直接赔付。")
+            if action_name == "TransHuman" and not (
+                order_status == "Arrived" and insured is False
+            ):
+                return fail("escalation_unavailable", "当前物流状态不满足该升级条件。")
+            if action_name in {"Reject", "Comfort"} and order_status != "Arrived":
+                return fail("complaint_action_unavailable", "当前物流状态不支持该投诉处理动作。")
+
+        elif scenario == "airline_refund":
+            member_level = public.get("memberLevel")
+            insured = public.get("hasInsurance")
+            if action_name == "RescheduleOrRefund+HandlingFee" and not (
+                member_level == "Regular" and insured is False
+            ):
+                return fail("handling_fee_path_unavailable", "当前会员或保险状态不支持收取改签手续费。")
+            if action_name == "RescheduleOrRefund+Compensation" and member_level != "VIP":
+                return fail("compensation_reschedule_unavailable", "只有 VIP 会员满足该改签赔偿条件。")
+            if action_name == "Compensation" and member_level != "Regular":
+                return fail("passenger_compensation_unavailable", "当前会员状态不支持该赔偿动作。")
+            if action_name == "TransHuman" and member_level != "VIP":
+                return fail("airline_escalation_unavailable", "当前会员状态不满足该升级条件。")
+            if action_name == "Reject" and member_level != "Blacklist":
+                return fail("airline_rejection_unavailable", "当前会员状态不支持拒绝该请求。")
+
+        elif scenario == "online_education":
+            risk_user = public.get("isRiskUser")
+            refund_eligible = public.get("RefundEligibility")
+            resources = public.get("KnowledgeResources")
+            if action_name == "NEGOTIATE" and risk_user is not True:
+                return fail("negotiation_unavailable", "当前账户风险状态不支持协商退款。")
+            if action_name == "REFUND" and not (
+                risk_user is False and refund_eligible is True
+            ):
+                return fail("refund_unavailable", "当前账户状态或课程资格不支持退款。")
+            if action_name == "PLAN" and not (
+                risk_user is False and resources
+            ):
+                return fail("resource_plan_unavailable", "当前账户状态或课程资源不支持制定学习计划。")
+
+        return None

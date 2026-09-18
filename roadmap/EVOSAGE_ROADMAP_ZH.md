@@ -1,6 +1,6 @@
 # EvoSAGE Roadmap
 
-更新时间：2026-09-15
+更新时间：2026-09-18
 
 本文记录当前对 SAGE-Bench 的观察、EvoSAGE 的目标定义，以及后续实施计划。
 
@@ -206,7 +206,7 @@ Evaluator（工具核验 + 状态结果 + 对话指标）
 - 旧版 PathList 不含 `action_*` 节点的问题已在路径评分中兼容；
 - 现有回归测试覆盖后端查询、动作前置核验、状态转移和 Agent 工具循环；本轮新增 8 个 Ecommerce E2E 验收测试，并增加从 `LLMEvaluationPipeline.run_single_simulation` 主入口捕获 runner 接线的集成测试。
 
-本轮验收范围锁定为 `ecommerce_refund`：runner 只为该场景创建并传递 `EcommerceBackend`，其余五个场景不进入新的 environment evaluation。仓库中保留的通用适配器不视为本轮完成项，真实 API 的电商退款 E2E trace 仍是下一步验收工作。
+此前本轮验收范围曾锁定为 `ecommerce_refund`。2026-09-18 已完成五个其余场景的 Backend migration，并将它们纳入同一套 environment evaluation；下面的状态记录以当前代码为准。
 
 本轮环境修复的边界已经锁定：不实现自进化，不修改官方 SOP 图、隐藏测试集或评分标准；新增 `legacy_score` 与 `environment_score` 双轨输出，默认只允许正式动作工具执行，旧版 `finals.Action` 直执行必须显式开启 `--legacy-execution`。
 
@@ -237,6 +237,32 @@ Agent 只看到 `system_prompt`、对话历史、`initial_observation` 和公开
 本轮新增的 Ecommerce E2E 覆盖：隐藏状态防泄漏、不同 Backend 的初始输入一致、用户错误陈述、查询结果误判、假装退款成功、真实退款成功、拒绝模型自报 executed_path、同一 Backend 的完整 trace、信用等级必查、eligibility 不泄漏、PathList verification plan 一致性，以及 runner 主入口接线（`Signed/Low → query_order → transfer_human`）。当前本地 `unittest discover -s tests` 结果为 19/19 通过。
 
 第二轮 benchmark validity 修正：`query_order` 只返回订单后台事实（物流、支付和售后状态），不再返回 `Responsibility`、`RefundReasonable`、`ProvidedDocument` 等对话语义分类 GT，也不返回由 `expected_action` 派生的 `refund_eligible`；这些字段仍留在 evaluator-only 的 CaseSpec/backend 内部，公开 eligibility 不能反向泄漏目标动作。CaseSpec metadata 额外声明 `required_backend_verifications`，根据样本实际使用的 `ShippingStatus`、`CreditLevel`、`PaymentStatus` 要求分别完成 `query_order`、`query_customer_profile`、`query_payment`，environment score 同时检查工具选择、参数、结果字段和动作前核验顺序，避免“没查但猜对”获得完整环境分。
+
+### 2.8 2026-09-18：五个非 Ecommerce 场景完成 Backend migration
+
+以下场景现在都使用确定性的 `CaseSpec → ScenarioBackend → formal tools → state transition → evaluator` 闭环：
+
+```text
+telecom_package
+property_service
+logistics_delivery
+airline_refund
+online_education
+```
+
+当前已完成：
+
+- 每个场景有独立的查询工具和动作工具；
+- 每条 PathList 路径都有 `required_backend_verifications`，包括路径分支事实和动作所需的权威状态；
+- 查询工具只返回 `record_id`、`customer_id` 和该工具授权的单个公开字段，不返回聚合 `system_info`；
+- AgentModel 只将成功工具结果中的字段映射到规则上下文，旧的聚合 `system_info` 结果不会再被合并；
+- 动作必须先完成记录核验，并且会根据后台状态拒绝非法动作，例如未缴费状态之外的物业缴费、已送达订单修改配送、无资格课程退款等；
+- 成功动作会更新交互审计状态和公开业务状态，Evaluator 依据 Backend final state 判断 Goal Fulfillment；
+- JSON 解析失败会保存 `raw_llm_response`、`raw_final_assistant_message` 和 `parse_error`，便于区分模型坏 JSON 与解析器错误；
+- Execution Track 权重统一使用场景无关的 `EXECUTION_EVALUATION_WEIGHTS`，旧 Ecommerce 常量仅作为兼容别名保留；
+- 全部回归测试和五场景端到端 fake-tool 测试通过，当前测试总数为 36 个。
+
+当前边界仍需明确：这些 Backend 是 benchmark 内的确定性模拟后台，不是真实业务数据库；凭证上传、文件解析和凭证真实性核验仍未实现，`request_document` 只表示“要求用户补充材料”。
 
 ## 3. 我们真正要进化什么
 
