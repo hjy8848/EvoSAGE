@@ -4,6 +4,12 @@
 
 本文记录当前对 SAGE-Bench 的观察、EvoSAGE 的目标定义，以及后续实施计划。
 
+## 最终研究主线
+
+当前项目最终收敛为“业务流程鲁棒性的对抗共进化”，完整研究 IDEA、系统边界和验证问题见：
+
+- [EvoSAGE-CoEvo 最终研究 IDEA](./EVOSAGE_COEVO_RESEARCH_IDEA_ZH.md)
+
 ## 1. 当前状态
 
 ### 已完成

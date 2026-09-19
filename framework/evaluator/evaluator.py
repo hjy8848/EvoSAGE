@@ -1225,13 +1225,21 @@ class Evaluator:
                     
                     # 【诊断日志】检查classification是否为空
                     if not gt_classification:
+                        diagnostic_gt_data = ground_truth_data.get(turn_idx, {})
+                        diagnostic_agent_output = getattr(turn, "agent_output", None)
+                        diagnostic_agent_path = list(
+                            getattr(diagnostic_agent_output, "expected_path", []) or []
+                        )
+                        diagnostic_agent_finals = getattr(
+                            diagnostic_agent_output, "final_output", None
+                        ) or getattr(diagnostic_agent_output, "finals", None)
                         logger.info(f"Turn {turn_idx}:")
-                        logger.warning(f"  - gt_classification: {gt_data.get('classification')}")
-                        logger.info(f"  - agent_classification: {agent_output.classification_output if hasattr(agent_output, 'classification_output') else None}")
-                        logger.info(f"  - gt_now_path: {gt_data.get('now_path')}")
-                        logger.info(f"  - agent_path: {agent_path}")
-                        logger.info(f"  - gt_finals: {gt_data.get('finals')}")
-                        logger.info(f"  - agent_finals: {agent_finals}")
+                        logger.warning(f"  - gt_classification: {diagnostic_gt_data.get('classification')}")
+                        logger.info(f"  - agent_classification: {getattr(diagnostic_agent_output, 'classification_output', None)}")
+                        logger.info(f"  - gt_now_path: {diagnostic_gt_data.get('now_path')}")
+                        logger.info(f"  - agent_path: {diagnostic_agent_path}")
+                        logger.info(f"  - gt_finals: {diagnostic_gt_data.get('finals')}")
+                        logger.info(f"  - agent_finals: {diagnostic_agent_finals}")
                         logger.warning(f"⚠️ Turn {turn_idx} 警告: classification为空或为False! comprehensive_result={comprehensive_result}")
                     else:
                         logger.debug(f"Turn {turn_idx} classification字段详情: {list(gt_classification.keys()) if isinstance(gt_classification, dict) else type(gt_classification)}")

@@ -72,6 +72,26 @@ class EvaluationRegressionTests(unittest.TestCase):
         metrics = {metric.metric_name: metric.score for metric in report.metric_scores}
         self.assertEqual(metrics["goal_fulfillment"], 0.0)
 
+    def test_empty_judge_classification_does_not_reference_uninitialized_gt_data(self):
+        class EmptyJudge:
+            def evaluate_turn_comprehensive(self, **_kwargs):
+                return {
+                    "classification": {},
+                    "chat_quality_score": 0.5,
+                    "chat_quality_dimensions": {},
+                }
+
+        simulation = self._make_simulation("请说明具体处理步骤。")
+        with self.assertLogs("framework.evaluator.evaluator", level="WARNING") as captured:
+            Evaluator(
+                "online_education",
+                get_sop_graph("online_education"),
+                judge_model=EmptyJudge(),
+            ).evaluate_simulation(simulation)
+
+        self.assertNotIn("local variable 'gt_data' referenced before assignment", "\n".join(captured.output))
+        self.assertNotIn("local variable 'agent_output' referenced before assignment", "\n".join(captured.output))
+
 
 if __name__ == "__main__":
     unittest.main()
