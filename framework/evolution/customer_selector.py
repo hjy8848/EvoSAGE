@@ -10,6 +10,14 @@ from .evaluator_adapter import aggregate_episode_metrics
 from .schemas import CustomerPolicy, EpisodeResult
 
 
+def _is_protocol_failure(episode: EpisodeResult) -> bool:
+    return (
+        "json_parse_failed" in (episode.error_types or [])
+        or "protocol_failure" in (episode.error_types or [])
+        or bool(episode.metadata.get("protocol_failure", False))
+    )
+
+
 @dataclass
 class CandidateScore:
     policy_id: str
@@ -33,11 +41,13 @@ class CustomerSelector:
         episodes = list(episodes)
         if not allow_heldout and any(item.split == "heldout_test" for item in episodes):
             raise AssertionError("CustomerSelector cannot score heldout episodes")
-        attack_success = 1.0 - aggregate_episode_metrics(episodes)["task_success"]
+        # Only legitimate business-process failures are useful adversarial
+        # signal.  Parser/protocol breakage must not improve Customer fitness.
+        attack_success = aggregate_episode_metrics(episodes)["legitimate_attack_success"]
         signatures = {
             signature.signature_id
             for episode in episodes
-            if not episode.task_success
+            if not episode.task_success and not _is_protocol_failure(episode)
             for signature in [FailureSignatureProxy.from_episode(episode)]
         }
         novelty = len(signatures - known_signatures) / max(1, len(signatures))

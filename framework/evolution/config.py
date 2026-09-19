@@ -26,6 +26,7 @@ class CustomerEvolutionConfig:
         "truthful", "cooperative", "withholding", "pressure", "contradiction",
         "delayed_disclosure", "authority_challenge", "delayed_contradiction", "escalation", "paraphrase",
     ])
+    adversary_access: str = "black_box"
 
 
 @dataclass

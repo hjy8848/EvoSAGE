@@ -67,7 +67,7 @@ def main() -> int:
             config.seed,
             validator=CustomerPolicyValidator(config.customer.allowed_strategy_tags),
             selector=CustomerSelector(config.customer.fitness_weights),
-            strategy_generator=LLMCustomerPolicyGenerator(evolution_client),
+            strategy_generator=LLMCustomerPolicyGenerator(evolution_client, config.customer.adversary_access),
             require_strategy_generator=True,
         )
         service_evolver = ServiceEvolver(

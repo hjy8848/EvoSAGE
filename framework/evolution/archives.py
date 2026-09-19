@@ -27,9 +27,24 @@ class AttackArchive:
         episodes = list(episodes)
         if any(episode.split == "heldout_test" for episode in episodes):
             raise AssertionError("AttackArchive cannot ingest heldout episodes")
+        legitimate_episodes = [
+            episode for episode in episodes
+            if "json_parse_failed" not in (episode.error_types or [])
+            and "protocol_failure" not in (episode.error_types or [])
+            and not episode.metadata.get("protocol_failure", False)
+        ]
+        legitimate_signature_ids = {
+            FailureSignature.from_episode(episode).signature_id
+            for episode in legitimate_episodes
+            if not episode.task_success
+        }
         added = 0
         for signature in failure_signatures:
             if "json_parse_failed" in signature.error_types or "protocol_failure" in signature.error_types:
+                continue
+            if episodes and not legitimate_episodes:
+                continue
+            if episodes and signature.signature_id not in legitimate_signature_ids:
                 continue
             key = _key({"tags": sorted(policy.strategy_tags), "node": signature.sop_node,
                         "errors": sorted(signature.error_types), "action": signature.predicted_action})
@@ -44,8 +59,14 @@ class AttackArchive:
                 "target_path_step_index": signature.path_step_index,
                 "induced_error_types": list(signature.error_types),
                 "failure_signature": signature.to_dict(),
-                "source_case_ids": sorted({episode.case_id for episode in episodes if not episode.task_success}),
-                "attack_success_rate": sum(not episode.task_success for episode in episodes) / len(episodes) if episodes else 0.0,
+                "source_case_ids": sorted({episode.case_id for episode in legitimate_episodes if not episode.task_success}),
+                "attack_success_rate": sum(
+                    not episode.task_success
+                    and "json_parse_failed" not in (episode.error_types or [])
+                    and "protocol_failure" not in (episode.error_types or [])
+                    and not episode.metadata.get("protocol_failure", False)
+                    for episode in legitimate_episodes
+                ) / len(legitimate_episodes) if legitimate_episodes else 0.0,
                 "novelty_signature": key,
                 "transfer_success_rate": None,
                 "active": True,

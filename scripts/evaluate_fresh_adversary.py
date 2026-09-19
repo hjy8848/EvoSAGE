@@ -61,7 +61,7 @@ def main() -> int:
             seed=config.seed + 10_000,
             validator=CustomerPolicyValidator(config.customer.allowed_strategy_tags),
             selector=CustomerSelector(config.customer.fitness_weights),
-            strategy_generator=LLMCustomerPolicyGenerator(evolution_client),
+            strategy_generator=LLMCustomerPolicyGenerator(evolution_client, config.customer.adversary_access),
             require_strategy_generator=True,
         )
     runner = EvolutionRunner(config, evaluator=evaluator, customer_evolver=customer_evolver)

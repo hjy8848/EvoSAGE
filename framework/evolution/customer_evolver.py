@@ -105,8 +105,11 @@ class LLMCustomerPolicyGenerator:
     caller and the deterministic fallback remains available.
     """
 
-    def __init__(self, llm_client):
+    def __init__(self, llm_client, adversary_access: str = "black_box"):
         self.llm_client = llm_client
+        if adversary_access not in {"black_box", "white_box"}:
+            raise ValueError("adversary_access must be black_box or white_box")
+        self.adversary_access = adversary_access
 
     def generate(self, incumbent, failures, service_policy, generation, count, frontier=None, archive_summary=None):
         failure_view = [
@@ -122,7 +125,7 @@ class LLMCustomerPolicyGenerator:
             "contradiction_strategy, response_to_verification, response_to_rejection.\n"
             f"Current strategy tags: {json.dumps(incumbent.strategy_tags)}\n"
             f"Observed abstract failures: {json.dumps(failure_view, ensure_ascii=False)}\n"
-            f"Active generic service rules: {json.dumps([r.text for r in service_policy.rules if r.active], ensure_ascii=False)}\n"
+            f"Service rule summary: {json.dumps([r.text for r in service_policy.rules if r.active], ensure_ascii=False) if self.adversary_access == 'white_box' else 'WITHHELD_IN_BLACK_BOX_MODE'}\n"
             f"Weakness frontier summary: {json.dumps(frontier or [], ensure_ascii=False)[:6000]}\n"
             f"Historical attack summary: {json.dumps(archive_summary or [], ensure_ascii=False)[:6000]}\n"
             f"Generate up to {count} distinct candidates."

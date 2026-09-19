@@ -7,7 +7,8 @@
     "candidate_count": 5,
     "elite_count": 1,
     "cases_per_candidate": 12,
-    "fitness_weights": {"attack_success": 0.70, "novelty": 0.15, "coverage": 0.15}
+    "fitness_weights": {"attack_success": 0.70, "novelty": 0.15, "coverage": 0.15},
+    "adversary_access": "black_box"
   },
   "service": {
     "candidate_count": 5,

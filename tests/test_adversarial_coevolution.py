@@ -5,19 +5,22 @@ import pytest
 
 from framework.backend.factory import build_case_spec
 from framework.evolution.archives import AttackArchive
+from framework.evolution.attribution import infer_failure_location
 from framework.evolution.config import EvolutionConfig, PersistenceConfig, SplitConfig
 from framework.evolution.customer_policy import CustomerPolicyValidator, PolicyCustomerModel
 from framework.evolution.evaluator_adapter import MockEpisodeEvaluator
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
 from framework.evolution.customer_evolver import LLMCustomerPolicyGenerator
 from framework.evolution.customer_evolver import CustomerEvolver
+from framework.evolution.customer_selector import CustomerSelector
 from framework.evolution.service_evolver import LLMServicePatchGenerator
 from framework.evolution.service_evolver import ServiceEvolver
 from framework.evolution.runner import EvolutionRunner
-from framework.evolution.schemas import CustomerPolicy, PolicyValidationError, ServicePatch, ServicePolicy, ServiceRule
+from framework.evolution.schemas import CustomerPolicy, EpisodeResult, FailureSignature, PolicyValidationError, ServicePatch, ServicePolicy, ServiceRule
 from framework.evolution.service_gate import ServiceGate
 from framework.evolution.service_policy import ServicePolicySanitizer
 from framework.evolution.split_manager import SplitManager
+from framework.evolution.weakness_frontier import WeaknessFrontier
 from framework.models import UserProfile
 
 
@@ -46,6 +49,135 @@ def test_customer_policy_compilation_changes_runtime_guidance_not_case_goal():
     assert cooperative.runtime_guidance() != challenging.runtime_guidance()
     assert first.environment_state.goal == second.environment_state.goal == case.user_goal
     assert first.generate_initial_message() != second.generate_initial_message()
+
+
+def _fake_real_report(**overrides):
+    values = {
+        "details": {},
+        "error_categories": [],
+        "task_success": True,
+        "required_verification_score": 1.0,
+        "policy_compliance_score": 1.0,
+        "action_execution_score": 1.0,
+        "goal_fulfillment": 1.0,
+        "execution_score": 1.0,
+        "sage_style_score": 1.0,
+        "predicted_action": "Refund",
+        "executed_action": "Refund",
+        "gold_path": ["step1", "step2", "step3"],
+        "predicted_path": ["step1", "step2", "step3"],
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _fake_real_simulation():
+    return SimpleNamespace(
+        simulation_id="sim-attribution",
+        scenario_id="ecommerce_refund",
+        case_spec={"case_id": "CASE-ATTR", "metadata": {}},
+        backend_events=[],
+        termination_reason="goal_satisfied",
+        turns=[],
+        model_name="fake",
+    )
+
+
+def test_real_episode_attribution_uses_first_canonical_divergence():
+    from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
+    episode = EvoSAGEEpisodeEvaluator.from_evosage(
+        _fake_real_simulation(),
+        _fake_real_report(predicted_path=["step1", "wrong", "step3"]),
+        CustomerPolicy(), ServicePolicy(), "validation", 0, "test",
+    )
+    assert episode.path_step_index == 1
+    assert episode.sop_node == "step2"
+
+
+def test_real_episode_attribution_uses_final_action_stage_for_execution_failure():
+    from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
+    report = _fake_real_report(
+        task_success=False,
+        action_execution_score=0.0,
+        error_categories=["wrong_final_action"],
+    )
+    episode = EvoSAGEEpisodeEvaluator.from_evosage(
+        _fake_real_simulation(), report, CustomerPolicy(), ServicePolicy(), "validation", 0, "test",
+    )
+    assert episode.path_step_index == 2
+    assert episode.sop_node == "step3"
+
+
+def test_missing_real_path_attribution_is_not_fabricated():
+    from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
+    report = _fake_real_report(gold_path=[], predicted_path=[])
+    episode = EvoSAGEEpisodeEvaluator.from_evosage(
+        _fake_real_simulation(), report, CustomerPolicy(), ServicePolicy(), "validation", 0, "test",
+    )
+    assert episode.path_step_index is None
+    assert episode.sop_node is None
+
+
+def test_weakness_frontier_falls_back_to_path_step_then_unknown():
+    path_episode = EpisodeResult(
+        "path", "ecommerce_refund", "case-path", "c", "s", "validation", 0, False, 0.0,
+        error_types=["wrong_final_action"], path_step_index=3,
+    )
+    unknown_episode = EpisodeResult(
+        "unknown", "ecommerce_refund", "case-unknown", "c", "s", "validation", 0, False, 0.0,
+        error_types=["action_failure"],
+    )
+    frontier = WeaknessFrontier()
+    frontier.add([path_episode, unknown_episode])
+    labels = {row["sop_node"] for row in frontier.to_dicts()}
+    assert "path_step_3" in labels
+    assert "unknown" in labels
+
+
+def test_customer_fitness_uses_legitimate_failures_only():
+    protocol = EpisodeResult(
+        "protocol", "ecommerce_refund", "case-protocol", "c", "s", "validation", 0, False, 0.0,
+        error_types=["json_parse_failed"], metadata={"protocol_failure": True},
+    )
+    legitimate = EpisodeResult(
+        "legitimate", "ecommerce_refund", "case-legitimate", "c", "s", "validation", 0, False, 0.0,
+        error_types=["wrong_final_action"],
+    )
+    selector = CustomerSelector()
+    protocol_score = selector.score(CustomerPolicy(), [protocol], set())
+    legitimate_score = selector.score(CustomerPolicy(), [legitimate], set())
+    assert protocol_score.attack_success == 0.0
+    assert protocol_score.novelty == 0.0
+    assert legitimate_score.attack_success == 1.0
+    assert legitimate_score.novelty > 0.0
+
+
+def test_attack_archive_excludes_protocol_failure_novelty(tmp_path):
+    policy = CustomerPolicy(policy_id="protocol-policy")
+    episode = EpisodeResult(
+        "protocol-archive", "ecommerce_refund", "case-protocol-archive", policy.policy_id, "s", "evolution", 0, False, 0.0,
+        error_types=["protocol_failure"], metadata={"protocol_failure": True},
+    )
+    signature = FailureSignature.from_episode(episode)
+    archive = AttackArchive(tmp_path / "protocol-attacks.jsonl")
+    assert archive.add(policy, [signature], [episode], generation=0) == 0
+    assert len(archive) == 0
+
+
+def test_fresh_real_mode_propagates_strict_customer_generation(tmp_path):
+    class BrokenGenerator:
+        def generate(self, **kwargs):
+            raise ValueError("provider unavailable")
+
+    config = EvolutionConfig(
+        splits=SplitConfig(max_cases=3),
+        persistence=PersistenceConfig(output_dir=str(tmp_path / "fresh")),
+    )
+    source = CustomerEvolver(strategy_generator=BrokenGenerator(), require_strategy_generator=True)
+    runner = EvolutionRunner(config, evaluator=MockEpisodeEvaluator(), customer_evolver=source)
+    runner.split_manager.build()
+    with pytest.raises(RuntimeError, match="strict real mode"):
+        runner.fresh_adversary_evaluation(rounds=1, candidate_count=1)
 
 
 def test_unknown_customer_strategy_is_rejected():

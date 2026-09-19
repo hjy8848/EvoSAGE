@@ -19,7 +19,10 @@ class WeaknessFrontier:
         grouped = defaultdict(list)
         for episode in episodes:
             for error in (episode.error_types or (["success"] if episode.task_success else ["unknown"])):
-                grouped[(episode.generation, episode.sop_node or "unknown", error)].append(episode)
+                node = episode.sop_node
+                if not node and episode.path_step_index is not None:
+                    node = f"path_step_{episode.path_step_index}"
+                grouped[(episode.generation, node or "unknown", error)].append(episode)
         for (generation, node, failure_type), values in grouped.items():
             count = len(values)
             failures = sum(not value.task_success for value in values)

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterable, Protocol
 
+from .attribution import infer_failure_location
 from .schemas import CustomerPolicy, EpisodeResult, FailureSignature, ServicePolicy
 
 
@@ -28,6 +29,7 @@ def aggregate_episode_metrics(episodes: Iterable[EpisodeResult]) -> dict[str, fl
     legitimate_failures = sum(
         not item.task_success
         and "json_parse_failed" not in item.error_types
+        and "protocol_failure" not in item.error_types
         and not item.metadata.get("protocol_failure", False)
         for item in values
     )
@@ -175,16 +177,26 @@ class EvoSAGEEpisodeEvaluator:
                 user_id=f"{getattr(case, 'case_id', 'case')}_{generation}",
                 path_config=getattr(case, "path_config", None),
             )
-            outputs.append(self.from_evosage(simulation, report, customer_policy, service_policy, split, generation, phase))
+            outputs.append(self.from_evosage(
+                simulation, report, customer_policy, service_policy, split, generation, phase,
+                path_config=getattr(case, "path_config", None),
+            ))
         return outputs
 
     @staticmethod
-    def from_evosage(simulation, report, customer_policy, service_policy, split, generation, phase):
+    def from_evosage(simulation, report, customer_policy, service_policy, split, generation, phase,
+                     path_config=None):
         tools = [event.get("name", "") for event in getattr(simulation, "backend_events", []) if event.get("event_type") == "tool_query"]
         errors = list(getattr(report, "error_categories", []) or [])
         diagnostics = getattr(report, "details", {}).get("diagnostics", {}) if getattr(report, "details", None) else {}
         if diagnostics.get("json_parse_failed") and "json_parse_failed" not in errors:
             errors.append("json_parse_failed")
+        protocol_failure = (
+            "json_parse_failed" in errors
+            or "protocol_failure" in errors
+            or bool(diagnostics.get("protocol_failure", False))
+        )
+        location = infer_failure_location(report, simulation, path_config)
         return EpisodeResult(
             episode_id=simulation.simulation_id,
             scenario=simulation.scenario_id,
@@ -205,6 +217,8 @@ class EvoSAGEEpisodeEvaluator:
             executed_action=report.executed_action,
             tool_sequence_summary=tools,
             termination_reason=simulation.termination_reason,
+            sop_node=location.get("sop_node"),
+            path_step_index=location.get("path_step_index"),
             dialogue=[turn.agent_output.to_dict() for turn in simulation.turns],
             metadata={
                 "phase": phase,
@@ -213,6 +227,7 @@ class EvoSAGEEpisodeEvaluator:
                 "service_policy_id": service_policy.policy_id,
                 "split": split,
                 "generation": generation,
-                "protocol_failure": "json_parse_failed" in errors,
+                "protocol_failure": protocol_failure,
+                "failure_location": location,
             },
         )

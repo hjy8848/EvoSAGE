@@ -23,6 +23,7 @@ from .service_policy import ServicePolicyCompiler, ServicePolicySanitizer, Servi
 from .service_gate import GateDecision, ServiceGate
 from .evaluator_adapter import BudgetedEpisodeEvaluator, EvoSAGEEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
 from .weakness_frontier import WeaknessFrontier
+from .attribution import infer_failure_location
 
 __all__ = [
     "AttackArchive",
@@ -51,5 +52,6 @@ __all__ = [
     "MockEpisodeEvaluator",
     "aggregate_episode_metrics",
     "WeaknessFrontier",
+    "infer_failure_location",
     "load_config",
 ]

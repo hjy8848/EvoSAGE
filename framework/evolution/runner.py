@@ -63,6 +63,13 @@ class EvolutionRunner:
             "evaluator": "mock" if isinstance(self.base_evaluator, MockEpisodeEvaluator) else "real",
             "repetitions": self.config.evaluation.repetitions,
             "concurrency": self.config.evaluation.concurrency,
+            "customer_generator": "llm" if getattr(self.customer_evolver, "strategy_generator", None) is not None else "template",
+            "service_generator": "llm" if getattr(self.service_evolver, "patch_generator", None) is not None else "template",
+            "strict_real_generation": bool(
+                getattr(self.customer_evolver, "require_strategy_generator", False)
+                or getattr(self.service_evolver, "require_patch_generator", False)
+            ),
+            "customer_adversary_access": self.config.customer.adversary_access,
         })
         completed = self.store.completed_generations()
         start = (max(completed) + 1) if self.config.persistence.resume and completed else 0
@@ -172,6 +179,7 @@ class EvolutionRunner:
             validator=getattr(self.customer_evolver, "validator", None),
             selector=selector,
             strategy_generator=getattr(self.customer_evolver, "strategy_generator", None),
+            require_strategy_generator=getattr(self.customer_evolver, "require_strategy_generator", False),
         )
         round_records = []
         for generation in range(rounds):
@@ -202,9 +210,17 @@ class EvolutionRunner:
             "adaptation_results": [item.to_dict() for item in adaptation_results],
             "rounds": round_records,
             "training_archive_used": False,
+            "customer_generator": "llm" if fresh_evolver.strategy_generator is not None else "template",
+            "strict_real_generation": bool(fresh_evolver.require_strategy_generator),
         })
         # Keep a stable aggregate path for existing tooling.
-        self.store.write_json("analysis/fresh_adversary_results.json", {"results": [item.to_dict() for item in results], "target_service": target_label, "evaluator": "mock" if isinstance(self.base_evaluator, MockEpisodeEvaluator) else "real"})
+        self.store.write_json("analysis/fresh_adversary_results.json", {
+            "results": [item.to_dict() for item in results],
+            "target_service": target_label,
+            "evaluator": "mock" if isinstance(self.base_evaluator, MockEpisodeEvaluator) else "real",
+            "customer_generator": "llm" if fresh_evolver.strategy_generator is not None else "template",
+            "strict_real_generation": bool(fresh_evolver.require_strategy_generator),
+        })
         return results
 
     def cross_generation_evaluation(self):
