@@ -29,7 +29,12 @@ def main() -> int:
     parser.add_argument("--model", default=os.environ.get("EVOSAGE_MODEL", ""))
     parser.add_argument("--api-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     args = parser.parse_args()
-    config = EvolutionConfig(persistence=PersistenceConfig(output_dir=args.run_dir))
+    saved_config = Path(args.run_dir) / "config" / "evolution.json"
+    if saved_config.exists():
+        config = EvolutionConfig.from_dict(json.loads(saved_config.read_text(encoding="utf-8")))
+        config.persistence = PersistenceConfig(output_dir=args.run_dir, resume=True)
+    else:
+        config = EvolutionConfig(persistence=PersistenceConfig(output_dir=args.run_dir))
     if args.real and args.mock:
         raise SystemExit("choose exactly one evaluator: --mock or --real")
     evaluator_mode = "real" if args.real else args.evaluator
@@ -44,7 +49,10 @@ def main() -> int:
             raise SystemExit("--real requires --model/EVOSAGE_MODEL and OPENAI_API_KEY")
         from framework.evolution.real_factory import make_real_evaluator
         from framework.llm_integration import get_llm_client
-        evaluator = make_real_evaluator(args.model, args.api_url, os.environ["OPENAI_API_KEY"], args.run_dir, api_timeout=config.evaluation.api_timeout)
+        evaluator = make_real_evaluator(
+            args.model, args.api_url, os.environ["OPENAI_API_KEY"], args.run_dir,
+            max_turns=config.evaluation.max_turns, api_timeout=config.evaluation.api_timeout,
+        )
         evolution_client = get_llm_client(
             "openai_api", api_key=os.environ["OPENAI_API_KEY"], base_url=args.api_url, model_name=args.model,
             timeout=config.evaluation.api_timeout,
@@ -54,6 +62,7 @@ def main() -> int:
             validator=CustomerPolicyValidator(config.customer.allowed_strategy_tags),
             selector=CustomerSelector(config.customer.fitness_weights),
             strategy_generator=LLMCustomerPolicyGenerator(evolution_client),
+            require_strategy_generator=True,
         )
     runner = EvolutionRunner(config, evaluator=evaluator, customer_evolver=customer_evolver)
     targets = [args.target] if args.target != "all" else ["initial", "final_coevolved"]
@@ -71,7 +80,12 @@ def main() -> int:
             store = RunStore(args.service_only_run_dir)
             generation = max(store.completed_generations())
             service = ServicePolicy.from_dict(store.read_generation(generation, "service_policy"))
-        results = runner.fresh_adversary_evaluation(target_service=service, target_label=target)
+        results = runner.fresh_adversary_evaluation(
+            rounds=config.fresh_adversary.rounds,
+            candidate_count=config.fresh_adversary.candidate_count,
+            target_service=service,
+            target_label=target,
+        )
         total += len(results)
     print(f"wrote {total} fresh-adversary episodes under {Path(args.run_dir) / 'analysis'}")
     return 0

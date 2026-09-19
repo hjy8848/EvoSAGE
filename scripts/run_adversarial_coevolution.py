@@ -68,12 +68,14 @@ def main() -> int:
             validator=CustomerPolicyValidator(config.customer.allowed_strategy_tags),
             selector=CustomerSelector(config.customer.fitness_weights),
             strategy_generator=LLMCustomerPolicyGenerator(evolution_client),
+            require_strategy_generator=True,
         )
         service_evolver = ServiceEvolver(
             config.seed,
             sanitizer=ServicePolicySanitizer(config.service.allowed_rule_categories),
             gate=ServiceGate(config.service.min_delta, config.service.normal_regression_tolerance),
             patch_generator=LLMServicePatchGenerator(evolution_client),
+            require_patch_generator=True,
         )
     result = EvolutionRunner(
         config, evaluator=evaluator, customer_evolver=customer_evolver,

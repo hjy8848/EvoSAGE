@@ -10,6 +10,7 @@ from framework.evolution.customer_policy import CustomerPolicyValidator, PolicyC
 from framework.evolution.evaluator_adapter import MockEpisodeEvaluator
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
 from framework.evolution.customer_evolver import LLMCustomerPolicyGenerator
+from framework.evolution.customer_evolver import CustomerEvolver
 from framework.evolution.service_evolver import LLMServicePatchGenerator
 from framework.evolution.service_evolver import ServiceEvolver
 from framework.evolution.runner import EvolutionRunner
@@ -160,6 +161,21 @@ def test_llm_generators_return_valid_structured_candidates_without_api():
     patch = LLMServicePatchGenerator(FakeClient('[{"category":"VERIFICATION","text":"Verify authoritative results before deciding.","rationale":"failure-driven"}]')).generate(ServicePolicy(), [], 1, 1)
     assert generated[0].strategy_tags == ["authority_challenge"]
     assert patch[0].rules[0].category == "VERIFICATION"
+
+
+def test_real_mode_does_not_silently_fallback_to_templates():
+    class BrokenGenerator:
+        def generate(self, **kwargs):
+            raise ValueError("provider unavailable")
+
+    with pytest.raises(RuntimeError, match="strict real mode"):
+        CustomerEvolver(strategy_generator=BrokenGenerator(), require_strategy_generator=True).propose(
+            CustomerPolicy(), 0, count=1
+        )
+    with pytest.raises(RuntimeError, match="strict real mode"):
+        ServiceEvolver(patch_generator=BrokenGenerator(), require_patch_generator=True).propose(
+            ServicePolicy(), [], 0, count=1
+        )
 
 
 def test_service_evaluates_all_candidates_and_replays_archived_attacker():

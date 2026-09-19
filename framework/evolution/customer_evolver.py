@@ -21,11 +21,13 @@ class CustomerEvolver:
         ("request_escalation", "escalation", "request human escalation only after a failed action or unresolved issue"),
     )
 
-    def __init__(self, seed: int = 7, validator=None, selector=None, strategy_generator=None):
+    def __init__(self, seed: int = 7, validator=None, selector=None, strategy_generator=None,
+                 require_strategy_generator: bool = False):
         self.seed = seed
         self.validator = validator or CustomerPolicyValidator()
         self.selector = selector or CustomerSelector()
         self.strategy_generator = strategy_generator
+        self.require_strategy_generator = require_strategy_generator
         self.last_rejections = []
 
     def propose(self, incumbent: CustomerPolicy, generation: int, count: int = 5, source_failures=None, service_policy=None, frontier=None, archive_summary=None) -> list[CustomerPolicy]:
@@ -38,7 +40,9 @@ class CustomerEvolver:
                     frontier=frontier, archive_summary=archive_summary,
                     generation=generation, count=count,
                 )
-            except Exception:
+            except Exception as exc:
+                if self.require_strategy_generator:
+                    raise RuntimeError("LLM customer policy generation failed in strict real mode") from exc
                 generated = []
             valid = []
             for policy in generated:
@@ -50,6 +54,10 @@ class CustomerEvolver:
                     continue
             if valid:
                 return valid[:count]
+            if self.require_strategy_generator:
+                raise RuntimeError("LLM customer policy generator returned no valid candidates")
+        elif self.require_strategy_generator:
+            raise RuntimeError("strict real mode requires an LLM customer policy generator")
         rng = random.Random(self.seed + generation)
         candidates = []
         operators = list(self.OPERATORS)

@@ -12,12 +12,14 @@ from .service_policy import ServicePolicyCompiler, ServicePolicySanitizer
 
 
 class ServiceEvolver:
-    def __init__(self, seed=7, sanitizer=None, compiler=None, gate=None, patch_generator=None):
+    def __init__(self, seed=7, sanitizer=None, compiler=None, gate=None, patch_generator=None,
+                 require_patch_generator: bool = False):
         self.seed = seed
         self.sanitizer = sanitizer or ServicePolicySanitizer()
         self.compiler = compiler or ServicePolicyCompiler(self.sanitizer)
         self.gate = gate or ServiceGate()
         self.patch_generator = patch_generator
+        self.require_patch_generator = require_patch_generator
         self.last_candidate_records = []
         self.last_baseline_metrics = {}
         self.last_selected_metrics = {}
@@ -34,8 +36,14 @@ class ServiceEvolver:
                         continue
                 if valid:
                     return valid[:count]
-            except Exception:
+            except Exception as exc:
+                if self.require_patch_generator:
+                    raise RuntimeError("LLM service patch generation failed in strict real mode") from exc
                 pass
+            if self.require_patch_generator:
+                raise RuntimeError("LLM service patch generator returned no valid candidates")
+        elif self.require_patch_generator:
+            raise RuntimeError("strict real mode requires an LLM service patch generator")
         errors = {error for failure in failures for error in failure.error_types}
         templates = []
         if {"authoritative_conflict", "claimed_action_not_executed", "wrong_final_action"} & errors:
