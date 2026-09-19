@@ -26,13 +26,16 @@ class CustomerEvolver:
         self.validator = validator or CustomerPolicyValidator()
         self.selector = selector or CustomerSelector()
         self.strategy_generator = strategy_generator
+        self.last_rejections = []
 
-    def propose(self, incumbent: CustomerPolicy, generation: int, count: int = 5, source_failures=None, service_policy=None) -> list[CustomerPolicy]:
+    def propose(self, incumbent: CustomerPolicy, generation: int, count: int = 5, source_failures=None, service_policy=None, frontier=None, archive_summary=None) -> list[CustomerPolicy]:
         failures = list(source_failures or [])
+        self.last_rejections = []
         if self.strategy_generator is not None:
             try:
                 generated = self.strategy_generator.generate(
                     incumbent=incumbent, failures=failures, service_policy=service_policy,
+                    frontier=frontier, archive_summary=archive_summary,
                     generation=generation, count=count,
                 )
             except Exception:
@@ -42,7 +45,8 @@ class CustomerEvolver:
                 try:
                     self.validator.validate(policy)
                     valid.append(policy)
-                except Exception:
+                except Exception as exc:
+                    self.last_rejections.append({"policy_id": policy.policy_id, "reason": str(exc)})
                     continue
             if valid:
                 return valid[:count]
@@ -63,16 +67,21 @@ class CustomerEvolver:
             policy.mutation_rationale = description
             policy.source_failure_ids = [getattr(item, "signature_id", str(item)) for item in failures]
             policy.created_at = policy.created_at
-            self.validator.validate(policy)
-            candidates.append(policy)
+            try:
+                self.validator.validate(policy)
+                candidates.append(policy)
+            except Exception as exc:
+                self.last_rejections.append({"policy_id": policy.policy_id, "reason": str(exc)})
         return candidates
 
     def evolve(self, incumbent, service_policy, cases, evaluator, archive, generation, count=5,
-               cases_per_candidate=None, elite_count=0, source_failures=None):
+               cases_per_candidate=None, elite_count=0, source_failures=None, frontier=None, archive_summary=None):
         candidate_cases = list(cases)
+        if any(getattr(case, "split", "") == "heldout_test" for case in candidate_cases):
+            raise AssertionError("CustomerEvolver cannot consume heldout cases")
         if cases_per_candidate is not None and cases_per_candidate > 0:
             candidate_cases = candidate_cases[:cases_per_candidate]
-        candidates = self.propose(incumbent, generation, count, source_failures, service_policy)
+        candidates = self.propose(incumbent, generation, count, source_failures, service_policy, frontier, archive_summary)
         evaluated = [(candidate, evaluator.evaluate(candidate, service_policy, candidate_cases, "evolution", generation, "customer_candidate")) for candidate in candidates]
         if elite_count:
             evaluated.insert(0, (incumbent, evaluator.evaluate(incumbent, service_policy, candidate_cases, "evolution", generation, "customer_elite")))
@@ -91,7 +100,7 @@ class LLMCustomerPolicyGenerator:
     def __init__(self, llm_client):
         self.llm_client = llm_client
 
-    def generate(self, incumbent, failures, service_policy, generation, count):
+    def generate(self, incumbent, failures, service_policy, generation, count, frontier=None, archive_summary=None):
         failure_view = [
             {"errors": list(item.error_types), "sop_node": item.sop_node,
              "predicted_action": item.predicted_action, "executed_action": item.executed_action}
@@ -106,6 +115,8 @@ class LLMCustomerPolicyGenerator:
             f"Current strategy tags: {json.dumps(incumbent.strategy_tags)}\n"
             f"Observed abstract failures: {json.dumps(failure_view, ensure_ascii=False)}\n"
             f"Active generic service rules: {json.dumps([r.text for r in service_policy.rules if r.active], ensure_ascii=False)}\n"
+            f"Weakness frontier summary: {json.dumps(frontier or [], ensure_ascii=False)[:6000]}\n"
+            f"Historical attack summary: {json.dumps(archive_summary or [], ensure_ascii=False)[:6000]}\n"
             f"Generate up to {count} distinct candidates."
         )
         response = self.llm_client.generate(prompt=prompt, temperature=0.7, max_tokens=1600)

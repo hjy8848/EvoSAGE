@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from .config import CustomerEvolutionConfig
 from .evaluator_adapter import aggregate_episode_metrics
 from .schemas import CustomerPolicy, EpisodeResult
 
@@ -24,12 +25,14 @@ class CandidateScore:
 
 class CustomerSelector:
     def __init__(self, weights=None):
-        self.weights = {"attack_success": .70, "novelty": .15, "coverage": .15}
+        self.weights = dict(CustomerEvolutionConfig().fitness_weights)
         if weights:
             self.weights.update(weights)
 
-    def score(self, policy: CustomerPolicy, episodes: Iterable[EpisodeResult], known_signatures: set[str], total_nodes: int = 1) -> CandidateScore:
+    def score(self, policy: CustomerPolicy, episodes: Iterable[EpisodeResult], known_signatures: set[str], total_nodes: int = 1, allow_heldout: bool = False) -> CandidateScore:
         episodes = list(episodes)
+        if not allow_heldout and any(item.split == "heldout_test" for item in episodes):
+            raise AssertionError("CustomerSelector cannot score heldout episodes")
         attack_success = 1.0 - aggregate_episode_metrics(episodes)["task_success"]
         signatures = {
             signature.signature_id
@@ -42,8 +45,8 @@ class CustomerSelector:
         fitness = sum(self.weights[key] * value for key, value in (("attack_success", attack_success), ("novelty", novelty), ("coverage", coverage)))
         return CandidateScore(policy.policy_id, attack_success, novelty, coverage, fitness, len(episodes))
 
-    def select(self, candidates: list[tuple[CustomerPolicy, list[EpisodeResult]]], known_signatures: set[str], total_nodes: int = 1):
-        scores = [self.score(policy, episodes, known_signatures, total_nodes) for policy, episodes in candidates]
+    def select(self, candidates: list[tuple[CustomerPolicy, list[EpisodeResult]]], known_signatures: set[str], total_nodes: int = 1, allow_heldout: bool = False):
+        scores = [self.score(policy, episodes, known_signatures, total_nodes, allow_heldout=allow_heldout) for policy, episodes in candidates]
         order = sorted(range(len(candidates)), key=lambda i: (-scores[i].fitness, -scores[i].attack_success, -scores[i].novelty, candidates[i][0].policy_id))
         index = order[0] if order else None
         return (candidates[index][0] if index is not None else None), scores

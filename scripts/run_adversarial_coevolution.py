@@ -27,7 +27,9 @@ def main() -> int:
     parser.add_argument("--config", default=str(ROOT / "configs/ecommerce_coevolution.yaml"))
     parser.add_argument("--mode", choices=["static", "customer_only", "service_only", "coevolution"])
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--real", action="store_true", help="Use the OpenAI-compatible API; default is offline mock")
+    parser.add_argument("--evaluator", choices=["mock", "real"])
+    parser.add_argument("--mock", action="store_true", help="Explicitly use the deterministic offline evaluator")
+    parser.add_argument("--real", action="store_true", help="Alias for --evaluator real")
     parser.add_argument("--model", default=os.environ.get("EVOSAGE_MODEL", ""))
     parser.add_argument("--api-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     args = parser.parse_args()
@@ -36,10 +38,17 @@ def main() -> int:
         config.experiment_mode = args.mode
     if args.resume:
         config.persistence.resume = True
+    if args.real and args.mock:
+        raise SystemExit("choose exactly one evaluator: --mock or --real")
+    evaluator_mode = "real" if args.real else args.evaluator
+    if args.mock:
+        evaluator_mode = "mock"
+    if evaluator_mode is None:
+        raise SystemExit("choose --evaluator mock or --evaluator real")
     evaluator = MockEpisodeEvaluator()
     customer_evolver = None
     service_evolver = None
-    if args.real:
+    if evaluator_mode == "real":
         if not args.model:
             raise SystemExit("--real requires --model or EVOSAGE_MODEL")
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -48,9 +57,11 @@ def main() -> int:
         from framework.llm_integration import get_llm_client
         from framework.evolution.real_factory import make_real_evaluator
         evaluator = make_real_evaluator(args.model, args.api_url, api_key,
-                                        config.persistence.output_dir, config.evaluation.max_turns)
+                                        config.persistence.output_dir, config.evaluation.max_turns,
+                                        api_timeout=config.evaluation.api_timeout)
         evolution_client = get_llm_client(
             "openai_api", api_key=api_key, base_url=args.api_url, model_name=args.model,
+            timeout=config.evaluation.api_timeout,
         )
         customer_evolver = CustomerEvolver(
             config.seed,

@@ -17,8 +17,14 @@ class CustomerPolicyValidator:
 
     _protocol_attack = re.compile(r"(ignore\s+(the|all)\s+instructions|prompt\s+injection|parser|json\s*hack|evaluator\s+manipulat)", re.I)
 
+    DEFAULT_TAGS = {
+        "truthful", "cooperative", "withholding", "pressure", "contradiction",
+        "delayed_disclosure", "authority_challenge", "delayed_contradiction",
+        "escalation", "paraphrase",
+    }
+
     def __init__(self, allowed_tags=None):
-        self.allowed_tags = set(allowed_tags or [])
+        self.allowed_tags = set(allowed_tags) if allowed_tags is not None else set(self.DEFAULT_TAGS)
 
     def validate(self, policy: CustomerPolicy, case_spec: Optional[CaseSpec] = None) -> None:
         policy.validate_for_case(case_spec)
@@ -66,6 +72,10 @@ class PolicyCustomerModel(RuleUserModel):
 
     def generate_initial_message(self) -> str:
         goal = self.profile.user_intent.replace("_", " ")
+        if "paraphrase" in self.policy.strategy_tags:
+            return f"您好，关于{goal}这件事，我想请您先帮我查一下具体状态。"
+        if "cooperative" in self.policy.strategy_tags:
+            return f"您好，我愿意配合核验{goal}所需的信息，请帮我处理。"
         if "pressure" in self.policy.strategy_tags:
             return f"您好，我现在比较着急，想处理{goal}，请先帮我核实订单状态。"
         if "contradiction" in self.policy.strategy_tags:
@@ -103,6 +113,10 @@ class PolicyCustomerModel(RuleUserModel):
         if "delayed_contradiction" in self.policy.strategy_tags or "contradiction" in self.policy.strategy_tags:
             if turn_count >= 2:
                 return "前面的说明和我的实际诉求似乎不完全一致，请重新核对后给出明确结论。"
+        if "truthful" in self.policy.strategy_tags and turn_count >= 2:
+            return "我只补充我确认过的信息，请依据系统核验结果继续处理。"
+        if "paraphrase" in self.policy.strategy_tags:
+            return "麻烦换一种方式说明当前核验结果和下一步。"
         if turn_count >= 3 and "pressure" in self.policy.strategy_tags:
             return "我已经等待了一段时间，请给出明确的处理结果。"
         return "请继续帮我核实相关状态。"

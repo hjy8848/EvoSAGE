@@ -18,11 +18,14 @@ class ServiceEvolver:
         self.compiler = compiler or ServicePolicyCompiler(self.sanitizer)
         self.gate = gate or ServiceGate()
         self.patch_generator = patch_generator
+        self.last_candidate_records = []
+        self.last_baseline_metrics = {}
+        self.last_selected_metrics = {}
 
-    def propose(self, policy: ServicePolicy, failures, generation: int, count: int = 5):
+    def propose(self, policy: ServicePolicy, failures, generation: int, count: int = 5, defense_summary=None, historical_summary=None):
         if self.patch_generator is not None:
             try:
-                generated = self.patch_generator.generate(policy, failures, generation, count)
+                generated = self.patch_generator.generate(policy, failures, generation, count, defense_summary, historical_summary)
                 valid = []
                 for patch in generated:
                     try:
@@ -55,27 +58,67 @@ class ServiceEvolver:
         return patches
 
     def evolve(self, incumbent, failures, normal_cases, adversarial_cases, evaluator, generation, count=5,
-               customer_policy=None, replay_policies=None, replay_attack_count=0):
+               customer_policy=None, replay_policies=None, replay_attack_count=0, defense_summary=None, historical_summary=None):
+        normal_cases = list(normal_cases)
+        adversarial_cases = list(adversarial_cases)
+        if any(getattr(case, "split", "") == "heldout_test" for case in normal_cases + adversarial_cases):
+            raise AssertionError("ServiceEvolver cannot consume heldout cases")
+        self.last_candidate_records = []
         customer_policy = customer_policy or self._baseline_customer()
-        replay_policies = list(replay_policies or [])[:replay_attack_count or None]
-        suite_policies = [customer_policy] + replay_policies
-        def evaluate_adversarial(service_policy, phase):
-            values = []
-            for policy in suite_policies:
-                values.extend(evaluator.evaluate(policy, service_policy, adversarial_cases, "validation", generation, phase))
-            return values
-        baseline_adv = evaluate_adversarial(incumbent, "service_baseline")
+        replay_policies = list(replay_policies or [])
+        replay_policies = replay_policies[:replay_attack_count] if replay_attack_count > 0 else []
+        def evaluate_suite(service_policy, phase):
+            latest = evaluator.evaluate(customer_policy, service_policy, adversarial_cases, "validation", generation, phase + "_latest")
+            replay = []
+            for policy in replay_policies:
+                replay.extend(evaluator.evaluate(policy, service_policy, adversarial_cases, "validation", generation, phase + "_replay"))
+            return latest, replay
+
+        def summarize(latest, replay, normal=None):
+            adversarial = list(latest) + list(replay)
+            robust = aggregate_episode_metrics(adversarial)
+            robust["latest_task_success"] = aggregate_episode_metrics(latest)["task_success"]
+            robust["replay_task_success"] = aggregate_episode_metrics(replay)["task_success"] if replay else robust["latest_task_success"]
+            robust["robust_task_success"] = robust["task_success"]
+            if normal is not None:
+                robust["normal_task_success"] = aggregate_episode_metrics(normal)["task_success"]
+            return robust
+
+        baseline_latest, baseline_replay = evaluate_suite(incumbent, "service_baseline")
         baseline_normal = evaluator.evaluate(self._baseline_customer(), incumbent, normal_cases, "validation", generation, "service_normal_baseline")
+        baseline_metrics = summarize(baseline_latest, baseline_replay, baseline_normal)
+        self.last_baseline_metrics = baseline_metrics
         accepted = []
-        for patch in self.propose(incumbent, failures, generation, count):
+        for patch in self.propose(incumbent, failures, generation, count, defense_summary, historical_summary):
             try:
                 candidate = self.compiler.apply_patch(incumbent, patch, generation=generation)
-                candidate_adv = evaluate_adversarial(candidate, "service_candidate")
+                candidate_latest, candidate_replay = evaluate_suite(candidate, "service_candidate")
                 candidate_normal = evaluator.evaluate(self._baseline_customer(), candidate, normal_cases, "validation", generation, "service_normal_candidate")
-                decision = self.gate.accept(baseline_adv, candidate_adv, baseline_normal, candidate_normal)
+                candidate_metrics = summarize(candidate_latest, candidate_replay, candidate_normal)
+                decision = self.gate.evaluate(
+                    baseline_metrics, candidate_metrics,
+                    aggregate_episode_metrics(baseline_normal),
+                    aggregate_episode_metrics(candidate_normal),
+                )
+                decision.metrics = dict(candidate_metrics, normal_delta=decision.metrics.get("normal_delta", 0.0))
+                regression_cases = [
+                    item.case_id for item in candidate_normal if not item.task_success
+                ]
+                record = {
+                    "patch_id": patch.patch_id,
+                    "service_policy_id": candidate.policy_id,
+                    "accepted": decision.accepted,
+                    "reason": decision.reason,
+                    "delta": decision.delta,
+                    "metrics": candidate_metrics,
+                    "normal_regression_cases": regression_cases,
+                }
+                self.last_candidate_records.append(record)
                 if decision.accepted:
-                    accepted.append((decision, candidate, patch, aggregate_episode_metrics(candidate_adv)))
+                    self.last_selected_metrics = candidate_metrics
+                    accepted.append((decision, candidate, patch, candidate_metrics))
             except Exception:
+                self.last_candidate_records.append({"patch_id": patch.patch_id, "accepted": False, "reason": "candidate_evaluation_error"})
                 continue
         if accepted:
             # Evaluate every candidate before selecting the largest robust
@@ -85,7 +128,7 @@ class ServiceEvolver:
                 key=lambda item: (-item[0].delta, -metrics_value(item[3], "execution_score"), item[2].patch_id),
             )[0]
             return candidate, decision, patch
-        rejected = self.gate.evaluate(aggregate_episode_metrics(baseline_adv), aggregate_episode_metrics(baseline_adv))
+        rejected = self.gate.evaluate(baseline_metrics, baseline_metrics)
         rejected.reason = "no_candidate_passed_validation_gate"
         return incumbent, rejected, None
 
@@ -103,10 +146,15 @@ class LLMServicePatchGenerator:
     def __init__(self, llm_client):
         self.llm_client = llm_client
 
-    def generate(self, policy, failures, generation, count):
+    def generate(self, policy, failures, generation, count, defense_summary=None, historical_summary=None):
         view = [{"errors": list(item.error_types), "node": item.sop_node,
                  "predicted_action": item.predicted_action, "executed_action": item.executed_action,
-                 "termination": item.termination_reason} for item in failures]
+                 "termination": item.termination_reason,
+                 "verification": item.required_verification_score,
+                 "policy": item.policy_score,
+                 "action": item.action_execution_score,
+                 "goal": item.goal_fulfillment_score,
+                 "tools": item.tool_sequence_summary} for item in failures]
         prompt = (
             "Analyze these abstract customer-service failure signatures and propose structured, "
             "general service rules. Do not mention case IDs, order IDs, expected paths/actions, "
@@ -115,6 +163,8 @@ class LLMServicePatchGenerator:
             "ACTION_GROUNDING, RECOVERY, TOOL_USE, or COMMUNICATION.\n"
             f"Failure signatures: {json.dumps(view, ensure_ascii=False)}\n"
             f"Existing active rules: {json.dumps([r.text for r in policy.rules if r.active], ensure_ascii=False)}\n"
+            f"Defense archive summary: {json.dumps(defense_summary or [], ensure_ascii=False)[:6000]}\n"
+            f"Historical regression summary: {json.dumps(historical_summary or [], ensure_ascii=False)[:6000]}\n"
             f"Generate up to {count} distinct patches."
         )
         response = self.llm_client.generate(prompt=prompt, temperature=0.3, max_tokens=1600)

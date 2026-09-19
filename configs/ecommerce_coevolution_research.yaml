@@ -1,0 +1,12 @@
+{
+  "scenario": "ecommerce_refund",
+  "experiment_mode": "coevolution",
+  "seed": 7,
+  "max_generations": 5,
+  "customer": {"candidate_count": 5, "elite_count": 1, "cases_per_candidate": 60, "fitness_weights": {"attack_success": 0.70, "novelty": 0.15, "coverage": 0.15}},
+  "service": {"candidate_count": 5, "min_delta": 0.01, "normal_regression_tolerance": 0.03, "replay_attack_count": 5},
+  "splits": {"strategy": "instance_holdout", "seed": 7, "evolution_ratio": 0.6, "validation_ratio": 0.2, "heldout_ratio": 0.2, "instances_per_path": 20},
+  "evaluation": {"repetitions": 1, "max_turns": 10, "concurrency": 4, "api_timeout": 60},
+  "persistence": {"output_dir": "results/adversarial_coevolution_research", "resume": false},
+  "fresh_adversary": {"enabled": false, "rounds": 3, "candidate_count": 5}
+}

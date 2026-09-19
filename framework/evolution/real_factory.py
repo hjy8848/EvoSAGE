@@ -8,7 +8,7 @@ from .evaluator_adapter import EvoSAGEEpisodeEvaluator
 
 
 def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str | Path,
-                        max_turns: int = 10, user_simulator_mode: str = "llm"):
+                        max_turns: int = 10, user_simulator_mode: str = "llm", api_timeout: int = 300):
     from run_evaluation_with_llm import LLMEvaluationPipeline
 
     def pipeline_factory(customer_policy, service_policy):
@@ -24,6 +24,7 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
             agent_model_name=model,
             judge_model_name=model,
             max_turns=max_turns,
+            api_timeout=api_timeout,
             verbose=False,
             user_simulator_mode=user_simulator_mode,
             customer_policy=customer_policy,

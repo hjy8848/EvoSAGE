@@ -25,19 +25,30 @@ class AttackArchive:
     def add(self, policy: CustomerPolicy, failure_signatures: Iterable[FailureSignature],
             episodes: Iterable[EpisodeResult] = (), generation: Optional[int] = None) -> int:
         episodes = list(episodes)
+        if any(episode.split == "heldout_test" for episode in episodes):
+            raise AssertionError("AttackArchive cannot ingest heldout episodes")
         added = 0
         for signature in failure_signatures:
+            if "json_parse_failed" in signature.error_types or "protocol_failure" in signature.error_types:
+                continue
             key = _key({"tags": sorted(policy.strategy_tags), "node": signature.sop_node,
                         "errors": sorted(signature.error_types), "action": signature.predicted_action})
             record = {
                 "attack_id": "attack_" + key,
                 "customer_policy_id": policy.policy_id,
+                "generation_discovered": policy.generation if generation is None else generation,
                 "customer_policy": policy.to_dict(),
                 "generation": policy.generation if generation is None else generation,
                 "strategy_tags": list(policy.strategy_tags),
                 "target_sop_node": signature.sop_node,
+                "target_path_step_index": signature.path_step_index,
+                "induced_error_types": list(signature.error_types),
                 "failure_signature": signature.to_dict(),
                 "source_case_ids": sorted({episode.case_id for episode in episodes if not episode.task_success}),
+                "attack_success_rate": sum(not episode.task_success for episode in episodes) / len(episodes) if episodes else 0.0,
+                "novelty_signature": key,
+                "transfer_success_rate": None,
+                "active": True,
             }
             if key not in self.attacks:
                 self.attacks[key] = record

@@ -48,6 +48,7 @@ class SplitConfig:
     heldout_ratio: float = 0.2
     holdout_paths: list[int] = field(default_factory=list)
     instances_per_path: int = 1
+    max_cases: Optional[int] = None
 
 
 @dataclass
@@ -55,6 +56,7 @@ class EvaluationConfig:
     repetitions: int = 1
     max_turns: int = 10
     concurrency: int = 1
+    api_timeout: int = 300
 
 
 @dataclass

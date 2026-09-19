@@ -958,10 +958,10 @@ analysis. The default CLI is offline and deterministic:
 
 ```bash
 ./.venv/bin/python scripts/run_adversarial_coevolution.py \
-  --config configs/ecommerce_coevolution.yaml
+  --config configs/ecommerce_coevolution.yaml --evaluator mock
 ```
 
-Use `--real --model MODEL` only when the OpenAI-compatible API and
+Use `--evaluator real --model MODEL` only when the OpenAI-compatible API and
 `OPENAI_API_KEY` are configured in the calling environment. The key is never
 stored in the repository or result artifacts.
 

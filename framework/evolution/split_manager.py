@@ -82,6 +82,9 @@ class SplitManager:
                     case_spec=case_spec.to_dict(),
                 ))
         rng = random.Random(self.config.seed)
+        if self.config.max_cases is not None:
+            rng.shuffle(cases)
+            cases = cases[:max(0, self.config.max_cases)]
         if self.config.strategy == "path_holdout":
             heldout_paths = set(self.config.holdout_paths or [len(paths)])
             heldout = [item for item in cases if item.path_id in heldout_paths]

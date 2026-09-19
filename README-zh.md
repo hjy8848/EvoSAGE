@@ -954,10 +954,10 @@ ServicePatch、攻击/防御归档、门禁和跨代分析。默认命令是零 
 
 ```bash
 ./.venv/bin/python scripts/run_adversarial_coevolution.py \
-  --config configs/ecommerce_coevolution.yaml
+  --config configs/ecommerce_coevolution.yaml --evaluator mock
 ```
 
-只有显式添加 `--real --model MODEL` 才会调用 OpenAI-compatible API；
+只有显式添加 `--evaluator real --model MODEL`（或 `--real` 别名）才会调用 OpenAI-compatible API；
 `OPENAI_API_KEY` 由调用环境提供，不会保存进仓库或结果文件。
 
 ---

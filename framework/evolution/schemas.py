@@ -55,8 +55,23 @@ class CustomerPolicy:
 
     def runtime_guidance(self) -> str:
         """Compile only reusable interaction strategy, never a case answer."""
+        tag_guidance = {
+            "truthful": "只陈述自己确实知道的事实，不猜测后台字段。",
+            "cooperative": "先配合必要核验，并在客服说明下一步后确认理解。",
+            "withholding": "非必要信息在客服明确询问前暂不主动补充。",
+            "pressure": "在首次拒绝或等待后提高紧迫感，但不改变业务目标。",
+            "contradiction": "发现说明不一致时礼貌指出矛盾并要求重新核对。",
+            "delayed_disclosure": "先确认客服需要的信息，再分阶段披露合法已知事实。",
+            "authority_challenge": "对权威查询结果影响诉求的原因提出业务解释请求。",
+            "delayed_contradiction": "在至少一轮核验后再提出与个人理解不同的说法。",
+            "escalation": "只有处理失败或问题未解决时才请求转人工。",
+            "paraphrase": "保持事实和目标不变，但使用不同自然句式表达。",
+        }
+        tag_lines = [tag_guidance[tag] for tag in self.strategy_tags if tag in tag_guidance]
         return (
             "\n【客户交互策略】\n"
+            + "\n".join(f"- {line}" for line in tag_lines)
+            + "\n"
             f"披露：{self.disclosure_strategy}\n"
             f"陈述：{self.claim_strategy}\n"
             f"压力：{self.pressure_strategy}\n"
@@ -295,6 +310,9 @@ class DefenseRecord:
     validation_delta: Dict[str, float]
     normal_user_delta: Dict[str, float]
     adversarial_delta: Dict[str, float]
+    latest_adversary_delta: Dict[str, float] = field(default_factory=dict)
+    replay_delta: Dict[str, float] = field(default_factory=dict)
+    robust_delta: Dict[str, float] = field(default_factory=dict)
     regression_cases: List[str] = field(default_factory=list)
     active: bool = True
 

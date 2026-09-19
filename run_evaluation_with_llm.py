@@ -247,6 +247,7 @@ class LLMEvaluationPipeline:
         agent_model_name: str = "gpt-3.5-turbo",
         judge_model_name: str = "gpt-3.5-turbo",
         max_turns: int = 10,
+        api_timeout: int = 300,
         verbose: bool = True,
         user_simulator_mode: str = "llm",
         user_policy_mode: str = "truthful",
@@ -283,6 +284,7 @@ class LLMEvaluationPipeline:
         self.output_dir = Path(output_dir)
         self.eval_mode = eval_mode
         self.max_turns = max_turns
+        self.api_timeout = api_timeout
         self.verbose = verbose
         self.user_simulator_mode = user_simulator_mode
         self.user_policy_mode = user_policy_mode
@@ -311,6 +313,7 @@ class LLMEvaluationPipeline:
             agent_model_type,
             agent_model_name,
             judge_model_name,
+            api_timeout,
         )
         
         # 结果容器
@@ -337,6 +340,7 @@ class LLMEvaluationPipeline:
         agent_model_type: str = "vllm",
         agent_model_name: str = "gpt-3.5-turbo",
         judge_model_name: str = "gpt-3.5-turbo",
+        api_timeout: int = 300,
     ):
         """初始化LLM客户端
         
@@ -370,18 +374,21 @@ class LLMEvaluationPipeline:
                 base_url=api_url,
                 api_key=api_key,
                 model_name=user_model_name,
+                timeout=api_timeout,
             )
             self.agent_llm_client = get_llm_client(
                 "openai_api",
                 base_url=api_url,
                 api_key=api_key,
                 model_name=agent_model_name,
+                timeout=api_timeout,
             )
             self.judge_llm_client = get_llm_client(
                 "openai_api",
                 base_url=api_url,
                 api_key=api_key,
                 model_name=judge_model_name,
+                timeout=api_timeout,
             )
             return
         

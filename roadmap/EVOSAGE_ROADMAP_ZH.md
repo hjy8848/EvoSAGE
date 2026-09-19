@@ -107,7 +107,7 @@ SOP、PathList 或原有 evaluator 语义。新增层位于现有环境之上：
 - `static`、`customer_only`、`service_only`、`coevolution` 四种模式，支持
   generation marker resume 和 customer-generation × service-generation 矩阵；
 - 离线 mock 两代集成测试、策略序列化/泄漏检查、归档去重、split 可复现性、
-  gate accept/reject/rollback 测试均已加入，当前全套测试为 `43 passed`。
+  gate accept/reject/rollback 测试均已加入，当前全套测试为 `50 passed`。
 - 真实 adapter 已修正为在 pipeline 构造时绑定当前 CustomerPolicy 和
   ServicePolicy；真实模式默认使用 LLM User + policy guidance，rule mode 继续
   作为确定性回归路径。
@@ -123,7 +123,7 @@ SOP、PathList 或原有 evaluator 语义。新增层位于现有环境之上：
 
 ```bash
 ./.venv/bin/python scripts/run_adversarial_coevolution.py \
-  --config configs/ecommerce_coevolution.yaml
+  --config configs/ecommerce_coevolution.yaml --evaluator mock
 ./.venv/bin/python scripts/evaluate_cross_generation.py \
   --run-dir results/adversarial_coevolution
 ./.venv/bin/python scripts/evaluate_fresh_adversary.py \

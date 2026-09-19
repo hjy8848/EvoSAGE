@@ -15,11 +15,11 @@ not presented as a learned research result.
 
 ```bash
 ./.venv/bin/python scripts/run_adversarial_coevolution.py \
-  --config configs/ecommerce_coevolution.yaml
+  --config configs/ecommerce_coevolution.yaml --evaluator mock
 ```
 
-The default is a deterministic mock evaluator, so this command makes zero API
-calls. It writes `evolution`, `validation`, and `heldout_test` manifests,
+The explicit `--evaluator mock` selects a deterministic mock evaluator, so this
+command makes zero API calls. It writes `evolution`, `validation`, and `heldout_test` manifests,
 versioned policies, attack/defense archives, weakness-frontier JSON/CSV, and a
 report. Held-out cases are never passed to an evolver.
 
@@ -28,6 +28,12 @@ Use `--resume` to continue from completed generation markers. Use
 by service-generation matrix, and `evaluate_fresh_adversary.py` to propose
 fresh customer strategies and evaluate them on the held-out set after
 evolution. Fresh strategies are not added to the attack archive.
+
+`configs/ecommerce_coevolution_pilot.yaml` is a small three-generation pilot
+(3 instances per path). `configs/ecommerce_coevolution.yaml` is the larger
+150-case template, and `configs/ecommerce_coevolution_research.yaml` is a
+larger five-generation/20-instances-per-path template. None launches
+automatically.
 
 ## What can evolve
 
@@ -41,6 +47,6 @@ regression, and degenerate query/transfer/reject behavior.
 
 The mock loop is an integration fixture, not a research result. Real API
 evaluation uses `EvoSAGEEpisodeEvaluator` with the configured
-`LLMEvaluationPipeline`; `--real` is also available on the cross-generation
-and fresh-adversary scripts. Keep credentials in the existing macOS Keychain
+`LLMEvaluationPipeline`; `--evaluator real` (or `--real`) is also available on
+the cross-generation and fresh-adversary scripts. Keep credentials in the existing macOS Keychain
 workflow, never in configs or result files.

@@ -5,17 +5,19 @@ import pytest
 
 from framework.backend.factory import build_case_spec
 from framework.evolution.archives import AttackArchive
-from framework.evolution.config import EvolutionConfig, PersistenceConfig
-from framework.evolution.customer_policy import CustomerPolicyValidator
+from framework.evolution.config import EvolutionConfig, PersistenceConfig, SplitConfig
+from framework.evolution.customer_policy import CustomerPolicyValidator, PolicyCustomerModel
 from framework.evolution.evaluator_adapter import MockEpisodeEvaluator
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
 from framework.evolution.customer_evolver import LLMCustomerPolicyGenerator
 from framework.evolution.service_evolver import LLMServicePatchGenerator
+from framework.evolution.service_evolver import ServiceEvolver
 from framework.evolution.runner import EvolutionRunner
 from framework.evolution.schemas import CustomerPolicy, PolicyValidationError, ServicePatch, ServicePolicy, ServiceRule
 from framework.evolution.service_gate import ServiceGate
 from framework.evolution.service_policy import ServicePolicySanitizer
 from framework.evolution.split_manager import SplitManager
+from framework.models import UserProfile
 
 
 def ecommerce_case():
@@ -31,6 +33,23 @@ def test_customer_policy_roundtrip_and_leakage_gate():
     bad = CustomerPolicy(description=f"use {case.case_id} and expected_action")
     with pytest.raises(PolicyValidationError):
         CustomerPolicyValidator().validate(bad, case)
+
+
+def test_customer_policy_compilation_changes_runtime_guidance_not_case_goal():
+    case = ecommerce_case()
+    profile = UserProfile(user_id="u", user_intent="refund_before_shipping", adversarial_intensity="weak_conflict", scenario_id="ecommerce_refund")
+    cooperative = CustomerPolicy(strategy_tags=["truthful", "cooperative"])
+    challenging = CustomerPolicy(strategy_tags=["authority_challenge", "delayed_contradiction"])
+    first = PolicyCustomerModel(profile, case_spec=case, policy=cooperative)
+    second = PolicyCustomerModel(profile, case_spec=case, policy=challenging)
+    assert cooperative.runtime_guidance() != challenging.runtime_guidance()
+    assert first.environment_state.goal == second.environment_state.goal == case.user_goal
+    assert first.generate_initial_message() != second.generate_initial_message()
+
+
+def test_unknown_customer_strategy_is_rejected():
+    with pytest.raises(PolicyValidationError):
+        CustomerPolicyValidator().validate(CustomerPolicy(strategy_tags=["not_a_business_strategy"]))
 
 
 def test_service_sanitizer_rejects_case_specific_rules():
@@ -49,6 +68,18 @@ def test_split_reproducibility_and_heldout_isolation(tmp_path):
         one.assert_no_heldout(one.heldout_test)
 
 
+def test_multiple_instances_per_path_are_unique_and_deterministic():
+    config = SplitConfig(seed=11, instances_per_path=3)
+    one = SplitManager(config).build()
+    two = SplitManager(config).build()
+    assert len(one.all_cases) == 45
+    assert len({item.case_id for item in one.all_cases}) == 45
+    assert [item.case_id for item in one.all_cases] == [item.case_id for item in two.all_cases]
+    assert len({item.path_id for item in one.all_cases}) == 15
+    limited = SplitManager(SplitConfig(seed=11, instances_per_path=3, max_cases=3)).build()
+    assert len(limited.all_cases) == 3
+
+
 def test_gate_accepts_improvement_and_rejects_regression():
     gate = ServiceGate(min_delta=.01, normal_regression_tolerance=.03)
     accepted = gate.evaluate({"task_success": .2}, {"task_success": .3})
@@ -65,9 +96,20 @@ def test_two_generation_mock_run_resume_and_matrix(tmp_path):
     assert (tmp_path / "run" / "archives" / "attacks.jsonl").exists()
     assert (tmp_path / "run" / "analysis" / "weakness_frontier.json").exists()
     matrix = runner.cross_generation_evaluation()
-    assert len(matrix) == 4
+    assert len(matrix) == 9
     config.persistence.resume = True
     assert EvolutionRunner(config, evaluator=MockEpisodeEvaluator()).run()["completed_generations"] == [0, 1]
+
+
+def test_fresh_adversary_updates_incumbent_without_training_archive(tmp_path):
+    config = EvolutionConfig(max_generations=1, persistence=PersistenceConfig(output_dir=str(tmp_path / "run")))
+    runner = EvolutionRunner(config, evaluator=MockEpisodeEvaluator())
+    runner.run()
+    runner.fresh_adversary_evaluation(rounds=2, candidate_count=1)
+    data = json.loads((tmp_path / "run" / "analysis" / "fresh_adversary_final.json").read_text())
+    assert len(data["rounds"]) == 2
+    assert data["training_archive_used"] is False
+    assert data["rounds"][0]["selected_policy"]["policy_id"] != data["rounds"][1]["selected_policy"]["policy_id"]
 
 
 def test_real_adapter_binds_policies_at_pipeline_construction():
@@ -118,3 +160,38 @@ def test_llm_generators_return_valid_structured_candidates_without_api():
     patch = LLMServicePatchGenerator(FakeClient('[{"category":"VERIFICATION","text":"Verify authoritative results before deciding.","rationale":"failure-driven"}]')).generate(ServicePolicy(), [], 1, 1)
     assert generated[0].strategy_tags == ["authority_challenge"]
     assert patch[0].rules[0].category == "VERIFICATION"
+
+
+def test_service_evaluates_all_candidates_and_replays_archived_attacker():
+    from framework.evolution.schemas import FailureSignature
+
+    class PatchGenerator:
+        def generate(self, policy, failures, generation, count, *args):
+            return [ServicePatch(
+                f"patch-{index}", "add", [ServiceRule(f"rule-{index}", "ACTION_GROUNDING", "Use the authoritative action tool before claiming success")]
+            ) for index in range(count)]
+
+    split = SplitManager().build()
+    customer = CustomerPolicy(strategy_tags=["authority_challenge"])
+    mock = MockEpisodeEvaluator()
+    failures = [FailureSignature.from_episode(item) for item in mock.evaluate(customer, ServicePolicy(), split.evolution, "evolution", 0, "failure_scan") if not item.task_success]
+    evolver = ServiceEvolver(patch_generator=PatchGenerator())
+    _, decision, _ = evolver.evolve(
+        ServicePolicy(), failures, split.validation, split.validation, mock, 0, count=3,
+        customer_policy=customer, replay_policies=[customer], replay_attack_count=1,
+    )
+    assert decision.accepted is True
+    assert len(evolver.last_candidate_records) == 3
+    assert any(call["phase"] == "service_candidate_replay" for call in mock.calls)
+
+
+def test_attack_archive_reconstructs_customer_policy(tmp_path):
+    from framework.evolution.schemas import FailureSignature, EpisodeResult
+    policy = CustomerPolicy(policy_id="archived", strategy_tags=["authority_challenge"])
+    episode = EpisodeResult("e", "ecommerce_refund", "c", policy.policy_id, "s", "evolution", 0, False, 0.0, error_types=["authoritative_conflict"])
+    signature = FailureSignature.from_episode(episode)
+    archive = AttackArchive(tmp_path / "attacks.jsonl")
+    archive.add(policy, [signature], [episode], 0)
+    loaded = AttackArchive(tmp_path / "attacks.jsonl")
+    reconstructed = CustomerPolicy.from_dict(loaded.to_dicts()[0]["customer_policy"])
+    assert reconstructed.policy_id == policy.policy_id

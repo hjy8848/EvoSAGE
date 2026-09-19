@@ -21,7 +21,7 @@ from .runner import EvolutionRunner
 from .customer_policy import CustomerPolicyCompiler, CustomerPolicyValidator, PolicyCustomerModel
 from .service_policy import ServicePolicyCompiler, ServicePolicySanitizer, ServicePolicyValidator
 from .service_gate import GateDecision, ServiceGate
-from .evaluator_adapter import EvoSAGEEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
+from .evaluator_adapter import BudgetedEpisodeEvaluator, EvoSAGEEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
 from .weakness_frontier import WeaknessFrontier
 
 __all__ = [
@@ -47,6 +47,7 @@ __all__ = [
     "GateDecision",
     "ServiceGate",
     "EvoSAGEEpisodeEvaluator",
+    "BudgetedEpisodeEvaluator",
     "MockEpisodeEvaluator",
     "aggregate_episode_metrics",
     "WeaknessFrontier",
