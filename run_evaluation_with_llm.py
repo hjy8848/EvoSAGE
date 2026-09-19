@@ -251,6 +251,8 @@ class LLMEvaluationPipeline:
         user_simulator_mode: str = "llm",
         user_policy_mode: str = "truthful",
         legacy_execution: bool = False,
+        customer_policy=None,
+        service_policy=None,
     ):
         """
         初始化LLM评测管道
@@ -285,6 +287,10 @@ class LLMEvaluationPipeline:
         self.user_simulator_mode = user_simulator_mode
         self.user_policy_mode = user_policy_mode
         self.legacy_execution = legacy_execution
+        # Optional co-evolution overlays.  None preserves the historical
+        # runner behavior; policies never replace CaseSpec or evaluator truth.
+        self.customer_policy = customer_policy
+        self.service_policy = service_policy
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -517,7 +523,12 @@ class LLMEvaluationPipeline:
         if backend_environment is not None:
             backend_environment.reset(case_spec)
 
-        if self.user_simulator_mode == "rule":
+        if self.customer_policy is not None:
+            from framework.evolution.customer_policy import CustomerPolicyCompiler, PolicyCustomerModel
+            compiled_policy = CustomerPolicyCompiler().compile(self.customer_policy, case_spec)
+            user_system_prompt += compiled_policy.runtime_guidance()
+            user_model = PolicyCustomerModel(user_profile, user_system_prompt, case_spec, compiled_policy)
+        elif self.user_simulator_mode == "rule":
             user_model = RuleUserModel(user_profile, user_system_prompt, case_spec)
         elif self.user_simulator_mode == "rewrite":
             user_model = RewritingUserModel(
@@ -541,6 +552,9 @@ class LLMEvaluationPipeline:
         # 创建客服模型
         # 根据场景ID获取对应的系统提示词
         agent_system_prompt = get_agent_system_prompt_by_scenario(self.scenario_id)
+        if self.service_policy is not None:
+            from framework.evolution.service_policy import ServicePolicyCompiler
+            agent_system_prompt += ServicePolicyCompiler().compile_prompt(self.service_policy)
         
         agent_model = AgentModel(
             scenario_id=self.scenario_id,

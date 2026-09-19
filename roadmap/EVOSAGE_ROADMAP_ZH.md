@@ -77,6 +77,55 @@
 
 ## 2. 对当前 Bench 的关键观察
 
+### 2.10 对抗用户—客服协同进化（当前实现）
+
+本阶段先限定在 `ecommerce_refund`，不迁移其他五个场景，也不修改官方
+SOP、PathList 或原有 evaluator 语义。新增层位于现有环境之上：
+
+```text
+固定 CaseSpec / Backend truth
+        ↓
+可复用 CustomerPolicy  ──→  Customer Simulator
+        ↕                         ↕
+攻击归档 / 弱点前沿       Agent + ServicePolicy overlay
+                                  ↓
+                    结构化 ServicePatch + validation gate
+```
+
+已实现：
+
+- `CustomerPolicy`：只表达披露时机、压力、矛盾、升级等可迁移交互策略；
+  校验器拒绝案例 ID、gold path/action、隐藏后台值、解析器攻击和案例变更；
+- `ServicePolicy` / `ServicePatch`：只能增加、替换或禁用结构化规则，不能改源代码，
+  sanitizer 拒绝样本映射和 always-reject/transfer/query-all 退化规则；
+- `AttackArchive`、`DefenseArchive`、`FailureSignature` 和
+  `WeaknessFrontier`：支持去重、JSONL 持久化以及 JSON/CSV 分析；
+- 固定 `seed` 的 `evolution / validation / heldout_test` 清单，支持
+  `instance_holdout` 和 `path_holdout`；held-out 不进入任何 evolver；
+- customer fitness 默认是 `0.70 attack_success + 0.15 novelty + 0.15 coverage`；
+  service candidate 需要通过对抗提升、正常用户回归和退化检查；
+- `static`、`customer_only`、`service_only`、`coevolution` 四种模式，支持
+  generation marker resume 和 customer-generation × service-generation 矩阵；
+- 离线 mock 两代集成测试、策略序列化/泄漏检查、归档去重、split 可复现性、
+  gate accept/reject/rollback 测试均已加入，当前全套测试为 `42 passed`。
+
+运行离线验证：
+
+```bash
+./.venv/bin/python scripts/run_adversarial_coevolution.py \
+  --config configs/ecommerce_coevolution.yaml
+./.venv/bin/python scripts/evaluate_cross_generation.py \
+  --run-dir results/adversarial_coevolution
+./.venv/bin/python scripts/evaluate_fresh_adversary.py \
+  --run-dir results/adversarial_coevolution
+```
+
+离线命令不会调用 API。真实 API 运行必须显式使用 `--real`，并通过环境变量
+加载模型名和已有 Keychain 密钥；密钥不进入配置、trace 或 Git。当前这层是
+可复现实验框架和 mock 验收闭环，不应把 mock 结果表述为真实模型的 RSI 或
+自进化结论。真实研究结果还需要在固定 API 预算下完成 held-out、fresh
+adversary 和跨模型复核。
+
 ### 2.1 当前用户模拟器不是完整业务环境
 
 当前用户模拟器主要由以下部分组成：

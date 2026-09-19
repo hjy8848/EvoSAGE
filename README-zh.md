@@ -943,6 +943,23 @@ export AGENT_MODEL_PATH="Qwen/Qwen2.5-32B-Instruct"
 - [ ] 日志无错误 (`tail vllm_logs/*.log`)
 - [ ] 服务可访问 (`curl localhost:8000/v1/models`)
 
+### 对抗用户—客服协同进化（电商退款 MVP）
+
+协同进化层见
+[`docs/ADVERSARIAL_COEVOLUTION.md`](docs/ADVERSARIAL_COEVOLUTION.md)。当前只
+覆盖 `ecommerce_refund`，不改官方 evaluator；新增固定的
+evolution/validation/heldout 清单、可复用 CustomerPolicy、结构化
+ServicePatch、攻击/防御归档、门禁和跨代分析。默认命令是零 API 调用的离线
+确定性验证：
+
+```bash
+./.venv/bin/python scripts/run_adversarial_coevolution.py \
+  --config configs/ecommerce_coevolution.yaml
+```
+
+只有显式添加 `--real --model MODEL` 才会调用 OpenAI-compatible API；
+`OPENAI_API_KEY` 由调用环境提供，不会保存进仓库或结果文件。
+
 ---
 
 ## 技术支持

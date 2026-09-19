@@ -947,6 +947,24 @@ export AGENT_MODEL_PATH="Qwen/Qwen2.5-32B-Instruct"
 - [ ] Logs error-free (`tail vllm_logs/*.log`)
 - [ ] Services accessible (`curl localhost:8000/v1/models`)
 
+### Adversarial co-evolution (Ecommerce MVP)
+
+The research-grade co-evolution layer is documented in
+[`docs/ADVERSARIAL_COEVOLUTION.md`](docs/ADVERSARIAL_COEVOLUTION.md). It is
+currently limited to `ecommerce_refund`, preserves the existing evaluator, and
+uses immutable evolution/validation/held-out manifests, reusable customer
+policies, structured service patches, archives, gates, and cross-generation
+analysis. The default CLI is offline and deterministic:
+
+```bash
+./.venv/bin/python scripts/run_adversarial_coevolution.py \
+  --config configs/ecommerce_coevolution.yaml
+```
+
+Use `--real --model MODEL` only when the OpenAI-compatible API and
+`OPENAI_API_KEY` are configured in the calling environment. The key is never
+stored in the repository or result artifacts.
+
 ---
 
 ## Technical Support
