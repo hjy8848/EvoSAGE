@@ -9,11 +9,14 @@ from typing import Any, Optional
 from .archives import AttackArchive, DefenseArchive
 from .config import EvolutionConfig
 from .customer_evolver import CustomerEvolver
+from .customer_policy import CustomerPolicyValidator
+from .customer_selector import CustomerSelector
 from .evaluator_adapter import MockEpisodeEvaluator
 from .persistence import RunStore
 from .reporting import generate_report
 from .schemas import CustomerPolicy, DefenseRecord, FailureSignature, ServicePolicy
 from .service_evolver import ServiceEvolver
+from .service_policy import ServicePolicySanitizer
 from .service_gate import ServiceGate
 from .split_manager import SplitManager
 from .weakness_frontier import WeaknessFrontier
@@ -26,9 +29,14 @@ class EvolutionRunner:
         self.store = store or RunStore(self.config.persistence.output_dir)
         self.split_manager = split_manager or SplitManager(self.config.splits, self.store.run_dir / "split_manifest")
         self.evaluator = evaluator or MockEpisodeEvaluator()
-        self.customer_evolver = customer_evolver or CustomerEvolver(self.config.seed)
+        self.customer_evolver = customer_evolver or CustomerEvolver(
+            self.config.seed,
+            validator=CustomerPolicyValidator(self.config.customer.allowed_strategy_tags),
+            selector=CustomerSelector(self.config.customer.fitness_weights),
+        )
         self.service_evolver = service_evolver or ServiceEvolver(
             self.config.seed,
+            sanitizer=ServicePolicySanitizer(self.config.service.allowed_rule_categories),
             gate=ServiceGate(self.config.service.min_delta, self.config.service.normal_regression_tolerance),
         )
         self.attack_archive = AttackArchive(self.store.run_dir / "archives" / "attacks.jsonl")
@@ -36,7 +44,11 @@ class EvolutionRunner:
         self.frontier = WeaknessFrontier()
 
     def run(self) -> dict[str, Any]:
-        splits = self.split_manager.build() if not (self.store.run_dir / "split_manifest" / "evolution_cases.json").exists() else SplitManager.load(self.store.run_dir / "split_manifest")
+        manifest_exists = (self.store.run_dir / "split_manifest" / "evolution_cases.json").exists()
+        # A fresh run rebuilds the manifest from the current config.  Only an
+        # explicit resume reuses an existing split, preventing a changed
+        # instances_per_path/seed from silently running against stale data.
+        splits = SplitManager.load(self.store.run_dir / "split_manifest") if (manifest_exists and self.config.persistence.resume) else self.split_manager.build()
         self.store.write_json("config/evolution.json", self.config.to_dict())
         self.store.write_json("environment/provenance.json", {"scenario": self.config.scenario, "seed": self.config.seed, "mode": self.config.experiment_mode, "note": "mock metrics are fixture metrics" if isinstance(self.evaluator, MockEpisodeEvaluator) else "real evaluator"})
         completed = self.store.completed_generations()
@@ -49,9 +61,17 @@ class EvolutionRunner:
             baseline_customer = customer
             baseline_service = service
             if self.config.experiment_mode in {"customer_only", "coevolution"} and self.config.experiment_mode != "static":
+                prior_customer_episodes = self.evaluator.evaluate(
+                    customer, service, splits.evolution, "evolution", generation, "customer_failure_scan"
+                )
+                prior_failures = [FailureSignature.from_episode(item) for item in prior_customer_episodes if not item.task_success]
                 customer, candidate_records, scores = self.customer_evolver.evolve(
                     customer, service, splits.evolution, self.evaluator, self.attack_archive, generation,
-                    self.config.customer.candidate_count)
+                    self.config.customer.candidate_count,
+                    cases_per_candidate=self.config.customer.cases_per_candidate,
+                    elite_count=self.config.customer.elite_count,
+                    source_failures=prior_failures,
+                )
                 self.store.write_json(f"generations/gen_{generation:03d}/customer_candidates.json", {
                     "selected_policy": customer.to_dict(), "scores": [score.to_dict() for score in scores],
                     "candidate_episode_counts": [len(items) for _, items in candidate_records],
@@ -63,8 +83,16 @@ class EvolutionRunner:
             if self.config.experiment_mode in {"service_only", "coevolution"} and self.config.experiment_mode != "static":
                 failures = [FailureSignature.from_episode(item) for item in self.evaluator.evaluate(customer, service, splits.evolution, "evolution", generation, "service_failures") if not item.task_success]
                 service, decision, patch = self.service_evolver.evolve(
-                    service, failures, splits.validation, splits.evolution, self.evaluator, generation,
-                    self.config.service.candidate_count, customer_policy=customer)
+                    service, failures, splits.validation, splits.validation, self.evaluator, generation,
+                    self.config.service.candidate_count,
+                    customer_policy=customer,
+                    replay_policies=[
+                        CustomerPolicy.from_dict(item["customer_policy"])
+                        for item in self.attack_archive.to_dicts()
+                        if item.get("customer_policy")
+                    ],
+                    replay_attack_count=self.config.service.replay_attack_count,
+                )
                 self.store.write_json(f"generations/gen_{generation:03d}/service_gate.json", {
                     "accepted": decision.accepted, "reason": decision.reason, "delta": decision.delta,
                     "patch": patch.to_dict() if patch else None,
@@ -103,10 +131,16 @@ class EvolutionRunner:
         service = self._load_policy("service_policy", ServicePolicy())
         incumbent = CustomerPolicy()
         results = []
+        selector = CustomerSelector(self.config.customer.fitness_weights)
         for generation in range(rounds):
             candidates = self.customer_evolver.propose(incumbent, 10_000 + generation, candidate_count)
+            evaluated = []
             for policy in candidates:
-                results.extend(self.evaluator.evaluate(policy, service, splits.heldout_test, "heldout_test", generation, "fresh_adversary"))
+                episodes = self.evaluator.evaluate(policy, service, splits.heldout_test, "heldout_test", generation, "fresh_adversary")
+                results.extend(episodes)
+                evaluated.append((policy, episodes))
+            selected, _ = selector.select(evaluated, set(), total_nodes=max(1, len(splits.heldout_test)))
+            incumbent = selected or incumbent
         self.store.write_json("analysis/fresh_adversary_results.json", {"results": [item.to_dict() for item in results]})
         return results
 

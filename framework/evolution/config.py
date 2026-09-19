@@ -24,7 +24,7 @@ class CustomerEvolutionConfig:
     })
     allowed_strategy_tags: list[str] = field(default_factory=lambda: [
         "truthful", "cooperative", "withholding", "pressure", "contradiction",
-        "delayed_disclosure", "authority_challenge", "escalation", "paraphrase",
+        "delayed_disclosure", "authority_challenge", "delayed_contradiction", "escalation", "paraphrase",
     ])
 
 

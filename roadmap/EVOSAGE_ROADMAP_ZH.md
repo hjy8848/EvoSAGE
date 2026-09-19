@@ -107,7 +107,17 @@ SOP、PathList 或原有 evaluator 语义。新增层位于现有环境之上：
 - `static`、`customer_only`、`service_only`、`coevolution` 四种模式，支持
   generation marker resume 和 customer-generation × service-generation 矩阵；
 - 离线 mock 两代集成测试、策略序列化/泄漏检查、归档去重、split 可复现性、
-  gate accept/reject/rollback 测试均已加入，当前全套测试为 `42 passed`。
+  gate accept/reject/rollback 测试均已加入，当前全套测试为 `43 passed`。
+- 真实 adapter 已修正为在 pipeline 构造时绑定当前 CustomerPolicy 和
+  ServicePolicy；真实模式默认使用 LLM User + policy guidance，rule mode 继续
+  作为确定性回归路径。
+- Customer/Service evolver 现在支持根据抽象 failure signature 调用 LLM 生成
+  结构化候选；所有 Service candidates 都跑完 validation gate 后再择优，失败
+  时回滚 incumbent。
+- Service gate 已在 validation split 上同时检查当前 adversary、normal customer
+  和 AttackArchive replay；fresh adversary 每轮会根据攻击结果更新 incumbent。
+- `--real` 已加入 cross-generation 和 fresh-adversary CLI；不带 `--real` 的结果
+  明确是 mock fixture，不能当作真实模型实验结果。
 
 运行离线验证：
 

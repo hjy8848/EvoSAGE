@@ -17,6 +17,9 @@ class CustomerPolicyValidator:
 
     _protocol_attack = re.compile(r"(ignore\s+(the|all)\s+instructions|prompt\s+injection|parser|json\s*hack|evaluator\s+manipulat)", re.I)
 
+    def __init__(self, allowed_tags=None):
+        self.allowed_tags = set(allowed_tags or [])
+
     def validate(self, policy: CustomerPolicy, case_spec: Optional[CaseSpec] = None) -> None:
         policy.validate_for_case(case_spec)
         if not policy.policy_id or not policy.name:
@@ -26,6 +29,8 @@ class CustomerPolicyValidator:
             raise PolicyValidationError("customer policy attempts protocol or evaluator manipulation")
         if any(not isinstance(tag, str) or not tag.strip() for tag in policy.strategy_tags):
             raise PolicyValidationError("strategy tags must be non-empty strings")
+        if self.allowed_tags and any(tag not in self.allowed_tags for tag in policy.strategy_tags):
+            raise PolicyValidationError("customer policy uses an unapproved strategy tag")
 
 
 class CustomerPolicyCompiler:
@@ -84,6 +89,10 @@ class PolicyCustomerModel(RuleUserModel):
                 return "请确认这个处理已经生效了吗？"
             self._rejected_once = True
             return "这个处理没有成功，请说明原因并给出可行的下一步。"
+        if "authority_challenge" in self.policy.strategy_tags and self.backend_events:
+            last = self.backend_events[-1].get("result", {}) or {}
+            if last.get("success") and last.get("data"):
+                return "我理解系统记录了这个结果，但请说明它为什么影响我的申请，以及下一步依据什么处理。"
         if "查询" in text or "核实" in text or "verify" in lower:
             return "好的，请先核实后告诉我具体处理方式。"
         if "拒绝" in text or "无法" in text:
@@ -91,6 +100,9 @@ class PolicyCustomerModel(RuleUserModel):
             if "escalation" in self.policy.strategy_tags:
                 return "如果无法处理，请帮我转人工进一步确认。"
             return "请说明拒绝依据以及我还能补充什么材料。"
+        if "delayed_contradiction" in self.policy.strategy_tags or "contradiction" in self.policy.strategy_tags:
+            if turn_count >= 2:
+                return "前面的说明和我的实际诉求似乎不完全一致，请重新核对后给出明确结论。"
         if turn_count >= 3 and "pressure" in self.policy.strategy_tags:
             return "我已经等待了一段时间，请给出明确的处理结果。"
         return "请继续帮我核实相关状态。"

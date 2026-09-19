@@ -12,8 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from framework.evolution.config import load_config
+from framework.evolution.customer_evolver import CustomerEvolver, LLMCustomerPolicyGenerator
+from framework.evolution.customer_policy import CustomerPolicyValidator
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator, MockEpisodeEvaluator
 from framework.evolution.runner import EvolutionRunner
+from framework.evolution.service_evolver import LLMServicePatchGenerator, ServiceEvolver
+from framework.evolution.service_gate import ServiceGate
+from framework.evolution.service_policy import ServicePolicySanitizer
+from framework.evolution.customer_selector import CustomerSelector
 
 
 def main() -> int:
@@ -31,31 +37,37 @@ def main() -> int:
     if args.resume:
         config.persistence.resume = True
     evaluator = MockEpisodeEvaluator()
+    customer_evolver = None
+    service_evolver = None
     if args.real:
         if not args.model:
             raise SystemExit("--real requires --model or EVOSAGE_MODEL")
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise SystemExit("--real requires OPENAI_API_KEY; load it from Keychain in the calling shell")
-        from run_evaluation_with_llm import LLMEvaluationPipeline
-        from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
-        def pipeline_factory():
-            return LLMEvaluationPipeline(
-                scenario_id=config.scenario,
-                model_name=args.model,
-                output_dir=str(Path(config.persistence.output_dir) / "real_traces"),
-                eval_mode="api",
-                api_key=api_key,
-                api_url=args.api_url,
-                user_model_name=args.model,
-                agent_model_type="api",
-                agent_model_name=args.model,
-                judge_model_name=args.model,
-                max_turns=config.evaluation.max_turns,
-                verbose=False,
-            )
-        evaluator = EvoSAGEEpisodeEvaluator(pipeline_factory)
-    result = EvolutionRunner(config, evaluator=evaluator).run()
+        from framework.llm_integration import get_llm_client
+        from framework.evolution.real_factory import make_real_evaluator
+        evaluator = make_real_evaluator(args.model, args.api_url, api_key,
+                                        config.persistence.output_dir, config.evaluation.max_turns)
+        evolution_client = get_llm_client(
+            "openai_api", api_key=api_key, base_url=args.api_url, model_name=args.model,
+        )
+        customer_evolver = CustomerEvolver(
+            config.seed,
+            validator=CustomerPolicyValidator(config.customer.allowed_strategy_tags),
+            selector=CustomerSelector(config.customer.fitness_weights),
+            strategy_generator=LLMCustomerPolicyGenerator(evolution_client),
+        )
+        service_evolver = ServiceEvolver(
+            config.seed,
+            sanitizer=ServicePolicySanitizer(config.service.allowed_rule_categories),
+            gate=ServiceGate(config.service.min_delta, config.service.normal_regression_tolerance),
+            patch_generator=LLMServicePatchGenerator(evolution_client),
+        )
+    result = EvolutionRunner(
+        config, evaluator=evaluator, customer_evolver=customer_evolver,
+        service_evolver=service_evolver,
+    ).run()
     print(result["report"])
     return 0
 

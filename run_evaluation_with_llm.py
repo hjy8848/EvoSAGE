@@ -527,7 +527,29 @@ class LLMEvaluationPipeline:
             from framework.evolution.customer_policy import CustomerPolicyCompiler, PolicyCustomerModel
             compiled_policy = CustomerPolicyCompiler().compile(self.customer_policy, case_spec)
             user_system_prompt += compiled_policy.runtime_guidance()
-            user_model = PolicyCustomerModel(user_profile, user_system_prompt, case_spec, compiled_policy)
+            if self.user_simulator_mode == "rule":
+                user_model = PolicyCustomerModel(user_profile, user_system_prompt, case_spec, compiled_policy)
+            elif self.user_simulator_mode == "rewrite":
+                user_model = RewritingUserModel(
+                    profile=user_profile,
+                    system_prompt=user_system_prompt,
+                    llm_client=self.user_llm_client,
+                    temperature=0.8,
+                    max_tokens=512,
+                    case_spec=case_spec,
+                )
+            else:
+                # Real co-evolution uses the LLM customer with a validated,
+                # reusable strategy overlay; rule mode remains available for
+                # deterministic unit and regression tests.
+                user_model = LLMUserModel(
+                    profile=user_profile,
+                    system_prompt=user_system_prompt,
+                    llm_client=self.user_llm_client,
+                    temperature=0.8,
+                    max_tokens=512,
+                    case_spec=case_spec,
+                )
         elif self.user_simulator_mode == "rule":
             user_model = RuleUserModel(user_profile, user_system_prompt, case_spec)
         elif self.user_simulator_mode == "rewrite":

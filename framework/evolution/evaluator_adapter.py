@@ -95,21 +95,26 @@ class CallableEpisodeEvaluator:
 class EvoSAGEEpisodeEvaluator:
     """Thin real-run adapter; imports the legacy runner lazily."""
 
-    def __init__(self, pipeline_factory: Callable[[], Any], user_policy_mode: str = "truthful"):
+    def __init__(self, pipeline_factory: Callable[..., Any], user_policy_mode: str = "truthful"):
         self.pipeline_factory = pipeline_factory
         self.user_policy_mode = user_policy_mode
 
     def evaluate(self, customer_policy, service_policy, cases, split, generation, phase):
-        from .service_policy import ServicePolicyCompiler
         outputs = []
-        pipeline = self.pipeline_factory()
+        # Policies are pipeline-construction state.  Older factories that do
+        # not accept them remain supported for callers that already bind the
+        # policies in a closure.
+        try:
+            pipeline = self.pipeline_factory(customer_policy, service_policy)
+        except TypeError as exc:
+            if "positional" not in str(exc) and "argument" not in str(exc):
+                raise
+            pipeline = self.pipeline_factory()
         for case in cases:
             simulation, report = pipeline.run_single_simulation(
                 getattr(case, "intent", "refund_before_shipping"),
                 user_id=f"{getattr(case, 'case_id', 'case')}_{generation}",
                 path_config=getattr(case, "path_config", None),
-                customer_policy=customer_policy,
-                service_policy=service_policy,
             )
             outputs.append(self.from_evosage(simulation, report, customer_policy, service_policy, split, generation, phase))
         return outputs

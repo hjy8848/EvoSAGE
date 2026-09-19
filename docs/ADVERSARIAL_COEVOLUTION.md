@@ -5,6 +5,12 @@ existing SAGE evaluator, expected paths, weights, or backend truth. It adds a
 reusable customer-policy search and structured service-policy patch loop above
 that environment.
 
+In real mode, candidate policies and patches are generated from abstract
+failure signatures by the configured LLM, then hard-validated and evaluated.
+The deterministic mutation/template path remains as an offline fallback when a
+generation is invalid or unavailable; it is explicitly recorded as a fallback,
+not presented as a learned research result.
+
 ## Reproducible offline run
 
 ```bash
@@ -34,6 +40,7 @@ answers; the service gate checks adversarial improvement, normal-user
 regression, and degenerate query/transfer/reject behavior.
 
 The mock loop is an integration fixture, not a research result. Real API
-evaluation should construct `EvoSAGEEpisodeEvaluator` with the configured
-`LLMEvaluationPipeline` and keep credentials in the existing macOS Keychain
+evaluation uses `EvoSAGEEpisodeEvaluator` with the configured
+`LLMEvaluationPipeline`; `--real` is also available on the cross-generation
+and fresh-adversary scripts. Keep credentials in the existing macOS Keychain
 workflow, never in configs or result files.

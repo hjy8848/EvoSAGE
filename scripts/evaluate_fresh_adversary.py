@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
@@ -16,9 +17,18 @@ from framework.evolution.runner import EvolutionRunner
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True)
+    parser.add_argument("--real", action="store_true")
+    parser.add_argument("--model", default=os.environ.get("EVOSAGE_MODEL", ""))
+    parser.add_argument("--api-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     args = parser.parse_args()
     config = EvolutionConfig(persistence=PersistenceConfig(output_dir=args.run_dir))
-    runner = EvolutionRunner(config, evaluator=MockEpisodeEvaluator())
+    evaluator = MockEpisodeEvaluator()
+    if args.real:
+        if not args.model or not os.environ.get("OPENAI_API_KEY"):
+            raise SystemExit("--real requires --model/EVOSAGE_MODEL and OPENAI_API_KEY")
+        from framework.evolution.real_factory import make_real_evaluator
+        evaluator = make_real_evaluator(args.model, args.api_url, os.environ["OPENAI_API_KEY"], args.run_dir)
+    runner = EvolutionRunner(config, evaluator=evaluator)
     # Fresh policies use held-out cases and do not add them to archives.
     results = runner.fresh_adversary_evaluation()
     print(f"wrote {len(results)} fresh-adversary episodes to {Path(args.run_dir) / 'analysis/fresh_adversary_results.json'}")

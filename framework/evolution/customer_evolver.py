@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import random
+import re
 
 from .customer_policy import CustomerPolicyValidator
 from .customer_selector import CustomerSelector
@@ -19,12 +21,31 @@ class CustomerEvolver:
         ("request_escalation", "escalation", "request human escalation only after a failed action or unresolved issue"),
     )
 
-    def __init__(self, seed: int = 7, validator=None, selector=None):
+    def __init__(self, seed: int = 7, validator=None, selector=None, strategy_generator=None):
         self.seed = seed
         self.validator = validator or CustomerPolicyValidator()
         self.selector = selector or CustomerSelector()
+        self.strategy_generator = strategy_generator
 
-    def propose(self, incumbent: CustomerPolicy, generation: int, count: int = 5, source_failures=None) -> list[CustomerPolicy]:
+    def propose(self, incumbent: CustomerPolicy, generation: int, count: int = 5, source_failures=None, service_policy=None) -> list[CustomerPolicy]:
+        failures = list(source_failures or [])
+        if self.strategy_generator is not None:
+            try:
+                generated = self.strategy_generator.generate(
+                    incumbent=incumbent, failures=failures, service_policy=service_policy,
+                    generation=generation, count=count,
+                )
+            except Exception:
+                generated = []
+            valid = []
+            for policy in generated:
+                try:
+                    self.validator.validate(policy)
+                    valid.append(policy)
+                except Exception:
+                    continue
+            if valid:
+                return valid[:count]
         rng = random.Random(self.seed + generation)
         candidates = []
         operators = list(self.OPERATORS)
@@ -40,14 +61,70 @@ class CustomerEvolver:
             if tag not in policy.strategy_tags:
                 policy.strategy_tags.append(tag)
             policy.mutation_rationale = description
-            policy.source_failure_ids = list(source_failures or [])
+            policy.source_failure_ids = [getattr(item, "signature_id", str(item)) for item in failures]
             policy.created_at = policy.created_at
             self.validator.validate(policy)
             candidates.append(policy)
         return candidates
 
-    def evolve(self, incumbent, service_policy, cases, evaluator, archive, generation, count=5):
-        candidates = self.propose(incumbent, generation, count)
-        evaluated = [(candidate, evaluator.evaluate(candidate, service_policy, cases, "evolution", generation, "customer_candidate")) for candidate in candidates]
+    def evolve(self, incumbent, service_policy, cases, evaluator, archive, generation, count=5,
+               cases_per_candidate=None, elite_count=0, source_failures=None):
+        candidate_cases = list(cases)
+        if cases_per_candidate is not None and cases_per_candidate > 0:
+            candidate_cases = candidate_cases[:cases_per_candidate]
+        candidates = self.propose(incumbent, generation, count, source_failures, service_policy)
+        evaluated = [(candidate, evaluator.evaluate(candidate, service_policy, candidate_cases, "evolution", generation, "customer_candidate")) for candidate in candidates]
+        if elite_count:
+            evaluated.insert(0, (incumbent, evaluator.evaluate(incumbent, service_policy, candidate_cases, "evolution", generation, "customer_elite")))
         selected, scores = self.selector.select(evaluated, {s.get("signature_id") for s in archive.signatures()}, total_nodes=max(1, len(cases)))
         return selected or incumbent, evaluated, scores
+
+
+class LLMCustomerPolicyGenerator:
+    """Generate reusable policy JSON from abstract failure signatures.
+
+    The prompt contains no case IDs, user IDs, expected paths or hidden
+    backend values.  Invalid or non-JSON generations are discarded by the
+    caller and the deterministic fallback remains available.
+    """
+
+    def __init__(self, llm_client):
+        self.llm_client = llm_client
+
+    def generate(self, incumbent, failures, service_policy, generation, count):
+        failure_view = [
+            {"errors": list(item.error_types), "sop_node": item.sop_node,
+             "predicted_action": item.predicted_action, "executed_action": item.executed_action}
+            for item in failures
+        ]
+        prompt = (
+            "Design reusable customer interaction strategies for a customer-service benchmark. "
+            "Do not mention case IDs, order IDs, expected paths/actions, hidden values, evaluators, "
+            "or parser manipulation. Return a JSON array only. Each item must contain name, "
+            "description, strategy_tags, disclosure_strategy, pressure_strategy, "
+            "contradiction_strategy, response_to_verification, response_to_rejection.\n"
+            f"Current strategy tags: {json.dumps(incumbent.strategy_tags)}\n"
+            f"Observed abstract failures: {json.dumps(failure_view, ensure_ascii=False)}\n"
+            f"Active generic service rules: {json.dumps([r.text for r in service_policy.rules if r.active], ensure_ascii=False)}\n"
+            f"Generate up to {count} distinct candidates."
+        )
+        response = self.llm_client.generate(prompt=prompt, temperature=0.7, max_tokens=1600)
+        text = re.sub(r"^```(?:json)?|```$", "", response.text.strip(), flags=re.I | re.M).strip()
+        value = json.loads(text)
+        if isinstance(value, dict):
+            value = value.get("candidates", [value])
+        policies = []
+        for index, item in enumerate(value if isinstance(value, list) else []):
+            if not isinstance(item, dict):
+                continue
+            data = incumbent.to_dict()
+            data.update({key: item[key] for key in item if key in data and key not in {"policy_id", "generation", "parent_policy_ids"}})
+            data.update({
+                "policy_id": f"customer_policy_g{generation}_llm_{index}",
+                "generation": generation,
+                "parent_policy_ids": [incumbent.policy_id],
+                "mutation_rationale": "LLM-generated from abstract failure signatures",
+                "source_failure_ids": [item.signature_id for item in failures],
+            })
+            policies.append(CustomerPolicy.from_dict(data))
+        return policies

@@ -32,6 +32,7 @@ class AttackArchive:
             record = {
                 "attack_id": "attack_" + key,
                 "customer_policy_id": policy.policy_id,
+                "customer_policy": policy.to_dict(),
                 "generation": policy.generation if generation is None else generation,
                 "strategy_tags": list(policy.strategy_tags),
                 "target_sop_node": signature.sop_node,
