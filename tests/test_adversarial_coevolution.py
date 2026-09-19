@@ -330,6 +330,8 @@ def test_service_evaluates_all_candidates_and_replays_archived_attacker():
     )
     assert decision.accepted is True
     assert len(evolver.last_candidate_records) == 3
+    assert len({item["service_policy_id"] for item in evolver.last_candidate_records}) == 3
+    assert all(item["service_policy_id"].startswith("service_policy_s1_") for item in evolver.last_candidate_records)
     assert any(call["phase"] == "service_candidate_replay" for call in mock.calls)
 
 

@@ -99,7 +99,12 @@ class ServiceEvolver:
         accepted = []
         for patch in self.propose(incumbent, failures, generation, count, defense_summary, historical_summary):
             try:
-                candidate = self.compiler.apply_patch(incumbent, patch, generation=generation)
+                candidate = self.compiler.apply_patch(
+                    incumbent, patch, generation=incumbent.generation + 1
+                )
+                # Candidate policies need independent provenance even when
+                # several patches are evaluated within the same generation.
+                candidate.policy_id = f"{candidate.policy_id}_{patch.patch_id}"
                 candidate_latest, candidate_replay = evaluate_suite(candidate, "service_candidate")
                 candidate_normal = evaluator.evaluate(self._baseline_customer(), candidate, normal_cases, "validation", generation, "service_normal_candidate")
                 candidate_metrics = summarize(candidate_latest, candidate_replay, candidate_normal)
