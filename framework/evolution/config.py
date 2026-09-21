@@ -58,6 +58,9 @@ class EvaluationConfig:
     max_turns: int = 10
     concurrency: int = 1
     api_timeout: int = 300
+    # Evolution uses objective Backend/V/P/A/G signals by default.  Full LLM
+    # Judge scoring remains available for final/held-out evaluation phases.
+    judge_in_evolution: bool = False
 
 
 @dataclass

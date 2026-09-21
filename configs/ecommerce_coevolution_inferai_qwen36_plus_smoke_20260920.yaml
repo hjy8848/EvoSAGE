@@ -1,0 +1,31 @@
+{
+  "scenario": "ecommerce_refund",
+  "experiment_mode": "coevolution",
+  "seed": 2302,
+  "max_generations": 1,
+  "customer": {
+    "candidate_count": 1,
+    "elite_count": 0,
+    "cases_per_candidate": 1,
+    "fitness_weights": {"attack_success": 0.70, "novelty": 0.15, "coverage": 0.15},
+    "adversary_access": "black_box"
+  },
+  "service": {
+    "candidate_count": 1,
+    "min_delta": 0.01,
+    "normal_regression_tolerance": 0.03,
+    "replay_attack_count": 0
+  },
+  "splits": {
+    "strategy": "instance_holdout",
+    "seed": 2302,
+    "evolution_ratio": 0.6,
+    "validation_ratio": 0.2,
+    "heldout_ratio": 0.2,
+    "instances_per_path": 1,
+    "max_cases": 3
+  },
+  "evaluation": {"repetitions": 1, "max_turns": 5, "concurrency": 1, "api_timeout": 300},
+  "persistence": {"output_dir": "results/adversarial_coevolution_inferai_qwen36_plus_smoke_20260920", "resume": false},
+  "fresh_adversary": {"enabled": false, "rounds": 1, "candidate_count": 1}
+}

@@ -32,6 +32,8 @@ def main() -> int:
     parser.add_argument("--real", action="store_true", help="Alias for --evaluator real")
     parser.add_argument("--model", default=os.environ.get("EVOSAGE_MODEL", ""))
     parser.add_argument("--api-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
+    parser.add_argument("--client", choices=["openai_api", "litellm"], default="openai_api",
+                        help="LLM client implementation for real API runs")
     args = parser.parse_args()
     config = load_config(args.config)
     if args.mode:
@@ -58,9 +60,11 @@ def main() -> int:
         from framework.evolution.real_factory import make_real_evaluator
         evaluator = make_real_evaluator(args.model, args.api_url, api_key,
                                         config.persistence.output_dir, config.evaluation.max_turns,
-                                        api_timeout=config.evaluation.api_timeout)
+                                        api_timeout=config.evaluation.api_timeout,
+                                        client_type=args.client,
+                                        judge_in_evolution=config.evaluation.judge_in_evolution)
         evolution_client = get_llm_client(
-            "openai_api", api_key=api_key, base_url=args.api_url, model_name=args.model,
+            args.client, api_key=api_key, base_url=args.api_url, model_name=args.model,
             timeout=config.evaluation.api_timeout,
         )
         customer_evolver = CustomerEvolver(

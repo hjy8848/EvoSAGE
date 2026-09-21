@@ -130,7 +130,11 @@ class LLMCustomerPolicyGenerator:
             f"Historical attack summary: {json.dumps(archive_summary or [], ensure_ascii=False)[:6000]}\n"
             f"Generate up to {count} distinct candidates."
         )
-        response = self.llm_client.generate(prompt=prompt, temperature=0.7, max_tokens=1600)
+        response = self.llm_client.generate(
+            prompt=prompt,
+            temperature=0.7,
+            max_tokens=16384,
+        )
         text = re.sub(r"^```(?:json)?|```$", "", response.text.strip(), flags=re.I | re.M).strip()
         value = json.loads(text)
         if isinstance(value, dict):

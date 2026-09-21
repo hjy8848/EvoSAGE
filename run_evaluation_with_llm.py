@@ -254,6 +254,8 @@ class LLMEvaluationPipeline:
         legacy_execution: bool = False,
         customer_policy=None,
         service_policy=None,
+        use_llm_judge: bool = True,
+        client_type: str = "openai_api",
     ):
         """
         初始化LLM评测管道
@@ -293,6 +295,7 @@ class LLMEvaluationPipeline:
         # runner behavior; policies never replace CaseSpec or evaluator truth.
         self.customer_policy = customer_policy
         self.service_policy = service_policy
+        self.use_llm_judge = use_llm_judge
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -314,6 +317,7 @@ class LLMEvaluationPipeline:
             agent_model_name,
             judge_model_name,
             api_timeout,
+            client_type=client_type,
         )
         
         # 结果容器
@@ -341,6 +345,7 @@ class LLMEvaluationPipeline:
         agent_model_name: str = "gpt-3.5-turbo",
         judge_model_name: str = "gpt-3.5-turbo",
         api_timeout: int = 300,
+        client_type: str = "openai_api",
     ):
         """初始化LLM客户端
         
@@ -370,21 +375,21 @@ class LLMEvaluationPipeline:
                 raise ValueError("API模式需要提供 --api-url")
 
             self.user_llm_client = get_llm_client(
-                "openai_api",
+                client_type,
                 base_url=api_url,
                 api_key=api_key,
                 model_name=user_model_name,
                 timeout=api_timeout,
             )
             self.agent_llm_client = get_llm_client(
-                "openai_api",
+                client_type,
                 base_url=api_url,
                 api_key=api_key,
                 model_name=agent_model_name,
                 timeout=api_timeout,
             )
             self.judge_llm_client = get_llm_client(
-                "openai_api",
+                client_type,
                 base_url=api_url,
                 api_key=api_key,
                 model_name=judge_model_name,
@@ -542,7 +547,7 @@ class LLMEvaluationPipeline:
                     system_prompt=user_system_prompt,
                     llm_client=self.user_llm_client,
                     temperature=0.8,
-                    max_tokens=512,
+                    max_tokens=16384,
                     case_spec=case_spec,
                 )
             else:
@@ -554,7 +559,7 @@ class LLMEvaluationPipeline:
                     system_prompt=user_system_prompt,
                     llm_client=self.user_llm_client,
                     temperature=0.8,
-                    max_tokens=512,
+                    max_tokens=16384,
                     case_spec=case_spec,
                 )
         elif self.user_simulator_mode == "rule":
@@ -565,7 +570,7 @@ class LLMEvaluationPipeline:
                 system_prompt=user_system_prompt,
                 llm_client=self.user_llm_client,
                 temperature=0.8,
-                max_tokens=512,
+                max_tokens=16384,
                 case_spec=case_spec,
             )
         else:
@@ -574,7 +579,7 @@ class LLMEvaluationPipeline:
                 system_prompt=user_system_prompt,
                 llm_client=self.user_llm_client,
                 temperature=0.8,
-                max_tokens=512,
+                max_tokens=16384,
                 case_spec=case_spec,
             )
         
@@ -637,16 +642,18 @@ class LLMEvaluationPipeline:
                 print(f"    Turn {i}: U={turn.user_message[:50]}... | A={turn.agent_output.chat[:50]}...")
 
 
-        # 评测 (使用LLM Judge 或 MultiModelVotingJudge)
-        # 【投票模式】如果已设置 self.judge_model，则使用投票 Judge；否则创建单个 LLMJudge
-        if hasattr(self, 'judge_model') and self.judge_model is not None:
+        # Evolution inner loops can use the objective Backend/V/P/A/G signals
+        # without paying for a per-turn LLM Judge.  Final/held-out runs keep
+        # the full Judge unless the caller explicitly disables it.
+        if not self.use_llm_judge:
+            judge = None
+        elif hasattr(self, 'judge_model') and self.judge_model is not None:
             judge = self.judge_model
         else:
-            # 非投票模式：创建单个 LLMJudge
             judge = LLMJudge(
                 llm_client=self.judge_llm_client,
                 temperature=0.2,
-                max_tokens=1024,
+                max_tokens=16384,
             )
 
         evaluator = Evaluator(
@@ -1907,7 +1914,7 @@ def main():
                 judges[model_name] = LLMJudge(
                     llm_client=llm_client,
                     temperature=0.3,
-                    max_tokens=1024,
+                    max_tokens=16384,
                 )
                 print(f"    ✓ 创建成功")
             except Exception as e:

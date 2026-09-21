@@ -32,7 +32,7 @@ class LLMUserModel(UserModel):
         system_prompt: str = "",
         llm_client: Optional[LLMClient] = None,
         temperature: float = 0.7,
-        max_tokens: int = 512,
+        max_tokens: Optional[int] = 512,
         case_spec: Optional[CaseSpec] = None,
     ):
         """

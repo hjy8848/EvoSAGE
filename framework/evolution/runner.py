@@ -63,6 +63,7 @@ class EvolutionRunner:
             "evaluator": "mock" if isinstance(self.base_evaluator, MockEpisodeEvaluator) else "real",
             "repetitions": self.config.evaluation.repetitions,
             "concurrency": self.config.evaluation.concurrency,
+            "judge_in_evolution": self.config.evaluation.judge_in_evolution,
             "customer_generator": "llm" if getattr(self.customer_evolver, "strategy_generator", None) is not None else "template",
             "service_generator": "llm" if getattr(self.service_evolver, "patch_generator", None) is not None else "template",
             "strict_real_generation": bool(

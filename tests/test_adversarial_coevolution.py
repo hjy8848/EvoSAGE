@@ -276,6 +276,97 @@ def test_real_adapter_binds_policies_at_pipeline_construction():
     assert episodes[0].task_success is True
 
 
+def test_real_adapter_caches_episode_but_separates_judge_modes(tmp_path):
+    calls = []
+
+    class Pipeline:
+        def run_single_simulation(self, intent, user_id=None, path_config=None, judge_enabled=True):
+            calls.append({"intent": intent, "judge_enabled": judge_enabled})
+            return _fake_real_simulation(), _fake_real_report()
+
+    def factory(customer_policy, service_policy, judge_enabled=True):
+        calls.append({"factory_judge_enabled": judge_enabled})
+        return Pipeline()
+
+    cache_path = tmp_path / "episode_cache.jsonl"
+    evaluator = EvoSAGEEpisodeEvaluator(factory, cache_namespace="cache-test", cache_path=cache_path)
+    customer = CustomerPolicy(policy_id="cache-customer")
+    service = ServicePolicy(policy_id="cache-service")
+    case = SplitManager().build().evolution[0]
+
+    first = evaluator.evaluate(customer, service, [case], "evolution", 0, "customer_candidate")
+    second = evaluator.evaluate(customer, service, [case], "evolution", 0, "selected_customer")
+    assert len(calls) == 2  # one factory call plus one real episode
+    assert first[0].metadata["cache_hit"] is False
+    assert second[0].metadata["cache_hit"] is True
+    assert calls[-1]["judge_enabled"] is False
+
+    heldout = evaluator.evaluate(customer, service, [case], "heldout_test", 0, "heldout")
+    assert heldout[0].metadata["cache_hit"] is False
+    assert calls[-2] == {"factory_judge_enabled": True}
+    assert calls[-1]["judge_enabled"] is True
+
+    restarted_calls = []
+
+    class RestartedPipeline(Pipeline):
+        def run_single_simulation(self, *args, **kwargs):
+            restarted_calls.append(True)
+            return super().run_single_simulation(*args, **kwargs)
+
+    restarted = EvoSAGEEpisodeEvaluator(
+        lambda *args, **kwargs: RestartedPipeline(),
+        cache_namespace="cache-test",
+        cache_path=cache_path,
+    )
+    restored = restarted.evaluate(customer, service, [case], "evolution", 0, "customer_candidate")
+    assert restored[0].metadata["cache_hit"] is True
+    assert restarted_calls == []
+
+
+def test_service_latest_filter_skips_replay_and_normal_for_rejected_patch():
+    class NonImprovingEvaluator:
+        def __init__(self):
+            self.phases = []
+
+        def evaluate(self, customer_policy, service_policy, cases, split, generation, phase):
+            self.phases.append(phase)
+            improved = any("defensive" in rule.text.lower() for rule in service_policy.rules if rule.active)
+            return [EpisodeResult(
+                episode_id=f"{phase}-{index}", scenario="ecommerce_refund",
+                case_id=getattr(case, "case_id", str(index)),
+                customer_policy_id=customer_policy.policy_id,
+                service_policy_id=service_policy.policy_id,
+                split=split, generation=generation, task_success=improved,
+                execution_score=1.0 if improved else 0.0,
+                sage_style_score=1.0 if improved else 0.0,
+                verification_score=1.0 if improved else 0.0,
+                policy_score=1.0 if improved else 0.0,
+                action_execution_score=1.0 if improved else 0.0,
+                goal_fulfillment_score=1.0 if improved else 0.0,
+            ) for index, case in enumerate(cases)]
+
+    class PatchGenerator:
+        def generate(self, *args, **kwargs):
+            return [ServicePatch(
+                "non-improving", "add",
+                [ServiceRule("polite", "COMMUNICATION", "Be polite to the customer.")],
+            )]
+
+    split = SplitManager().build()
+    evaluator = NonImprovingEvaluator()
+    evolver = ServiceEvolver(patch_generator=PatchGenerator())
+    _, decision, _ = evolver.evolve(
+        ServicePolicy(), [], split.validation, split.validation, evaluator, 0,
+        count=1, customer_policy=CustomerPolicy(),
+        replay_policies=[CustomerPolicy()], replay_attack_count=1,
+    )
+    assert decision.accepted is False
+    assert "service_candidate_latest" in evaluator.phases
+    assert "service_candidate_replay" not in evaluator.phases
+    assert "service_normal_candidate" not in evaluator.phases
+    assert evolver.last_candidate_records[0]["reason"].startswith("latest_attack_filter:")
+
+
 def test_llm_generators_return_valid_structured_candidates_without_api():
     class Response:
         def __init__(self, text):

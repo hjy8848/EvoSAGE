@@ -7,8 +7,13 @@ documented vulnerability; it is not presented as a benchmark score.
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import threading
 from typing import Any, Callable, Iterable, Protocol
 
 from .attribution import infer_failure_location
@@ -156,31 +161,168 @@ class CallableEpisodeEvaluator:
 class EvoSAGEEpisodeEvaluator:
     """Thin real-run adapter; imports the legacy runner lazily."""
 
-    def __init__(self, pipeline_factory: Callable[..., Any], user_policy_mode: str = "truthful"):
+    _FAST_PHASES = frozenset({
+        "customer_failure_scan",
+        "customer_candidate",
+        "customer_elite",
+        "selected_customer",
+        "service_failures",
+        "service_baseline_latest",
+        "service_baseline_replay",
+        "service_normal_baseline",
+        "service_candidate_latest",
+        "service_candidate_replay",
+        "service_normal_candidate",
+        "generation_summary",
+        "fresh_adaptation",
+    })
+
+    def __init__(self, pipeline_factory: Callable[..., Any], user_policy_mode: str = "truthful",
+                 judge_in_evolution: bool = False, cache_namespace: str = "default",
+                 cache_path: str | Path | None = None):
         self.pipeline_factory = pipeline_factory
         self.user_policy_mode = user_policy_mode
+        self.judge_in_evolution = judge_in_evolution
+        self.cache_namespace = cache_namespace
+        self._episode_cache: dict[str, EpisodeResult] = {}
+        self._cache_path = Path(cache_path) if cache_path else None
+        self._cache_lock = threading.Lock()
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self._load_persistent_cache()
+
+    def _use_llm_judge(self, phase: str) -> bool:
+        if self.judge_in_evolution:
+            return True
+        return phase not in self._FAST_PHASES
+
+    def _cache_key(self, customer_policy, service_policy, case, split, generation, judge_enabled):
+        payload = {
+            "version": "episode-cache-v2",
+            "namespace": self.cache_namespace,
+            "customer_policy_id": customer_policy.policy_id,
+            "service_policy_id": service_policy.policy_id,
+            "customer_policy": self._fingerprint(customer_policy),
+            "service_policy": self._fingerprint(service_policy),
+            "case_id": getattr(case, "case_id", None),
+            "intent": getattr(case, "intent", None),
+            # Do not persist path_config itself: it can contain hidden
+            # backend truth.  The digest still prevents cross-case reuse.
+            "path_config_digest": self._fingerprint(getattr(case, "path_config", None)),
+            "split": split,
+            "generation": generation,
+            "judge_enabled": judge_enabled,
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+    @staticmethod
+    def _fingerprint(value) -> str:
+        if hasattr(value, "to_dict"):
+            value = value.to_dict()
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _load_persistent_cache(self) -> None:
+        if self._cache_path is None or not self._cache_path.exists():
+            return
+        try:
+            with self._cache_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        value = json.loads(line)
+                        key = value.get("key")
+                        episode_data = value.get("episode")
+                        if key and isinstance(episode_data, dict):
+                            self._episode_cache[key] = EpisodeResult.from_dict(episode_data)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        # A truncated final JSONL line must not invalidate the
+                        # completed episodes that precede it.
+                        continue
+        except OSError:
+            # Disk caching is an optimization; an unavailable cache must not
+            # prevent a fresh evaluation from running.
+            return
+
+    def _persist_episode(self, key: str, episode: EpisodeResult) -> None:
+        if self._cache_path is None:
+            return
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._cache_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"key": key, "episode": episode.to_dict()}, ensure_ascii=False) + "\n")
+        except (OSError, TypeError, ValueError):
+            # Keep the episode result usable even if checkpoint storage is
+            # unavailable or a provider returned non-serializable metadata.
+            return
+
+    @staticmethod
+    def _with_phase(episode, phase, cache_hit):
+        result = copy.deepcopy(episode)
+        result.metadata = dict(result.metadata or {})
+        result.metadata["phase"] = phase
+        result.metadata["cache_hit"] = cache_hit
+        return result
 
     def evaluate(self, customer_policy, service_policy, cases, split, generation, phase):
-        outputs = []
+        cases = list(cases)
+        judge_enabled = self._use_llm_judge(phase)
+        outputs = [None] * len(cases)
+        missing = []
+        for index, case in enumerate(cases):
+            key = self._cache_key(customer_policy, service_policy, case, split, generation, judge_enabled)
+            with self._cache_lock:
+                cached = self._episode_cache.get(key)
+            if cached is None:
+                missing.append((index, case, key))
+                self.cache_misses += 1
+            else:
+                outputs[index] = self._with_phase(cached, phase, cache_hit=True)
+                self.cache_hits += 1
+
+        if not missing:
+            return outputs
+
         # Policies are pipeline-construction state.  Older factories that do
         # not accept them remain supported for callers that already bind the
         # policies in a closure.
         try:
-            pipeline = self.pipeline_factory(customer_policy, service_policy)
+            pipeline = self.pipeline_factory(customer_policy, service_policy, judge_enabled=judge_enabled)
         except TypeError as exc:
             if "positional" not in str(exc) and "argument" not in str(exc):
                 raise
-            pipeline = self.pipeline_factory()
-        for case in cases:
-            simulation, report = pipeline.run_single_simulation(
-                getattr(case, "intent", "refund_before_shipping"),
-                user_id=f"{getattr(case, 'case_id', 'case')}_{generation}",
-                path_config=getattr(case, "path_config", None),
-            )
-            outputs.append(self.from_evosage(
+            try:
+                pipeline = self.pipeline_factory(customer_policy, service_policy)
+            except TypeError as legacy_exc:
+                if "positional" not in str(legacy_exc) and "argument" not in str(legacy_exc):
+                    raise
+                pipeline = self.pipeline_factory()
+        for index, case, key in missing:
+            run_kwargs = {
+                "user_id": f"{getattr(case, 'case_id', 'case')}_{generation}",
+                "path_config": getattr(case, "path_config", None),
+                "judge_enabled": judge_enabled,
+            }
+            try:
+                simulation, report = pipeline.run_single_simulation(
+                    getattr(case, "intent", "refund_before_shipping"), **run_kwargs
+                )
+            except TypeError as exc:
+                if "judge_enabled" not in str(exc):
+                    raise
+                run_kwargs.pop("judge_enabled")
+                simulation, report = pipeline.run_single_simulation(
+                    getattr(case, "intent", "refund_before_shipping"), **run_kwargs
+                )
+            episode = self.from_evosage(
                 simulation, report, customer_policy, service_policy, split, generation, phase,
                 path_config=getattr(case, "path_config", None),
-            ))
+            )
+            episode.metadata["cache_hit"] = False
+            cached_episode = copy.deepcopy(episode)
+            with self._cache_lock:
+                self._episode_cache[key] = cached_episode
+                self._persist_episode(key, cached_episode)
+            outputs[index] = episode
         return outputs
 
     @staticmethod

@@ -92,6 +92,42 @@ class EvaluationRegressionTests(unittest.TestCase):
         self.assertNotIn("local variable 'gt_data' referenced before assignment", "\n".join(captured.output))
         self.assertNotIn("local variable 'agent_output' referenced before assignment", "\n".join(captured.output))
 
+    def test_string_chat_dimensions_do_not_crash_aggregate_scoring(self):
+        class StringDimensionsJudge:
+            def evaluate_turn_comprehensive(self, **_kwargs):
+                return {
+                    "classification": {},
+                    "chat_quality_score": 0.6,
+                    "chat_quality_dimensions": {
+                        "linguistic_quality": 6,
+                        "anthropomorphism_emotion": "3分",
+                        "content_utility": "6/9",
+                        "user_satisfaction": 9.0,
+                        "instruction_compliance": "invalid",
+                    },
+                }
+
+        simulation = self._make_simulation("请说明具体处理步骤。")
+        report = Evaluator(
+            "online_education",
+            get_sop_graph("online_education"),
+            judge_model=StringDimensionsJudge(),
+        ).evaluate_simulation(simulation)
+
+        chat_metric = next(
+            metric for metric in report.metric_scores if metric.metric_name == "chat_quality"
+        )
+        self.assertEqual(
+            chat_metric.details["average_dimensions"],
+            {
+                "linguistic_quality": 6.0,
+                "anthropomorphism_emotion": 3.0,
+                "content_utility": 6.0,
+                "user_satisfaction": 9.0,
+                "instruction_compliance": 0.0,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

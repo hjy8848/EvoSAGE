@@ -8,10 +8,11 @@ from .evaluator_adapter import EvoSAGEEpisodeEvaluator
 
 
 def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str | Path,
-                        max_turns: int = 10, user_simulator_mode: str = "llm", api_timeout: int = 300):
+                        max_turns: int = 10, user_simulator_mode: str = "llm", api_timeout: int = 300,
+                        client_type: str = "openai_api", judge_in_evolution: bool = False):
     from run_evaluation_with_llm import LLMEvaluationPipeline
 
-    def pipeline_factory(customer_policy, service_policy):
+    def pipeline_factory(customer_policy, service_policy, judge_enabled=True):
         return LLMEvaluationPipeline(
             scenario_id="ecommerce_refund",
             model_name=model,
@@ -19,6 +20,7 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
             eval_mode="api",
             api_key=api_key,
             api_url=api_url,
+            client_type=client_type,
             user_model_name=model,
             agent_model_type="api",
             agent_model_name=model,
@@ -29,6 +31,12 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
             user_simulator_mode=user_simulator_mode,
             customer_policy=customer_policy,
             service_policy=service_policy,
+            use_llm_judge=judge_enabled,
         )
 
-    return EvoSAGEEpisodeEvaluator(pipeline_factory)
+    return EvoSAGEEpisodeEvaluator(
+        pipeline_factory,
+        judge_in_evolution=judge_in_evolution,
+        cache_namespace=f"{client_type}|{model}|{api_url}|turns={max_turns}|timeout={api_timeout}",
+        cache_path=Path(output_dir) / "environment" / "episode_cache.jsonl",
+    )

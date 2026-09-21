@@ -75,8 +75,17 @@ class ServiceEvolver:
         customer_policy = customer_policy or self._baseline_customer()
         replay_policies = list(replay_policies or [])
         replay_policies = replay_policies[:replay_attack_count] if replay_attack_count > 0 else []
+        def evaluate_latest(service_policy):
+            return evaluator.evaluate(
+                customer_policy, service_policy, adversarial_cases,
+                "validation", generation, "service_candidate_latest"
+            )
+
         def evaluate_suite(service_policy, phase):
-            latest = evaluator.evaluate(customer_policy, service_policy, adversarial_cases, "validation", generation, phase + "_latest")
+            latest = evaluator.evaluate(
+                customer_policy, service_policy, adversarial_cases,
+                "validation", generation, phase + "_latest"
+            )
             replay = []
             for policy in replay_policies:
                 replay.extend(evaluator.evaluate(policy, service_policy, adversarial_cases, "validation", generation, phase + "_replay"))
@@ -105,7 +114,35 @@ class ServiceEvolver:
                 # Candidate policies need independent provenance even when
                 # several patches are evaluated within the same generation.
                 candidate.policy_id = f"{candidate.policy_id}_{patch.patch_id}"
-                candidate_latest, candidate_replay = evaluate_suite(candidate, "service_candidate")
+                # Stage 1 intentionally evaluates only the current/latest
+                # adversarial customer.  Historical replay and normal-user
+                # regression are paid only for candidates that first improve
+                # the attack currently driving the evolution.
+                candidate_latest = evaluate_latest(candidate)
+                # Stage 1: reject patches that do not improve the latest
+                # adversarial attack before spending API calls on normal-user
+                # regression and historical replay evaluation.
+                candidate_latest_metrics = summarize(candidate_latest, [])
+                latest_baseline_metrics = summarize(baseline_latest, [])
+                latest_decision = self.gate.evaluate(latest_baseline_metrics, candidate_latest_metrics)
+                if not latest_decision.accepted:
+                    self.last_candidate_records.append({
+                        "patch_id": patch.patch_id,
+                        "service_policy_id": candidate.policy_id,
+                        "accepted": False,
+                        "reason": f"latest_attack_filter:{latest_decision.reason}",
+                        "delta": latest_decision.delta,
+                        "metrics": candidate_latest_metrics,
+                        "stages": {"latest_attack": latest_decision.metrics},
+                        "normal_regression_cases": [],
+                    })
+                    continue
+                candidate_replay = []
+                for policy in replay_policies:
+                    candidate_replay.extend(evaluator.evaluate(
+                        policy, candidate, adversarial_cases, "validation", generation,
+                        "service_candidate_replay"
+                    ))
                 candidate_normal = evaluator.evaluate(self._baseline_customer(), candidate, normal_cases, "validation", generation, "service_normal_candidate")
                 candidate_metrics = summarize(candidate_latest, candidate_replay, candidate_normal)
                 decision = self.gate.evaluate(
@@ -180,7 +217,11 @@ class LLMServicePatchGenerator:
             f"Historical regression summary: {json.dumps(historical_summary or [], ensure_ascii=False)[:6000]}\n"
             f"Generate up to {count} distinct patches."
         )
-        response = self.llm_client.generate(prompt=prompt, temperature=0.3, max_tokens=1600)
+        response = self.llm_client.generate(
+            prompt=prompt,
+            temperature=0.3,
+            max_tokens=16384,
+        )
         text = re.sub(r"^```(?:json)?|```$", "", response.text.strip(), flags=re.I | re.M).strip()
         value = json.loads(text)
         if isinstance(value, dict):

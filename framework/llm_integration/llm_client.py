@@ -156,7 +156,7 @@ class VLLMLocalClient(LLMClient):
         self,
         prompt: str,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         top_p: float = 0.95,
         **kwargs
     ) -> LLMResponse:
@@ -179,10 +179,11 @@ class VLLMLocalClient(LLMClient):
             "model": self.model_name,
             "prompt": prompt,
             "temperature": temperature,
-            "max_tokens": max_tokens,
             "top_p": top_p,
             "stop": kwargs.get("stop", None),
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -292,7 +293,7 @@ class VLLMChatClient(LLMClient):
         self,
         prompt: str,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         top_p: float = 0.95,
         messages: Optional[list] = None,
         **kwargs
@@ -320,9 +321,13 @@ class VLLMChatClient(LLMClient):
             "model": self.model_name,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
             "top_p": top_p,
         }
+        # Let the provider choose its own output budget when callers pass
+        # None.  This is important for reasoning models whose visible JSON
+        # content can be starved by a small local completion cap.
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         if kwargs.get("tools") is not None:
             payload["tools"] = kwargs["tools"]
         if kwargs.get("tool_choice") is not None:
@@ -567,6 +572,108 @@ class OpenAIAPIClient(LLMClient):
         raise RuntimeError(f"Failed to generate after {self.max_retries} attempts")
 
 
+class LiteLLMClient(LLMClient):
+    """LiteLLM-backed OpenAI-compatible client.
+
+    LiteLLM normalizes provider responses while preserving the OpenAI chat
+    schema.  InferAI models are addressed through LiteLLM's ``openai/``
+    provider with the supplied ``api_base``.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.openai.com/v1",
+        model_name: str = "gpt-3.5-turbo",
+        timeout: int = 300,
+        max_retries: int = 3,
+    ):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.model_name = model_name
+        self.timeout = timeout
+        self.max_retries = max_retries
+
+    @staticmethod
+    def _as_dict(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "model_dump"):
+            return value.model_dump()
+        if hasattr(value, "to_dict"):
+            return value.to_dict()
+        return {}
+
+    def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        top_p: float = 0.95,
+        messages: Optional[list] = None,
+        **kwargs
+    ) -> LLMResponse:
+        try:
+            import litellm
+        except ImportError as exc:
+            raise RuntimeError("LiteLLM client requires the 'litellm' package") from exc
+
+        if messages is None:
+            messages = [{"role": "user", "content": prompt}]
+        model = self.model_name if "/" in self.model_name else f"openai/{self.model_name}"
+        payload = {
+            "model": model,
+            "api_base": self.base_url,
+            "api_key": self.api_key,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "timeout": self.timeout,
+            "num_retries": 0,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if kwargs.get("tools") is not None:
+            payload["tools"] = kwargs["tools"]
+        if kwargs.get("tool_choice") is not None:
+            payload["tool_choice"] = kwargs["tool_choice"]
+
+        litellm.suppress_debug_info = True
+        for attempt in range(self.max_retries):
+            try:
+                response = litellm.completion(**payload)
+                raw_response = self._as_dict(response)
+                choices = raw_response.get("choices") or []
+                if not choices:
+                    raise ValueError("No choices in LiteLLM response")
+                choice = self._as_dict(choices[0])
+                assistant_message = self._as_dict(choice.get("message"))
+                text = assistant_message.get("content") or ""
+                tool_calls = _parse_tool_calls(assistant_message)
+                usage = self._as_dict(raw_response.get("usage"))
+                return LLMResponse(
+                    text=text.strip() if isinstance(text, str) else str(text),
+                    model=self.model_name,
+                    tokens=int(usage.get("completion_tokens") or 0),
+                    metadata={
+                        "finish_reason": choice.get("finish_reason"),
+                        "assistant_message": assistant_message,
+                        "attempts": attempt + 1,
+                    },
+                    tool_calls=tool_calls,
+                    raw_response=raw_response,
+                )
+            except Exception as exc:
+                if attempt >= self.max_retries - 1:
+                    raise
+                logger.warning(
+                    "LiteLLM request failed on attempt %s/%s: %s",
+                    attempt + 1, self.max_retries, exc,
+                )
+                time.sleep(2 ** attempt)
+        raise RuntimeError(f"LiteLLM failed after {self.max_retries} attempts")
+
+
 def get_llm_client(
     client_type: str,
     **config
@@ -579,6 +686,7 @@ def get_llm_client(
             - "vllm_local": vLLM本地 (completions格式)
             - "vllm_chat": vLLM本地 (chat格式)
             - "openai_api": OpenAI兼容API
+            - "litellm": LiteLLM via an OpenAI-compatible API
             - "openai": OpenAI官方API
         **config: 客户端配置参数
         
@@ -591,6 +699,8 @@ def get_llm_client(
         return VLLMChatClient(**config)
     elif client_type in ["openai_api", "openai"]:
         return OpenAIAPIClient(**config)
+    elif client_type == "litellm":
+        return LiteLLMClient(**config)
     else:
         raise ValueError(f"Unknown client type: {client_type}")
 

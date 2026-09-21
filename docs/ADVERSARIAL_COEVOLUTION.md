@@ -50,3 +50,23 @@ evaluation uses `EvoSAGEEpisodeEvaluator` with the configured
 `LLMEvaluationPipeline`; `--evaluator real` (or `--real`) is also available on
 the cross-generation and fresh-adversary scripts. Keep credentials in the existing macOS Keychain
 workflow, never in configs or result files.
+
+## Evaluation orchestration
+
+The real evaluator avoids paying for the same episode repeatedly. Results are
+cached by policy fingerprints, case identity, split, generation, model
+namespace, and Judge mode. The in-memory cache is supplemented by
+`environment/episode_cache.jsonl`, so an interrupted run can reuse completed
+episodes after restart. The persistent key stores only hashes for path
+configuration; hidden backend values are not written to the cache.
+
+Evolution phases use the objective Backend/V/P/A/G and `TaskSuccess` signals by
+default. Set `evaluation.judge_in_evolution: true` only when per-episode LLM
+Judge scoring is explicitly needed. Held-out and other non-evolution phases
+retain the full Judge path.
+
+Service candidates are evaluated in stages: the latest adversarial customer is
+checked first, and candidates that do not improve that attack are discarded
+before normal-user regression and historical replay evaluation. Backend goal
+completion and tool failures already allow the dialogue simulator to terminate
+early before `max_turns`.

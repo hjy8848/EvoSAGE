@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 from enum import Enum
 import json
+import re
 
 
 class MetricType(Enum):
@@ -659,6 +660,25 @@ class Evaluator:
         self.sop_graph = sop_graph
         self.code_evaluator = CodeComputedEvaluator()
         self.model_evaluator = ModelJudgedEvaluator(judge_model)
+
+    @staticmethod
+    def _coerce_chat_quality_dimension(value: Any) -> Optional[float]:
+        """Normalize Judge dimension values before aggregate arithmetic.
+
+        Judge models sometimes return values such as ``"6分"`` or ``"6/9"``
+        even though the prompt requests JSON integers.  Keep the raw value in
+        per-turn details, but use a numeric value for aggregate reporting.
+        Unsupported values are ignored instead of aborting the evaluation.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            match = re.search(r"(?<!\d)(?:3|6|9)(?!\d)", value)
+            if match:
+                return float(match.group(0))
+        return None
 
     @staticmethod
     def _compute_goal_fulfillment(simulation_result, eval_turns) -> Tuple[float, Dict[str, Any]]:
@@ -1451,7 +1471,17 @@ class Evaluator:
                 if turn_idx in chat_scores_by_turn:
                     dimensions = chat_scores_by_turn[turn_idx]["details"].get("dimensions", {})
                     if dim_name in dimensions:
-                        dim_values.append(dimensions[dim_name])
+                        normalized_value = self._coerce_chat_quality_dimension(
+                            dimensions[dim_name]
+                        )
+                        if normalized_value is not None:
+                            dim_values.append(normalized_value)
+                        else:
+                            logger.warning(
+                                "忽略无法归一化的话术维度: %s=%r",
+                                dim_name,
+                                dimensions[dim_name],
+                            )
             avg_dimensions[dim_name] = sum(dim_values) / len(dim_values) if dim_values else 0.0
         
         # 计算JSON解析错误率

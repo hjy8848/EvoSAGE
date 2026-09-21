@@ -832,7 +832,7 @@ class AgentModel:
                 response = self.llm_client.generate(
                     prompt=prompt,
                     temperature=0.7,
-                    max_tokens=256,
+                    max_tokens=16384,
                 )
                 return response.text.strip()
             except Exception as e:
@@ -1011,7 +1011,7 @@ class AgentModel:
                     "prompt": "",
                     "messages": messages,
                     "temperature": 0.1,
-                    "max_tokens": 8192,
+                    "max_tokens": 16384,
                 }
                 if backend_environment is not None:
                     generation_kwargs["tools"] = backend_environment.get_tool_definitions()
