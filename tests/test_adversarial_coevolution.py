@@ -1,7 +1,10 @@
 import json
+from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from framework.backend.factory import build_case_spec
 from framework.evolution.archives import AttackArchive
@@ -21,6 +24,7 @@ from framework.evolution.service_gate import ServiceGate
 from framework.evolution.service_policy import ServicePolicySanitizer
 from framework.evolution.split_manager import SplitManager
 from framework.evolution.weakness_frontier import WeaknessFrontier
+from framework.llm_integration.llm_client import LiteLLMClient
 from framework.models import UserProfile
 
 
@@ -126,6 +130,92 @@ def test_real_episode_preserves_backend_tool_call_trace():
         simulation, _fake_real_report(), CustomerPolicy(), ServicePolicy(), "validation", 0, "test",
     )
     assert episode.tool_sequence_summary == ["query_order", "submit_refund"]
+
+
+def test_real_evaluator_and_runner_share_one_fresh_run_dir(tmp_path):
+    """The real evaluator cache must never be created in the pre-isolation dir."""
+    from framework.evolution.persistence import RunStore
+    from framework.evolution.real_factory import make_real_evaluator
+
+    requested_dir = tmp_path / "run"
+    old_store = RunStore(requested_dir)
+    old_store.write_json("config/evolution.json", {"old_run": True})
+    old_files_before = {
+        path.relative_to(requested_dir): path.read_bytes()
+        for path in requested_dir.rglob("*")
+        if path.is_file()
+    }
+
+    config = EvolutionConfig(
+        max_generations=0,
+        persistence=PersistenceConfig(output_dir=str(requested_dir), resume=False),
+    )
+    resolved_dir, isolated = EvolutionRunner.resolve_run_dir(config)
+    assert isolated is True
+
+    evaluator = make_real_evaluator(
+        model="test-model",
+        api_url="http://127.0.0.1:1/v1",
+        api_key="test-key",
+        output_dir=resolved_dir,
+        max_turns=1,
+        api_timeout=1,
+        resume=False,
+    )
+    runner = EvolutionRunner(config, evaluator=evaluator, run_dir=resolved_dir)
+    result = runner.run()
+
+    assert Path(result["run_dir"]) == resolved_dir
+    assert runner.store.run_dir == resolved_dir
+    assert evaluator._cache_path == resolved_dir / "environment" / "episode_cache.jsonl"
+    assert (resolved_dir / "environment" / "episode_cache.jsonl").exists()
+    assert (resolved_dir / "split_manifest" / "evolution_cases.json").exists()
+    assert (resolved_dir / "analysis" / "orchestration_metrics.json").exists()
+    assert (resolved_dir / "report.md").exists()
+    assert list(tmp_path.glob("run_fresh_*")) == [resolved_dir]
+
+    old_files_after = {
+        path.relative_to(requested_dir): path.read_bytes()
+        for path in requested_dir.rglob("*")
+        if path.is_file()
+    }
+    assert old_files_after == old_files_before
+
+
+@pytest.mark.parametrize(
+    ("error_factory", "expected_timeout"),
+    [
+        (TimeoutError, True),
+        (requests.exceptions.Timeout, True),
+        (type("WrappedTimeoutError", (Exception,), {}), True),
+        (ValueError, False),
+    ],
+)
+def test_litellm_timeout_diagnostics_classify_wrapped_errors(
+    monkeypatch, error_factory, expected_timeout
+):
+    class FakeLiteLLM:
+        suppress_debug_info = False
+
+        @staticmethod
+        def completion(**kwargs):
+            raise error_factory("simulated failure")
+
+    monkeypatch.setitem(sys.modules, "litellm", FakeLiteLLM)
+    client = LiteLLMClient(
+        api_key="test-key",
+        base_url="http://127.0.0.1:1/v1",
+        model_name="test-model",
+        timeout=1,
+        max_retries=1,
+    )
+    with pytest.raises(Exception):
+        client.generate("ping")
+
+    stats = client.request_stats()
+    assert stats["attempts"] == 1
+    assert stats["failures"] == 1
+    assert stats["timeouts"] == int(expected_timeout)
 
 
 def test_real_episode_attribution_uses_final_action_stage_for_execution_failure():
@@ -293,6 +383,26 @@ def test_explicit_resolved_run_dir_is_shared_without_second_isolation(tmp_path):
     second = EvolutionRunner(config, evaluator=MockEpisodeEvaluator(), run_dir=resolved)
     assert second.store.run_dir == resolved
     assert second.fresh_run_isolated is True
+
+
+def test_failed_run_persists_orchestration_diagnostics(tmp_path):
+    class FailingEvaluator:
+        def evaluate(self, *args, **kwargs):
+            raise RuntimeError("synthetic provider failure")
+
+    config = EvolutionConfig(
+        max_generations=1,
+        persistence=PersistenceConfig(output_dir=str(tmp_path / "failed-run")),
+    )
+    runner = EvolutionRunner(config, evaluator=FailingEvaluator())
+    with pytest.raises(RuntimeError, match="synthetic provider failure"):
+        runner.run()
+
+    metrics_path = runner.store.run_dir / "analysis" / "orchestration_metrics.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    assert metrics["run_status"] == "failed"
+    assert metrics["failure_type"] == "RuntimeError"
+    assert metrics["failure_message"] == "synthetic provider failure"
 
 
 def test_fresh_adversary_updates_incumbent_without_training_archive(tmp_path):

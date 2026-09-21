@@ -76,6 +76,15 @@ def _parse_tool_calls(message: Dict[str, Any]) -> list:
     return parsed
 
 
+def _is_timeout_exception(exc: BaseException) -> bool:
+    """Recognize timeout wrappers produced by different LiteLLM transports."""
+    return (
+        isinstance(exc, (TimeoutError, requests.exceptions.Timeout))
+        or "timeout" in exc.__class__.__name__.lower()
+        or "timed out" in str(exc).lower()
+    )
+
+
 class LLMClient(ABC):
     """LLM客户端抽象基类"""
 
@@ -781,12 +790,7 @@ class LiteLLMClient(LLMClient):
                 # different classes depending on the transport.  Preserve a
                 # reliable timeout counter even when the gateway does not
                 # expose requests.exceptions.Timeout directly.
-                timeout_error = (
-                    isinstance(exc, (TimeoutError, requests.exceptions.Timeout))
-                    or "timeout" in exc.__class__.__name__.lower()
-                    or "timed out" in str(exc).lower()
-                )
-                self._record_failed_attempt(request_started, timeout=timeout_error)
+                self._record_failed_attempt(request_started, timeout=_is_timeout_exception(exc))
                 if attempt >= self.max_retries - 1:
                     raise
                 logger.warning(

@@ -205,6 +205,31 @@ class EvolutionRunner:
         return stats
 
     def run(self) -> dict[str, Any]:
+        """Run an experiment and persist diagnostics even on a hard failure."""
+        run_started = time.monotonic()
+        try:
+            return self._run_impl()
+        except Exception as exc:
+            # API timeouts and provider failures can abort a generation before
+            # the normal end-of-run metrics write.  Preserve the counters and
+            # the failure class in the same authoritative run directory so a
+            # partial experiment remains auditable.
+            try:
+                metrics = self._runtime_stats()
+                metrics.update({
+                    "run_status": "failed",
+                    "failure_type": type(exc).__name__,
+                    "failure_message": str(exc),
+                    "wall_time_seconds": time.monotonic() - run_started,
+                })
+                self.store.write_json("analysis/orchestration_metrics.json", metrics)
+            except Exception:
+                # Never hide the original provider or evaluation exception if
+                # diagnostics persistence itself is unavailable.
+                pass
+            raise
+
+    def _run_impl(self) -> dict[str, Any]:
         run_started = time.monotonic()
         manifest_exists = (self.store.run_dir / "split_manifest" / "evolution_cases.json").exists()
         # A fresh run rebuilds the manifest from the current config.  Only an
