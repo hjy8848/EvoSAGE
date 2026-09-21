@@ -28,17 +28,15 @@ from .weakness_frontier import WeaknessFrontier
 
 class EvolutionRunner:
     def __init__(self, config: Optional[EvolutionConfig] = None, evaluator=None, store: Optional[RunStore] = None,
-                 split_manager: Optional[SplitManager] = None, customer_evolver=None, service_evolver=None):
+                 split_manager: Optional[SplitManager] = None, customer_evolver=None, service_evolver=None,
+                 run_dir: str | Path | None = None):
         self.config = config or EvolutionConfig()
         self.requested_output_dir = Path(self.config.persistence.output_dir)
         self.fresh_run_isolated = False
         if store is None:
-            run_dir = self.requested_output_dir
-            if not self.config.persistence.resume and self._has_prior_run_state(run_dir):
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                run_dir = run_dir.parent / f"{run_dir.name}_fresh_{stamp}_{uuid.uuid4().hex[:6]}"
-                self.fresh_run_isolated = True
-            self.store = RunStore(run_dir)
+            resolved_run_dir = Path(run_dir) if run_dir is not None else self.resolve_run_dir(self.config)[0]
+            self.fresh_run_isolated = resolved_run_dir != self.requested_output_dir
+            self.store = RunStore(resolved_run_dir)
         else:
             self.store = store
         self.split_manager = split_manager or SplitManager(self.config.splits, self.store.run_dir / "split_manifest")
@@ -62,6 +60,25 @@ class EvolutionRunner:
         self.defense_archive = DefenseArchive(self.store.run_dir / "archives" / "defenses.jsonl")
         self.frontier = WeaknessFrontier()
         self._generation_wall_times: dict[str, float] = {}
+
+    @classmethod
+    def resolve_run_dir(cls, config: EvolutionConfig) -> tuple[Path, bool]:
+        """Resolve the one authoritative directory for an experiment.
+
+        Real evaluators create their cache during construction, so callers
+        must resolve the directory before constructing either the evaluator or
+        the runner.  Returning the isolation flag also lets the runner record
+        provenance without re-resolving and accidentally creating a second
+        ``*_fresh_*`` directory.
+        """
+        requested_output_dir = Path(config.persistence.output_dir)
+        if config.persistence.resume or not cls._has_prior_run_state(requested_output_dir):
+            return requested_output_dir, False
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        resolved = requested_output_dir.parent / (
+            f"{requested_output_dir.name}_fresh_{stamp}_{uuid.uuid4().hex[:6]}"
+        )
+        return resolved, True
 
     @staticmethod
     def _has_prior_run_state(run_dir: Path) -> bool:

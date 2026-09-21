@@ -47,6 +47,11 @@ def main() -> int:
         evaluator_mode = "mock"
     if evaluator_mode is None:
         raise SystemExit("choose --evaluator mock or --evaluator real")
+    # Resolve the run directory before constructing the evaluator.  The real
+    # evaluator creates its persistent episode cache in its constructor; if
+    # the runner resolved a fresh directory afterwards, artifacts would be
+    # split between two different runs.
+    run_dir, _ = EvolutionRunner.resolve_run_dir(config)
     evaluator = MockEpisodeEvaluator()
     customer_evolver = None
     service_evolver = None
@@ -59,7 +64,7 @@ def main() -> int:
         from framework.llm_integration import get_llm_client
         from framework.evolution.real_factory import make_real_evaluator
         evaluator = make_real_evaluator(args.model, args.api_url, api_key,
-                                        config.persistence.output_dir, config.evaluation.max_turns,
+                                        run_dir, config.evaluation.max_turns,
                                         api_timeout=config.evaluation.api_timeout,
                                         client_type=args.client,
                                         judge_in_evolution=config.evaluation.judge_in_evolution,
@@ -95,7 +100,7 @@ def main() -> int:
         )
     result = EvolutionRunner(
         config, evaluator=evaluator, customer_evolver=customer_evolver,
-        service_evolver=service_evolver,
+        service_evolver=service_evolver, run_dir=run_dir,
     ).run()
     print(result["report"])
     return 0

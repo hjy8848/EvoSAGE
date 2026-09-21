@@ -777,7 +777,16 @@ class LiteLLMClient(LLMClient):
                     raw_response=raw_response,
                 )
             except Exception as exc:
-                self._record_failed_attempt(request_started)
+                # LiteLLM normalizes provider-specific timeout exceptions into
+                # different classes depending on the transport.  Preserve a
+                # reliable timeout counter even when the gateway does not
+                # expose requests.exceptions.Timeout directly.
+                timeout_error = (
+                    isinstance(exc, (TimeoutError, requests.exceptions.Timeout))
+                    or "timeout" in exc.__class__.__name__.lower()
+                    or "timed out" in str(exc).lower()
+                )
+                self._record_failed_attempt(request_started, timeout=timeout_error)
                 if attempt >= self.max_retries - 1:
                     raise
                 logger.warning(

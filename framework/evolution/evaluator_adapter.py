@@ -403,7 +403,15 @@ class EvoSAGEEpisodeEvaluator:
     @staticmethod
     def from_evosage(simulation, report, customer_policy, service_policy, split, generation, phase,
                      path_config=None):
-        tools = [event.get("name", "") for event in getattr(simulation, "backend_events", []) if event.get("event_type") == "tool_query"]
+        # BackendEnvironment records both query and action tools as ``tool_call``
+        # events.  Keep the co-evolution trace aligned with the execution
+        # evaluator; filtering for the old ``tool_query`` name silently turned
+        # every real episode into an empty tool trace.
+        tools = [
+            event.get("name", "")
+            for event in getattr(simulation, "backend_events", [])
+            if event.get("event_type") == "tool_call"
+        ]
         errors = list(getattr(report, "error_categories", []) or [])
         diagnostics = getattr(report, "details", {}).get("diagnostics", {}) if getattr(report, "details", None) else {}
         if diagnostics.get("json_parse_failed") and "json_parse_failed" not in errors:

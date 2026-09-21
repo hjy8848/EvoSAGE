@@ -113,6 +113,21 @@ def test_real_episode_attribution_uses_first_canonical_divergence():
     assert episode.sop_node == "step2"
 
 
+def test_real_episode_preserves_backend_tool_call_trace():
+    from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
+    simulation = _fake_real_simulation()
+    simulation.backend_events = [
+        {"event_type": "tool_call", "name": "query_order"},
+        {"event_type": "tool_call", "name": "submit_refund"},
+        # Non-tool audit events must not be counted as tool calls.
+        {"event_type": "state_change", "name": "refund_submitted"},
+    ]
+    episode = EvoSAGEEpisodeEvaluator.from_evosage(
+        simulation, _fake_real_report(), CustomerPolicy(), ServicePolicy(), "validation", 0, "test",
+    )
+    assert episode.tool_sequence_summary == ["query_order", "submit_refund"]
+
+
 def test_real_episode_attribution_uses_final_action_stage_for_execution_failure():
     from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
     report = _fake_real_report(
@@ -263,6 +278,21 @@ def test_fresh_run_isolates_existing_run_state(tmp_path):
     second = EvolutionRunner(config, evaluator=MockEpisodeEvaluator())
     assert second.fresh_run_isolated is True
     assert second.store.run_dir != first.store.run_dir
+
+
+def test_explicit_resolved_run_dir_is_shared_without_second_isolation(tmp_path):
+    config = EvolutionConfig(
+        max_generations=0,
+        persistence=PersistenceConfig(output_dir=str(tmp_path / "run")),
+    )
+    first = EvolutionRunner(config, evaluator=MockEpisodeEvaluator())
+    first.run()
+
+    resolved, isolated = EvolutionRunner.resolve_run_dir(config)
+    assert isolated is True
+    second = EvolutionRunner(config, evaluator=MockEpisodeEvaluator(), run_dir=resolved)
+    assert second.store.run_dir == resolved
+    assert second.fresh_run_isolated is True
 
 
 def test_fresh_adversary_updates_incumbent_without_training_archive(tmp_path):
