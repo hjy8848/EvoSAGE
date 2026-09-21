@@ -121,17 +121,13 @@ class CustomerPolicy:
         # or use generic language about an unobserved field.
         hidden = dict(case_spec.backend_record.get("private_state", {}).get("system_variables", {}))
         hidden.update(case_spec.metadata.get("backend_system_variables", {}))
-        # Ecommerce stores authoritative fields in nested order/customer
-        # records rather than a generic private_state object.  Collect only
-        # scalar values; the validator still allows a value when it is part
-        # of the customer's explicit knowledge projection.
-        def collect_scalars(value):
-            if isinstance(value, dict):
-                for child in value.values():
-                    yield from collect_scalars(child)
-            elif isinstance(value, (str, int, float, bool)):
-                yield value
-        hidden_values = list(hidden.values()) + list(collect_scalars(case_spec.backend_record))
+        # Do not scan every scalar in backend_record here.  That record also
+        # contains semantic labels used to build the benchmark, such as
+        # ``responsibility="User"``; rejecting the ordinary word "user" in a
+        # reusable customer strategy would be a false-positive leakage gate.
+        # Factory-created CaseSpecs explicitly publish authoritative hidden
+        # variables through this metadata map, so validate only that contract.
+        hidden_values = list(hidden.values())
         known = {str(value).lower() for value in case_spec.user_knowledge.values() if value is not None}
         for value in hidden_values:
             if contains_value(text, value) and str(value).lower() not in known:

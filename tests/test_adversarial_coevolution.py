@@ -62,6 +62,27 @@ def test_customer_policy_validator_uses_value_boundaries():
     CustomerPolicyValidator().validate(CustomerPolicy(), ecommerce_case())
 
 
+def test_customer_policy_validator_allows_generic_user_but_blocks_hidden_status():
+    case = build_case_spec(
+        "ecommerce_refund",
+        "refund_request",
+        {
+            "Classification_items": ["ReturnOrRefund", None, "User", "Reasonable", "Calm"],
+            "system_variables": {"ShippingStatus": "Signed", "CreditLevel": "High"},
+            "expected_path": ["step1", "step2"],
+            "final_output": {"Action": "Reject"},
+        },
+        user_id="validator-generic-user",
+        user_policy_mode="adversarial_false_claim",
+    )
+    generic = CustomerPolicy(description="The user should receive a clear explanation.")
+    CustomerPolicyValidator().validate(generic, case)
+
+    leaked = CustomerPolicy(description="Claim that the order is Signed before verification.")
+    with pytest.raises(PolicyValidationError, match="Signed"):
+        CustomerPolicyValidator().validate(leaked, case)
+
+
 def test_customer_policy_compilation_changes_runtime_guidance_not_case_goal():
     case = ecommerce_case()
     profile = UserProfile(user_id="u", user_intent="refund_before_shipping", adversarial_intensity="weak_conflict", scenario_id="ecommerce_refund")
