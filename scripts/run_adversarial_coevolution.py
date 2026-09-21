@@ -62,7 +62,9 @@ def main() -> int:
                                         config.persistence.output_dir, config.evaluation.max_turns,
                                         api_timeout=config.evaluation.api_timeout,
                                         client_type=args.client,
-                                        judge_in_evolution=config.evaluation.judge_in_evolution)
+                                        judge_in_evolution=config.evaluation.judge_in_evolution,
+                                        resume=config.persistence.resume,
+                                        token_budget=config.evaluation.token_budget)
         evolution_client = get_llm_client(
             args.client, api_key=api_key, base_url=args.api_url, model_name=args.model,
             timeout=config.evaluation.api_timeout,
@@ -71,14 +73,21 @@ def main() -> int:
             config.seed,
             validator=CustomerPolicyValidator(config.customer.allowed_strategy_tags),
             selector=CustomerSelector(config.customer.fitness_weights),
-            strategy_generator=LLMCustomerPolicyGenerator(evolution_client, config.customer.adversary_access),
+            strategy_generator=LLMCustomerPolicyGenerator(
+                evolution_client,
+                config.customer.adversary_access,
+                max_tokens=config.evaluation.token_budget.customer_evolver,
+            ),
             require_strategy_generator=True,
         )
         service_evolver = ServiceEvolver(
             config.seed,
             sanitizer=ServicePolicySanitizer(config.service.allowed_rule_categories),
             gate=ServiceGate(config.service.min_delta, config.service.normal_regression_tolerance),
-            patch_generator=LLMServicePatchGenerator(evolution_client),
+            patch_generator=LLMServicePatchGenerator(
+                evolution_client,
+                max_tokens=config.evaluation.token_budget.service_evolver,
+            ),
             require_patch_generator=True,
         )
     result = EvolutionRunner(

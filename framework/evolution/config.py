@@ -53,6 +53,21 @@ class SplitConfig:
 
 
 @dataclass
+class TokenBudgetConfig:
+    """Role-specific completion budgets for API calls.
+
+    These limits keep orchestration requests bounded without changing the
+    benchmark's SOP or tool semantics.
+    """
+
+    user: int = 512
+    agent: int = 1536
+    judge: int = 1024
+    customer_evolver: int = 4096
+    service_evolver: int = 4096
+
+
+@dataclass
 class EvaluationConfig:
     repetitions: int = 1
     max_turns: int = 10
@@ -61,6 +76,16 @@ class EvaluationConfig:
     # Evolution uses objective Backend/V/P/A/G signals by default.  Full LLM
     # Judge scoring remains available for final/held-out evaluation phases.
     judge_in_evolution: bool = False
+    token_budget: TokenBudgetConfig = field(default_factory=TokenBudgetConfig)
+    summary_limit: int = 5
+
+    @classmethod
+    def from_dict(cls, value: Optional[Dict[str, Any]]) -> "EvaluationConfig":
+        value = dict(value or {})
+        token_budget = value.get("token_budget")
+        if isinstance(token_budget, dict):
+            value["token_budget"] = TokenBudgetConfig(**token_budget)
+        return cls(**{key: item for key, item in value.items() if key in cls.__dataclass_fields__})
 
 
 @dataclass
@@ -105,7 +130,9 @@ class EvolutionConfig:
             "fresh_adversary": FreshAdversaryConfig,
         }
         for key, constructor in nested.items():
-            if isinstance(value.get(key), dict):
+            if key == "evaluation" and isinstance(value.get(key), dict):
+                value[key] = EvaluationConfig.from_dict(value[key])
+            elif isinstance(value.get(key), dict):
                 value[key] = constructor(**value[key])
         return cls(**{key: item for key, item in value.items() if key in cls.__dataclass_fields__})
 

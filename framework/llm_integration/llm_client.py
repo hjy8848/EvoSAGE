@@ -78,6 +78,33 @@ def _parse_tool_calls(message: Dict[str, Any]) -> list:
 
 class LLMClient(ABC):
     """LLM客户端抽象基类"""
+
+    def _init_request_stats(self) -> None:
+        self.request_count = 0
+        self.retry_count = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.latency_seconds = 0.0
+
+    def _record_request(self, attempt: int) -> None:
+        self.request_count = getattr(self, "request_count", 0) + 1
+        if attempt:
+            self.retry_count = getattr(self, "retry_count", 0) + 1
+
+    def _record_completed(self, input_tokens: int = 0, output_tokens: int = 0,
+                          latency_seconds: float = 0.0) -> None:
+        self.input_tokens = getattr(self, "input_tokens", 0) + int(input_tokens or 0)
+        self.output_tokens = getattr(self, "output_tokens", 0) + int(output_tokens or 0)
+        self.latency_seconds = getattr(self, "latency_seconds", 0.0) + float(latency_seconds or 0.0)
+
+    def request_stats(self) -> Dict[str, Any]:
+        return {
+            "requests": int(getattr(self, "request_count", 0) or 0),
+            "retries": int(getattr(self, "retry_count", 0) or 0),
+            "input_tokens": int(getattr(self, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(self, "output_tokens", 0) or 0),
+            "latency_seconds": float(getattr(self, "latency_seconds", 0.0) or 0.0),
+        }
     
     @abstractmethod
     def generate(self, prompt: str, **kwargs) -> LLMResponse:
@@ -126,6 +153,7 @@ class VLLMLocalClient(LLMClient):
         self.api_key = api_key
         self.timeout = timeout
         self.max_retries = max_retries
+        self._init_request_stats()
     
     def _filter_think_tags(self, text: str) -> str:
         """
@@ -193,6 +221,8 @@ class VLLMLocalClient(LLMClient):
         # 重试逻辑
         for attempt in range(self.max_retries):
             try:
+                self._record_request(attempt)
+                request_started = time.perf_counter()
                 response = requests.post(
                     url,
                     json=payload,
@@ -209,6 +239,13 @@ class VLLMLocalClient(LLMClient):
                     
                     # 过滤 Qwen3 think 模式的 <think> 标签内容（仅保留实际输出）
                     text = self._filter_think_tags(text)
+                    usage = data.get("usage", {}) or {}
+                    latency_seconds = time.perf_counter() - request_started
+                    self._record_completed(
+                        usage.get("prompt_tokens", 0),
+                        usage.get("completion_tokens", 0),
+                        latency_seconds,
+                    )
                     
                     return LLMResponse(
                         text=text,
@@ -263,6 +300,7 @@ class VLLMChatClient(LLMClient):
         self.api_key = api_key
         self.timeout = timeout
         self.max_retries = max_retries
+        self._init_request_stats()
     
     def _filter_think_tags(self, text: str) -> str:
         """
@@ -344,6 +382,8 @@ class VLLMChatClient(LLMClient):
         
         for attempt in range(self.max_retries):
             try:
+                self._record_request(attempt)
+                request_started = time.perf_counter()
                 # 调试信息：第一次尝试时打印请求详情
                 # if attempt == 0:
                 #     logger.debug(f"vLLM请求: URL={url}, Model={self.model_name}, Message数={len(messages)}")
@@ -366,6 +406,13 @@ class VLLMChatClient(LLMClient):
                     
                     # 过滤 Qwen3 think 模式的 <think> 标签内容（仅保留实际输出）
                     text = self._filter_think_tags(text)
+                    usage = data.get("usage", {}) or {}
+                    latency_seconds = time.perf_counter() - request_started
+                    self._record_completed(
+                        usage.get("prompt_tokens", 0),
+                        usage.get("completion_tokens", 0),
+                        latency_seconds,
+                    )
                     
                     return LLMResponse(
                         text=text,
@@ -375,6 +422,8 @@ class VLLMChatClient(LLMClient):
                             "finish_reason": data["choices"][0].get("finish_reason"),
                             "assistant_message": message,
                             "attempts": attempt + 1,
+                            "usage": usage,
+                            "latency_seconds": latency_seconds,
                         },
                         tool_calls=tool_calls,
                         raw_response=data,
@@ -446,6 +495,7 @@ class OpenAIAPIClient(LLMClient):
         self.model_name = model_name
         self.timeout = timeout
         self.max_retries = max_retries
+        self._init_request_stats()
     
     def _filter_think_tags(self, text: str) -> str:
         """
@@ -506,6 +556,8 @@ class OpenAIAPIClient(LLMClient):
         
         for attempt in range(self.max_retries):
             try:
+                self._record_request(attempt)
+                request_started = time.perf_counter()
                 response = requests.post(
                     url,
                     json=payload,
@@ -524,6 +576,13 @@ class OpenAIAPIClient(LLMClient):
                     
                     # 过滤 Qwen3 think 模式的 <think> 标签内容（仅保留实际输出）
                     text = self._filter_think_tags(text)
+                    usage = data.get("usage", {}) or {}
+                    latency_seconds = time.perf_counter() - request_started
+                    self._record_completed(
+                        usage.get("prompt_tokens", 0),
+                        usage.get("completion_tokens", 0),
+                        latency_seconds,
+                    )
                     
                     return LLMResponse(
                         text=text,
@@ -533,6 +592,8 @@ class OpenAIAPIClient(LLMClient):
                             "finish_reason": data["choices"][0].get("finish_reason"),
                             "assistant_message": message,
                             "attempts": attempt + 1,
+                            "usage": usage,
+                            "latency_seconds": latency_seconds,
                         },
                         tool_calls=tool_calls,
                         raw_response=data,
@@ -593,6 +654,7 @@ class LiteLLMClient(LLMClient):
         self.model_name = model_name
         self.timeout = timeout
         self.max_retries = max_retries
+        self._init_request_stats()
 
     @staticmethod
     def _as_dict(value: Any) -> Dict[str, Any]:
@@ -641,6 +703,8 @@ class LiteLLMClient(LLMClient):
         litellm.suppress_debug_info = True
         for attempt in range(self.max_retries):
             try:
+                self._record_request(attempt)
+                request_started = time.perf_counter()
                 response = litellm.completion(**payload)
                 raw_response = self._as_dict(response)
                 choices = raw_response.get("choices") or []
@@ -651,6 +715,12 @@ class LiteLLMClient(LLMClient):
                 text = assistant_message.get("content") or ""
                 tool_calls = _parse_tool_calls(assistant_message)
                 usage = self._as_dict(raw_response.get("usage"))
+                latency_seconds = time.perf_counter() - request_started
+                self._record_completed(
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    latency_seconds,
+                )
                 return LLMResponse(
                     text=text.strip() if isinstance(text, str) else str(text),
                     model=self.model_name,
@@ -659,6 +729,8 @@ class LiteLLMClient(LLMClient):
                         "finish_reason": choice.get("finish_reason"),
                         "assistant_message": assistant_message,
                         "attempts": attempt + 1,
+                        "usage": usage,
+                        "latency_seconds": latency_seconds,
                     },
                     tool_calls=tool_calls,
                     raw_response=raw_response,

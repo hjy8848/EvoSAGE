@@ -256,6 +256,9 @@ class LLMEvaluationPipeline:
         service_policy=None,
         use_llm_judge: bool = True,
         client_type: str = "openai_api",
+        user_max_tokens: int = 512,
+        agent_max_tokens: int = 1536,
+        judge_max_tokens: int = 1024,
     ):
         """
         初始化LLM评测管道
@@ -296,6 +299,9 @@ class LLMEvaluationPipeline:
         self.customer_policy = customer_policy
         self.service_policy = service_policy
         self.use_llm_judge = use_llm_judge
+        self.user_max_tokens = user_max_tokens
+        self.agent_max_tokens = agent_max_tokens
+        self.judge_max_tokens = judge_max_tokens
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -547,7 +553,7 @@ class LLMEvaluationPipeline:
                     system_prompt=user_system_prompt,
                     llm_client=self.user_llm_client,
                     temperature=0.8,
-                    max_tokens=16384,
+                    max_tokens=self.user_max_tokens,
                     case_spec=case_spec,
                 )
             else:
@@ -559,7 +565,7 @@ class LLMEvaluationPipeline:
                     system_prompt=user_system_prompt,
                     llm_client=self.user_llm_client,
                     temperature=0.8,
-                    max_tokens=16384,
+                    max_tokens=self.user_max_tokens,
                     case_spec=case_spec,
                 )
         elif self.user_simulator_mode == "rule":
@@ -570,7 +576,7 @@ class LLMEvaluationPipeline:
                 system_prompt=user_system_prompt,
                 llm_client=self.user_llm_client,
                 temperature=0.8,
-                max_tokens=16384,
+                max_tokens=self.user_max_tokens,
                 case_spec=case_spec,
             )
         else:
@@ -579,7 +585,7 @@ class LLMEvaluationPipeline:
                 system_prompt=user_system_prompt,
                 llm_client=self.user_llm_client,
                 temperature=0.8,
-                max_tokens=16384,
+                max_tokens=self.user_max_tokens,
                 case_spec=case_spec,
             )
         
@@ -597,6 +603,7 @@ class LLMEvaluationPipeline:
             use_llm_for_classification=False,  # 已废弃,使用use_llm_for_full_output
             llm_client=self.agent_llm_client,  # 传入agent LLM客户端
             use_llm_for_full_output=True,  # 使用LLM生成完整JSON输出(classification+path+finals+chat)
+            max_tokens=self.agent_max_tokens,
         )
         agent_model.scenario_id = self.scenario_id
         
@@ -653,7 +660,7 @@ class LLMEvaluationPipeline:
             judge = LLMJudge(
                 llm_client=self.judge_llm_client,
                 temperature=0.2,
-                max_tokens=16384,
+                max_tokens=self.judge_max_tokens,
             )
 
         evaluator = Evaluator(
@@ -1914,7 +1921,7 @@ def main():
                 judges[model_name] = LLMJudge(
                     llm_client=llm_client,
                     temperature=0.3,
-                    max_tokens=16384,
+                    max_tokens=self.judge_max_tokens,
                 )
                 print(f"    ✓ 创建成功")
             except Exception as e:

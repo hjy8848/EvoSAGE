@@ -320,7 +320,7 @@ class AgentModel:
     
     def __init__(self, scenario_id: str, sop_graph, system_prompt: str = "", 
                  use_llm_for_classification: bool = False, llm_client=None,
-                 use_llm_for_full_output: bool = True):
+                 use_llm_for_full_output: bool = True, max_tokens: int = 1536):
         """
         初始化客服模型
         
@@ -338,6 +338,7 @@ class AgentModel:
         self.use_llm_for_classification = use_llm_for_classification  # 保留兼容性
         self.use_llm_for_full_output = use_llm_for_full_output
         self.llm_client = llm_client
+        self.max_tokens = max_tokens
         
         # 状态管理
         self.current_step = sop_graph.start_node_id
@@ -832,7 +833,7 @@ class AgentModel:
                 response = self.llm_client.generate(
                     prompt=prompt,
                     temperature=0.7,
-                    max_tokens=16384,
+                    max_tokens=self.max_tokens,
                 )
                 return response.text.strip()
             except Exception as e:
@@ -965,9 +966,13 @@ class AgentModel:
         # print(f"[DEBUG] llm_client类型: {type(self.llm_client)}")
         
         # 构建对话历史
+        # process_turn() appends the current user message before entering this
+        # method.  It is rendered separately below, so exclude that last item
+        # from history to avoid sending the same message twice.
+        previous_history = self.dialogue_history[:-1]
         dialogue_context = "\n".join([
             f"{'用户' if msg['role'] == 'user' else '客服'}: {msg['content']}"
-            for msg in self.dialogue_history[-10:]  # 最近10条消息
+            for msg in previous_history[-10:]  # 最近10条历史消息
         ])
         
         # 构建消息列表
@@ -1011,7 +1016,7 @@ class AgentModel:
                     "prompt": "",
                     "messages": messages,
                     "temperature": 0.1,
-                    "max_tokens": 16384,
+                    "max_tokens": self.max_tokens,
                 }
                 if backend_environment is not None:
                     generation_kwargs["tools"] = backend_environment.get_tool_definitions()

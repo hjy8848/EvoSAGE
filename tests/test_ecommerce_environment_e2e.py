@@ -190,6 +190,21 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         self.assertNotIn("Low", first_request)
         self.assertNotIn("backend_record", first_request)
 
+    def test_current_user_message_is_not_injected_twice(self):
+        client = ScriptedClient([response_with_json("Refund")])
+        message = "我要退款，请帮我查一下订单。"
+        make_agent(client).process_turn(
+            message,
+            context_data={"initial_observation": {}},
+            backend_environment=create_backend(make_case()),
+        )
+        user_messages = [
+            item.get("content", "")
+            for item in client.requests[0]["messages"]
+            if item.get("role") == "user"
+        ]
+        assert sum(content.count(message) for content in user_messages) == 1
+
     def test_same_user_message_has_same_initial_agent_input_for_two_backends(self):
         case_a = make_case("Signed", "High")
         case_b = make_case("Signed", "Low")

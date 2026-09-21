@@ -192,9 +192,16 @@ def metrics_value(metrics, key):
     return float(metrics.get(key, 0.0))
 
 
+def _top_k(items, limit: int = 5):
+    """Keep evolution prompts bounded while retaining recent records."""
+    values = list(items or [])
+    return values[-max(1, limit):]
+
+
 class LLMServicePatchGenerator:
-    def __init__(self, llm_client):
+    def __init__(self, llm_client, max_tokens: int = 4096):
         self.llm_client = llm_client
+        self.max_tokens = max_tokens
 
     def generate(self, policy, failures, generation, count, defense_summary=None, historical_summary=None):
         view = [{"errors": list(item.error_types), "node": item.sop_node,
@@ -204,7 +211,9 @@ class LLMServicePatchGenerator:
                  "policy": item.policy_score,
                  "action": item.action_execution_score,
                  "goal": item.goal_fulfillment_score,
-                 "tools": item.tool_sequence_summary} for item in failures]
+                 "tools": item.tool_sequence_summary} for item in _top_k(failures)]
+        defense_summary = _top_k(defense_summary)
+        historical_summary = _top_k(historical_summary)
         prompt = (
             "Analyze these abstract customer-service failure signatures and propose structured, "
             "general service rules. Do not mention case IDs, order IDs, expected paths/actions, "
@@ -220,7 +229,7 @@ class LLMServicePatchGenerator:
         response = self.llm_client.generate(
             prompt=prompt,
             temperature=0.3,
-            max_tokens=16384,
+            max_tokens=self.max_tokens,
         )
         text = re.sub(r"^```(?:json)?|```$", "", response.text.strip(), flags=re.I | re.M).strip()
         value = json.loads(text)

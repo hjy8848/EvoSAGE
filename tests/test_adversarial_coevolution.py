@@ -29,6 +29,19 @@ def ecommerce_case():
     return build_case_spec("ecommerce_refund", "refund_before_shipping", generate_path_list()[5], "test-user")
 
 
+def test_role_token_budgets_load_as_nested_config():
+    config = EvolutionConfig.from_dict({
+        "evaluation": {
+            "token_budget": {"user": 256, "agent": 1024, "judge": 512,
+                              "customer_evolver": 2048, "service_evolver": 3072},
+            "summary_limit": 3,
+        }
+    })
+    assert config.evaluation.token_budget.agent == 1024
+    assert config.evaluation.token_budget.service_evolver == 3072
+    assert config.evaluation.summary_limit == 3
+
+
 def test_customer_policy_roundtrip_and_leakage_gate():
     case = ecommerce_case()
     policy = CustomerPolicy(strategy_tags=["truthful"], description="delay disclosure until asked")
@@ -321,6 +334,23 @@ def test_real_adapter_caches_episode_but_separates_judge_modes(tmp_path):
     restored = restarted.evaluate(customer, service, [case], "evolution", 0, "customer_candidate")
     assert restored[0].metadata["cache_hit"] is True
     assert restarted_calls == []
+
+    fresh_calls = []
+
+    class FreshPipeline(Pipeline):
+        def run_single_simulation(self, *args, **kwargs):
+            fresh_calls.append(True)
+            return super().run_single_simulation(*args, **kwargs)
+
+    fresh = EvoSAGEEpisodeEvaluator(
+        lambda *args, **kwargs: FreshPipeline(),
+        cache_namespace="cache-test",
+        cache_path=cache_path,
+        reset_cache=True,
+    )
+    fresh_result = fresh.evaluate(customer, service, [case], "evolution", 0, "customer_candidate")
+    assert fresh_result[0].metadata["cache_hit"] is False
+    assert fresh_calls == [True]
 
 
 def test_service_latest_filter_skips_replay_and_normal_for_rejected_patch():

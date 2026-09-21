@@ -179,17 +179,33 @@ class EvoSAGEEpisodeEvaluator:
 
     def __init__(self, pipeline_factory: Callable[..., Any], user_policy_mode: str = "truthful",
                  judge_in_evolution: bool = False, cache_namespace: str = "default",
-                 cache_path: str | Path | None = None):
+                 cache_path: str | Path | None = None, reset_cache: bool = False):
         self.pipeline_factory = pipeline_factory
         self.user_policy_mode = user_policy_mode
         self.judge_in_evolution = judge_in_evolution
         self.cache_namespace = cache_namespace
         self._episode_cache: dict[str, EpisodeResult] = {}
         self._cache_path = Path(cache_path) if cache_path else None
+        self._reset_cache = reset_cache
         self._cache_lock = threading.Lock()
+        self._pipelines = []
+        self._pipeline_lock = threading.Lock()
         self.cache_hits = 0
         self.cache_misses = 0
+        self.real_episode_count = 0
+        self._reset_persistent_cache()
         self._load_persistent_cache()
+
+    def _reset_persistent_cache(self) -> None:
+        if self._cache_path is None or not self._reset_cache:
+            return
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cache_path.write_text("", encoding="utf-8")
+        except OSError:
+            # Cache persistence is an optimization and must not block a fresh
+            # run if the old checkpoint cannot be truncated.
+            return
 
     def _use_llm_judge(self, phase: str) -> bool:
         if self.judge_in_evolution:
@@ -296,6 +312,8 @@ class EvoSAGEEpisodeEvaluator:
                 if "positional" not in str(legacy_exc) and "argument" not in str(legacy_exc):
                     raise
                 pipeline = self.pipeline_factory()
+        with self._pipeline_lock:
+            self._pipelines.append(pipeline)
         for index, case, key in missing:
             run_kwargs = {
                 "user_id": f"{getattr(case, 'case_id', 'case')}_{generation}",
@@ -322,8 +340,50 @@ class EvoSAGEEpisodeEvaluator:
             with self._cache_lock:
                 self._episode_cache[key] = cached_episode
                 self._persist_episode(key, cached_episode)
+            self.real_episode_count += 1
             outputs[index] = episode
         return outputs
+
+    def get_stats(self) -> dict[str, Any]:
+        stats = {
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "real_episode_count": 0,
+            "user_requests": 0,
+            "agent_requests": 0,
+            "judge_requests": 0,
+            "pipeline_requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "latency_seconds": 0.0,
+            "retries": 0,
+        }
+        for role in ("user", "agent", "judge"):
+            stats[f"{role}_input_tokens"] = 0
+            stats[f"{role}_output_tokens"] = 0
+            stats[f"{role}_latency_seconds"] = 0.0
+        with self._pipeline_lock:
+            pipelines = list(self._pipelines)
+        for pipeline in pipelines:
+            for role, key in (("user", "user_requests"), ("agent", "agent_requests"), ("judge", "judge_requests")):
+                client = getattr(pipeline, f"{role}_llm_client", None)
+                client_stats = client.request_stats() if hasattr(client, "request_stats") else {}
+                count = int(client_stats.get("requests", getattr(client, "request_count", 0)) or 0)
+                stats[key] += count
+                stats["pipeline_requests"] += count
+                stats["retries"] += int(client_stats.get("retries", getattr(client, "retry_count", 0)) or 0)
+                stats["input_tokens"] += int(client_stats.get("input_tokens", 0) or 0)
+                stats["output_tokens"] += int(client_stats.get("output_tokens", 0) or 0)
+                stats["latency_seconds"] += float(client_stats.get("latency_seconds", 0.0) or 0.0)
+                stats[f"{role}_input_tokens"] += int(client_stats.get("input_tokens", 0) or 0)
+                stats[f"{role}_output_tokens"] += int(client_stats.get("output_tokens", 0) or 0)
+                stats[f"{role}_latency_seconds"] += float(client_stats.get("latency_seconds", 0.0) or 0.0)
+            stats["real_episode_count"] += int(getattr(pipeline, "_completed_episode_count", 0) or 0)
+        # The pipeline list is also a place to collect completed runs, but a
+        # pipeline can be reused for multiple cases.  Prefer the adapter's
+        # authoritative count when available.
+        stats["real_episode_count"] = getattr(self, "real_episode_count", stats["real_episode_count"])
+        return stats
 
     @staticmethod
     def from_evosage(simulation, report, customer_policy, service_policy, split, generation, phase,

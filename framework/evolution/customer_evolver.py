@@ -12,6 +12,12 @@ from .customer_selector import CustomerSelector
 from .schemas import CustomerPolicy
 
 
+def _top_k(items, limit: int = 5):
+    """Keep prompts bounded while retaining the most recent observations."""
+    values = list(items or [])
+    return values[-max(1, limit):]
+
+
 class CustomerEvolver:
     OPERATORS = (
         ("intensify_pressure", "pressure", "increase pressure while staying within the customer's legitimate goal"),
@@ -105,8 +111,9 @@ class LLMCustomerPolicyGenerator:
     caller and the deterministic fallback remains available.
     """
 
-    def __init__(self, llm_client, adversary_access: str = "black_box"):
+    def __init__(self, llm_client, adversary_access: str = "black_box", max_tokens: int = 4096):
         self.llm_client = llm_client
+        self.max_tokens = max_tokens
         if adversary_access not in {"black_box", "white_box"}:
             raise ValueError("adversary_access must be black_box or white_box")
         self.adversary_access = adversary_access
@@ -115,8 +122,10 @@ class LLMCustomerPolicyGenerator:
         failure_view = [
             {"errors": list(item.error_types), "sop_node": item.sop_node,
              "predicted_action": item.predicted_action, "executed_action": item.executed_action}
-            for item in failures
+            for item in _top_k(failures)
         ]
+        frontier = _top_k(frontier)
+        archive_summary = _top_k(archive_summary)
         prompt = (
             "Design reusable customer interaction strategies for a customer-service benchmark. "
             "Do not mention case IDs, order IDs, expected paths/actions, hidden values, evaluators, "
@@ -133,7 +142,7 @@ class LLMCustomerPolicyGenerator:
         response = self.llm_client.generate(
             prompt=prompt,
             temperature=0.7,
-            max_tokens=16384,
+            max_tokens=self.max_tokens,
         )
         text = re.sub(r"^```(?:json)?|```$", "", response.text.strip(), flags=re.I | re.M).strip()
         value = json.loads(text)

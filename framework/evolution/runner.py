@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 from pathlib import Path
+import time
 from typing import Any, Optional
 
 from .archives import AttackArchive, DefenseArchive
@@ -48,8 +49,85 @@ class EvolutionRunner:
         self.attack_archive = AttackArchive(self.store.run_dir / "archives" / "attacks.jsonl")
         self.defense_archive = DefenseArchive(self.store.run_dir / "archives" / "defenses.jsonl")
         self.frontier = WeaknessFrontier()
+        self._generation_wall_times: dict[str, float] = {}
+
+    @staticmethod
+    def _client_request_stats(client) -> dict[str, Any]:
+        if client is None:
+            return {"requests": 0, "retries": 0, "input_tokens": 0, "output_tokens": 0, "latency_seconds": 0.0}
+        if hasattr(client, "request_stats"):
+            value = client.request_stats()
+            return {
+                "requests": int(value.get("requests", 0) or 0),
+                "retries": int(value.get("retries", 0) or 0),
+                "input_tokens": int(value.get("input_tokens", 0) or 0),
+                "output_tokens": int(value.get("output_tokens", 0) or 0),
+                "latency_seconds": float(value.get("latency_seconds", 0.0) or 0.0),
+            }
+        return {
+            "requests": int(getattr(client, "request_count", 0) or 0),
+            "retries": int(getattr(client, "retry_count", 0) or 0),
+            "input_tokens": int(getattr(client, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(client, "output_tokens", 0) or 0),
+            "latency_seconds": float(getattr(client, "latency_seconds", 0.0) or 0.0),
+        }
+
+    def _runtime_stats(self) -> dict[str, Any]:
+        """Collect execution-level request and cache counters without secrets."""
+        stats = {
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "real_episode_count": 0,
+            "pipeline_requests": 0,
+            "user_requests": 0,
+            "agent_requests": 0,
+            "judge_requests": 0,
+            "policy_generation_requests": 0,
+            "retries": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "latency_seconds": 0.0,
+        }
+        for role in ("user", "agent", "judge"):
+            stats[f"{role}_input_tokens"] = 0
+            stats[f"{role}_output_tokens"] = 0
+            stats[f"{role}_latency_seconds"] = 0.0
+        adapter = self.base_evaluator
+        if hasattr(adapter, "get_stats"):
+            adapter_stats = adapter.get_stats()
+            for key in ("cache_hits", "cache_misses", "real_episode_count", "pipeline_requests",
+                        "user_requests", "agent_requests", "judge_requests"):
+                stats[key] = int(adapter_stats.get(key, 0) or 0)
+            stats["retries"] += int(adapter_stats.get("retries", 0) or 0)
+            stats["input_tokens"] += int(adapter_stats.get("input_tokens", 0) or 0)
+            stats["output_tokens"] += int(adapter_stats.get("output_tokens", 0) or 0)
+            stats["latency_seconds"] += float(adapter_stats.get("latency_seconds", 0.0) or 0.0)
+            for role in ("user", "agent", "judge"):
+                stats[f"{role}_input_tokens"] += int(adapter_stats.get(f"{role}_input_tokens", 0) or 0)
+                stats[f"{role}_output_tokens"] += int(adapter_stats.get(f"{role}_output_tokens", 0) or 0)
+                stats[f"{role}_latency_seconds"] += float(adapter_stats.get(f"{role}_latency_seconds", 0.0) or 0.0)
+
+        seen_clients = set()
+        for evolver in (self.customer_evolver, self.service_evolver):
+            generator = getattr(evolver, "strategy_generator", None) or getattr(evolver, "patch_generator", None)
+            client = getattr(generator, "llm_client", None)
+            if client is None or id(client) in seen_clients:
+                continue
+            seen_clients.add(id(client))
+            client_stats = self._client_request_stats(client)
+            stats["policy_generation_requests"] += client_stats["requests"]
+            stats["retries"] += client_stats["retries"]
+            stats["input_tokens"] += client_stats["input_tokens"]
+            stats["output_tokens"] += client_stats["output_tokens"]
+            stats["latency_seconds"] += client_stats["latency_seconds"]
+
+        stats["llm_requests"] = stats["pipeline_requests"] + stats["policy_generation_requests"]
+        stats["total_requests_including_retries"] = stats["llm_requests"]
+        stats["generation_wall_times_seconds"] = dict(self._generation_wall_times)
+        return stats
 
     def run(self) -> dict[str, Any]:
+        run_started = time.monotonic()
         manifest_exists = (self.store.run_dir / "split_manifest" / "evolution_cases.json").exists()
         # A fresh run rebuilds the manifest from the current config.  Only an
         # explicit resume reuses an existing split, preventing a changed
@@ -81,6 +159,7 @@ class EvolutionRunner:
             self.store.write_json("environment/initial_service_policy.json", ServicePolicy().to_dict())
         history = []
         for generation in range(start, self.config.max_generations):
+            generation_started = time.monotonic()
             gen_dir = self.store.generation_dir(generation)
             baseline_customer = customer
             baseline_service = service
@@ -95,8 +174,8 @@ class EvolutionRunner:
                     cases_per_candidate=self.config.customer.cases_per_candidate,
                     elite_count=self.config.customer.elite_count,
                     source_failures=prior_failures,
-                    frontier=self.frontier.to_dicts(),
-                    archive_summary=self.attack_archive.to_dicts()[-self.config.service.replay_attack_count:],
+                    frontier=self.frontier.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
+                    archive_summary=self.attack_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
                 )
                 self.store.write_json(f"generations/gen_{generation:03d}/customer_candidates.json", {
                     "selected_policy": customer.to_dict(), "scores": [score.to_dict() for score in scores],
@@ -116,8 +195,8 @@ class EvolutionRunner:
                     customer_policy=customer,
                     replay_policies=self._replay_policies(self.config.service.replay_attack_count),
                     replay_attack_count=self.config.service.replay_attack_count,
-                    defense_summary=self.defense_archive.to_dicts(),
-                    historical_summary=self.service_evolver.last_candidate_records[-self.config.service.replay_attack_count:],
+                    defense_summary=self.defense_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
+                    historical_summary=self.service_evolver.last_candidate_records[-max(1, self.config.evaluation.summary_limit):],
                 )
                 self.store.write_json(f"generations/gen_{generation:03d}/service_gate.json", {
                     "accepted": decision.accepted, "reason": decision.reason, "delta": decision.delta,
@@ -144,7 +223,13 @@ class EvolutionRunner:
             self.store.append_jsonl(f"generations/gen_{generation:03d}/episodes.jsonl", [item.to_dict() for item in episodes])
             self.store.write_json(f"generations/gen_{generation:03d}/customer_policy.json", customer.to_dict())
             self.store.write_json(f"generations/gen_{generation:03d}/service_policy.json", service.to_dict())
-            self.store.mark_generation_complete(generation, {"episode_count": len(episodes), "service_policy_id": service.policy_id, "customer_policy_id": customer.policy_id})
+            self._generation_wall_times[str(generation)] = time.monotonic() - generation_started
+            self.store.mark_generation_complete(generation, {
+                "episode_count": len(episodes),
+                "service_policy_id": service.policy_id,
+                "customer_policy_id": customer.policy_id,
+                "orchestration": self._runtime_stats(),
+            })
             history.append({"generation": generation, "episode_count": len(episodes), "task_success": sum(item.task_success for item in episodes) / len(episodes) if episodes else 0.0})
         self.frontier.save(self.store.run_dir / "analysis" / "weakness_frontier.json", self.store.run_dir / "analysis" / "weakness_frontier.csv")
         if self.config.fresh_adversary.enabled:
@@ -154,8 +239,17 @@ class EvolutionRunner:
                 target_service=service,
                 target_label="final_coevolved",
             )
+        orchestration_metrics = self._runtime_stats()
+        orchestration_metrics["wall_time_seconds"] = time.monotonic() - run_started
+        self.store.write_json("analysis/orchestration_metrics.json", orchestration_metrics)
         report = generate_report(self.store.run_dir)
-        return {"run_dir": str(self.store.run_dir), "report": str(report), "history": history, "completed_generations": self.store.completed_generations()}
+        return {
+            "run_dir": str(self.store.run_dir),
+            "report": str(report),
+            "history": history,
+            "completed_generations": self.store.completed_generations(),
+            "orchestration_metrics": orchestration_metrics,
+        }
 
     def heldout_evaluation(self):
         splits = SplitManager.load(self.store.run_dir / "split_manifest")
