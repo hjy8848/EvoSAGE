@@ -86,6 +86,21 @@ class CustomerPolicy:
     def validate_for_case(self, case_spec: Any) -> None:
         """Hard-gate sample leakage and immutable-case mutation."""
         text = _json(self.to_dict()).lower()
+
+        def contains_value(haystack: str, value: Any) -> bool:
+            """Match a value as a token, not as an arbitrary substring.
+
+            This prevents benign words such as ``workflow`` from matching a
+            hidden value like ``Low`` and ``rejection`` from matching an
+            action named ``Reject``.
+            """
+            if value is None:
+                return False
+            needle = str(value).strip().lower()
+            if not needle:
+                return False
+            return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack, re.UNICODE) is not None
+
         forbidden = ["expected_path", "expected_action", "task_success", "evaluator"]
         if any(token in text for token in forbidden) or re.search(r"\bpath\s*\d+\b|gold[_ -]?path", text):
             raise PolicyValidationError("customer policy references evaluator-only information")
@@ -100,7 +115,7 @@ class CustomerPolicy:
             case_spec.user_knowledge.get("record_id"),
         ]
         for value in immutable_values:
-            if value and str(value).lower() in text:
+            if value and contains_value(text, value):
                 raise PolicyValidationError("customer policy contains sample-specific identity or answer")
         # A customer may only claim facts that are in its legitimate knowledge
         # or use generic language about an unobserved field.
@@ -119,8 +134,10 @@ class CustomerPolicy:
         hidden_values = list(hidden.values()) + list(collect_scalars(case_spec.backend_record))
         known = {str(value).lower() for value in case_spec.user_knowledge.values() if value is not None}
         for value in hidden_values:
-            if value is not None and str(value).lower() in text and str(value).lower() not in known:
-                raise PolicyValidationError("customer policy embeds an unobserved backend value")
+            if contains_value(text, value) and str(value).lower() not in known:
+                raise PolicyValidationError(
+                    f"customer policy embeds an unobserved backend value: {value!r}"
+                )
 
     def assert_immutable_case(self, case_spec: Any, original: Any) -> None:
         """Verify that a policy application did not mutate the benchmark case."""

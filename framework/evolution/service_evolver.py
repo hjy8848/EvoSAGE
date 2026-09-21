@@ -199,9 +199,10 @@ def _top_k(items, limit: int = 5):
 
 
 class LLMServicePatchGenerator:
-    def __init__(self, llm_client, max_tokens: int = 4096):
+    def __init__(self, llm_client, max_tokens: int = 4096, summary_limit: int = 5):
         self.llm_client = llm_client
         self.max_tokens = max_tokens
+        self.summary_limit = max(1, int(summary_limit))
 
     def generate(self, policy, failures, generation, count, defense_summary=None, historical_summary=None):
         view = [{"errors": list(item.error_types), "node": item.sop_node,
@@ -211,9 +212,9 @@ class LLMServicePatchGenerator:
                  "policy": item.policy_score,
                  "action": item.action_execution_score,
                  "goal": item.goal_fulfillment_score,
-                 "tools": item.tool_sequence_summary} for item in _top_k(failures)]
-        defense_summary = _top_k(defense_summary)
-        historical_summary = _top_k(historical_summary)
+                 "tools": item.tool_sequence_summary} for item in _top_k(failures, self.summary_limit)]
+        defense_summary = _top_k(defense_summary, self.summary_limit)
+        historical_summary = _top_k(historical_summary, self.summary_limit)
         prompt = (
             "Analyze these abstract customer-service failure signatures and propose structured, "
             "general service rules. Do not mention case IDs, order IDs, expected paths/actions, "

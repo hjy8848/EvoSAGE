@@ -52,6 +52,12 @@ def test_customer_policy_roundtrip_and_leakage_gate():
         CustomerPolicyValidator().validate(bad, case)
 
 
+def test_customer_policy_validator_uses_value_boundaries():
+    # ``Reject`` must not match the ordinary word ``rejection`` and ``Low``
+    # must not match the word ``workflow`` in the baseline policy text.
+    CustomerPolicyValidator().validate(CustomerPolicy(), ecommerce_case())
+
+
 def test_customer_policy_compilation_changes_runtime_guidance_not_case_goal():
     case = ecommerce_case()
     profile = UserProfile(user_id="u", user_intent="refund_before_shipping", adversarial_intensity="weak_conflict", scenario_id="ecommerce_refund")
@@ -245,6 +251,18 @@ def test_two_generation_mock_run_resume_and_matrix(tmp_path):
     assert len(matrix) == 9
     config.persistence.resume = True
     assert EvolutionRunner(config, evaluator=MockEpisodeEvaluator()).run()["completed_generations"] == [0, 1]
+
+
+def test_fresh_run_isolates_existing_run_state(tmp_path):
+    config = EvolutionConfig(
+        max_generations=0,
+        persistence=PersistenceConfig(output_dir=str(tmp_path / "run")),
+    )
+    first = EvolutionRunner(config, evaluator=MockEpisodeEvaluator())
+    first.run()
+    second = EvolutionRunner(config, evaluator=MockEpisodeEvaluator())
+    assert second.fresh_run_isolated is True
+    assert second.store.run_dir != first.store.run_dir
 
 
 def test_fresh_adversary_updates_incumbent_without_training_archive(tmp_path):

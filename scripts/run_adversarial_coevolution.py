@@ -77,6 +77,8 @@ def main() -> int:
                 evolution_client,
                 config.customer.adversary_access,
                 max_tokens=config.evaluation.token_budget.customer_evolver,
+                summary_limit=config.evaluation.summary_limit,
+                allowed_strategy_tags=config.customer.allowed_strategy_tags,
             ),
             require_strategy_generator=True,
         )
@@ -87,6 +89,7 @@ def main() -> int:
             patch_generator=LLMServicePatchGenerator(
                 evolution_client,
                 max_tokens=config.evaluation.token_budget.service_evolver,
+                summary_limit=config.evaluation.summary_limit,
             ),
             require_patch_generator=True,
         )

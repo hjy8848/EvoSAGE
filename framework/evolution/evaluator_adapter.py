@@ -357,6 +357,12 @@ class EvoSAGEEpisodeEvaluator:
             "output_tokens": 0,
             "latency_seconds": 0.0,
             "retries": 0,
+            "attempts": 0,
+            "successes": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "total_attempt_latency": 0.0,
+            "max_attempt_latency": 0.0,
         }
         for role in ("user", "agent", "judge"):
             stats[f"{role}_input_tokens"] = 0
@@ -372,9 +378,18 @@ class EvoSAGEEpisodeEvaluator:
                 stats[key] += count
                 stats["pipeline_requests"] += count
                 stats["retries"] += int(client_stats.get("retries", getattr(client, "retry_count", 0)) or 0)
+                stats["attempts"] += int(client_stats.get("attempts", 0) or 0)
+                stats["successes"] += int(client_stats.get("successes", 0) or 0)
+                stats["failures"] += int(client_stats.get("failures", 0) or 0)
+                stats["timeouts"] += int(client_stats.get("timeouts", 0) or 0)
                 stats["input_tokens"] += int(client_stats.get("input_tokens", 0) or 0)
                 stats["output_tokens"] += int(client_stats.get("output_tokens", 0) or 0)
                 stats["latency_seconds"] += float(client_stats.get("latency_seconds", 0.0) or 0.0)
+                stats["total_attempt_latency"] += float(client_stats.get("total_attempt_latency", 0.0) or 0.0)
+                stats["max_attempt_latency"] = max(
+                    stats["max_attempt_latency"],
+                    float(client_stats.get("max_attempt_latency", 0.0) or 0.0),
+                )
                 stats[f"{role}_input_tokens"] += int(client_stats.get("input_tokens", 0) or 0)
                 stats[f"{role}_output_tokens"] += int(client_stats.get("output_tokens", 0) or 0)
                 stats[f"{role}_latency_seconds"] += float(client_stats.get("latency_seconds", 0.0) or 0.0)

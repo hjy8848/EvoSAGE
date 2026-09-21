@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime
 import json
 from pathlib import Path
 import time
 from typing import Any, Optional
+import uuid
 
 from .archives import AttackArchive, DefenseArchive
 from .config import EvolutionConfig
@@ -28,7 +30,17 @@ class EvolutionRunner:
     def __init__(self, config: Optional[EvolutionConfig] = None, evaluator=None, store: Optional[RunStore] = None,
                  split_manager: Optional[SplitManager] = None, customer_evolver=None, service_evolver=None):
         self.config = config or EvolutionConfig()
-        self.store = store or RunStore(self.config.persistence.output_dir)
+        self.requested_output_dir = Path(self.config.persistence.output_dir)
+        self.fresh_run_isolated = False
+        if store is None:
+            run_dir = self.requested_output_dir
+            if not self.config.persistence.resume and self._has_prior_run_state(run_dir):
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                run_dir = run_dir.parent / f"{run_dir.name}_fresh_{stamp}_{uuid.uuid4().hex[:6]}"
+                self.fresh_run_isolated = True
+            self.store = RunStore(run_dir)
+        else:
+            self.store = store
         self.split_manager = split_manager or SplitManager(self.config.splits, self.store.run_dir / "split_manifest")
         self.base_evaluator = evaluator or MockEpisodeEvaluator()
         self.evaluator = BudgetedEpisodeEvaluator(
@@ -52,24 +64,54 @@ class EvolutionRunner:
         self._generation_wall_times: dict[str, float] = {}
 
     @staticmethod
+    def _has_prior_run_state(run_dir: Path) -> bool:
+        """Detect an existing experiment without treating an empty directory as a run."""
+        markers = (
+            "config/evolution.json",
+            "environment/provenance.json",
+            "environment/episode_cache.jsonl",
+            "split_manifest/evolution_cases.json",
+            "archives/attacks.jsonl",
+            "archives/defenses.jsonl",
+        )
+        return any((run_dir / marker).exists() for marker in markers)
+
+    @staticmethod
     def _client_request_stats(client) -> dict[str, Any]:
         if client is None:
-            return {"requests": 0, "retries": 0, "input_tokens": 0, "output_tokens": 0, "latency_seconds": 0.0}
+            return {
+                "requests": 0, "retries": 0, "attempts": 0, "successes": 0,
+                "failures": 0, "timeouts": 0, "input_tokens": 0,
+                "output_tokens": 0, "latency_seconds": 0.0,
+                "total_attempt_latency": 0.0, "max_attempt_latency": 0.0,
+            }
         if hasattr(client, "request_stats"):
             value = client.request_stats()
             return {
                 "requests": int(value.get("requests", 0) or 0),
                 "retries": int(value.get("retries", 0) or 0),
+                "attempts": int(value.get("attempts", 0) or 0),
+                "successes": int(value.get("successes", 0) or 0),
+                "failures": int(value.get("failures", 0) or 0),
+                "timeouts": int(value.get("timeouts", 0) or 0),
                 "input_tokens": int(value.get("input_tokens", 0) or 0),
                 "output_tokens": int(value.get("output_tokens", 0) or 0),
                 "latency_seconds": float(value.get("latency_seconds", 0.0) or 0.0),
+                "total_attempt_latency": float(value.get("total_attempt_latency", 0.0) or 0.0),
+                "max_attempt_latency": float(value.get("max_attempt_latency", 0.0) or 0.0),
             }
         return {
             "requests": int(getattr(client, "request_count", 0) or 0),
             "retries": int(getattr(client, "retry_count", 0) or 0),
+            "attempts": int(getattr(client, "attempts", 0) or 0),
+            "successes": int(getattr(client, "successes", 0) or 0),
+            "failures": int(getattr(client, "failures", 0) or 0),
+            "timeouts": int(getattr(client, "timeouts", 0) or 0),
             "input_tokens": int(getattr(client, "input_tokens", 0) or 0),
             "output_tokens": int(getattr(client, "output_tokens", 0) or 0),
             "latency_seconds": float(getattr(client, "latency_seconds", 0.0) or 0.0),
+            "total_attempt_latency": float(getattr(client, "total_attempt_latency", 0.0) or 0.0),
+            "max_attempt_latency": float(getattr(client, "max_attempt_latency", 0.0) or 0.0),
         }
 
     def _runtime_stats(self) -> dict[str, Any]:
@@ -87,6 +129,12 @@ class EvolutionRunner:
             "input_tokens": 0,
             "output_tokens": 0,
             "latency_seconds": 0.0,
+            "attempts": 0,
+            "successes": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "total_attempt_latency": 0.0,
+            "max_attempt_latency": 0.0,
         }
         for role in ("user", "agent", "judge"):
             stats[f"{role}_input_tokens"] = 0
@@ -99,9 +147,16 @@ class EvolutionRunner:
                         "user_requests", "agent_requests", "judge_requests"):
                 stats[key] = int(adapter_stats.get(key, 0) or 0)
             stats["retries"] += int(adapter_stats.get("retries", 0) or 0)
+            for key in ("attempts", "successes", "failures", "timeouts"):
+                stats[key] += int(adapter_stats.get(key, 0) or 0)
             stats["input_tokens"] += int(adapter_stats.get("input_tokens", 0) or 0)
             stats["output_tokens"] += int(adapter_stats.get("output_tokens", 0) or 0)
             stats["latency_seconds"] += float(adapter_stats.get("latency_seconds", 0.0) or 0.0)
+            stats["total_attempt_latency"] += float(adapter_stats.get("total_attempt_latency", 0.0) or 0.0)
+            stats["max_attempt_latency"] = max(
+                stats["max_attempt_latency"],
+                float(adapter_stats.get("max_attempt_latency", 0.0) or 0.0),
+            )
             for role in ("user", "agent", "judge"):
                 stats[f"{role}_input_tokens"] += int(adapter_stats.get(f"{role}_input_tokens", 0) or 0)
                 stats[f"{role}_output_tokens"] += int(adapter_stats.get(f"{role}_output_tokens", 0) or 0)
@@ -117,9 +172,15 @@ class EvolutionRunner:
             client_stats = self._client_request_stats(client)
             stats["policy_generation_requests"] += client_stats["requests"]
             stats["retries"] += client_stats["retries"]
+            for key in ("attempts", "successes", "failures", "timeouts"):
+                stats[key] += client_stats.get(key, 0)
             stats["input_tokens"] += client_stats["input_tokens"]
             stats["output_tokens"] += client_stats["output_tokens"]
             stats["latency_seconds"] += client_stats["latency_seconds"]
+            stats["total_attempt_latency"] += client_stats.get("total_attempt_latency", 0.0)
+            stats["max_attempt_latency"] = max(
+                stats["max_attempt_latency"], client_stats.get("max_attempt_latency", 0.0)
+            )
 
         stats["llm_requests"] = stats["pipeline_requests"] + stats["policy_generation_requests"]
         stats["total_requests_including_retries"] = stats["llm_requests"]
@@ -149,6 +210,9 @@ class EvolutionRunner:
                 or getattr(self.service_evolver, "require_patch_generator", False)
             ),
             "customer_adversary_access": self.config.customer.adversary_access,
+            "requested_output_dir": str(self.requested_output_dir),
+            "run_dir": str(self.store.run_dir),
+            "fresh_run_isolated": self.fresh_run_isolated,
         })
         completed = self.store.completed_generations()
         start = (max(completed) + 1) if self.config.persistence.resume and completed else 0

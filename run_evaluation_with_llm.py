@@ -1921,7 +1921,7 @@ def main():
                 judges[model_name] = LLMJudge(
                     llm_client=llm_client,
                     temperature=0.3,
-                    max_tokens=self.judge_max_tokens,
+                    max_tokens=1024,
                 )
                 print(f"    ✓ 创建成功")
             except Exception as e:

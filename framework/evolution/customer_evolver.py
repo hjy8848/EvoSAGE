@@ -36,7 +36,8 @@ class CustomerEvolver:
         self.require_strategy_generator = require_strategy_generator
         self.last_rejections = []
 
-    def propose(self, incumbent: CustomerPolicy, generation: int, count: int = 5, source_failures=None, service_policy=None, frontier=None, archive_summary=None) -> list[CustomerPolicy]:
+    def propose(self, incumbent: CustomerPolicy, generation: int, count: int = 5, source_failures=None,
+                service_policy=None, frontier=None, archive_summary=None, validation_cases=None) -> list[CustomerPolicy]:
         failures = list(source_failures or [])
         self.last_rejections = []
         if self.strategy_generator is not None:
@@ -54,6 +55,12 @@ class CustomerEvolver:
             for policy in generated:
                 try:
                     self.validator.validate(policy)
+                    for case in validation_cases or []:
+                        case_spec = getattr(case, "case_spec", None)
+                        if isinstance(case_spec, dict):
+                            from ..backend.types import CaseSpec
+                            case_spec = CaseSpec(**copy.deepcopy(case_spec))
+                        self.validator.validate(policy, case_spec)
                     valid.append(policy)
                 except Exception as exc:
                     self.last_rejections.append({"policy_id": policy.policy_id, "reason": str(exc)})
@@ -90,12 +97,16 @@ class CustomerEvolver:
 
     def evolve(self, incumbent, service_policy, cases, evaluator, archive, generation, count=5,
                cases_per_candidate=None, elite_count=0, source_failures=None, frontier=None, archive_summary=None):
-        candidate_cases = list(cases)
-        if any(getattr(case, "split", "") == "heldout_test" for case in candidate_cases):
+        validation_cases = list(cases)
+        candidate_cases = list(validation_cases)
+        if any(getattr(case, "split", "") == "heldout_test" for case in validation_cases):
             raise AssertionError("CustomerEvolver cannot consume heldout cases")
         if cases_per_candidate is not None and cases_per_candidate > 0:
             candidate_cases = candidate_cases[:cases_per_candidate]
-        candidates = self.propose(incumbent, generation, count, source_failures, service_policy, frontier, archive_summary)
+        candidates = self.propose(
+            incumbent, generation, count, source_failures, service_policy,
+            frontier, archive_summary, validation_cases=validation_cases,
+        )
         evaluated = [(candidate, evaluator.evaluate(candidate, service_policy, candidate_cases, "evolution", generation, "customer_candidate")) for candidate in candidates]
         if elite_count:
             evaluated.insert(0, (incumbent, evaluator.evaluate(incumbent, service_policy, candidate_cases, "evolution", generation, "customer_elite")))
@@ -111,9 +122,14 @@ class LLMCustomerPolicyGenerator:
     caller and the deterministic fallback remains available.
     """
 
-    def __init__(self, llm_client, adversary_access: str = "black_box", max_tokens: int = 4096):
+    def __init__(self, llm_client, adversary_access: str = "black_box", max_tokens: int = 4096,
+                 summary_limit: int = 5, allowed_strategy_tags=None):
         self.llm_client = llm_client
         self.max_tokens = max_tokens
+        self.summary_limit = max(1, int(summary_limit))
+        self.allowed_strategy_tags = sorted(
+            allowed_strategy_tags or CustomerPolicyValidator.DEFAULT_TAGS
+        )
         if adversary_access not in {"black_box", "white_box"}:
             raise ValueError("adversary_access must be black_box or white_box")
         self.adversary_access = adversary_access
@@ -122,14 +138,19 @@ class LLMCustomerPolicyGenerator:
         failure_view = [
             {"errors": list(item.error_types), "sop_node": item.sop_node,
              "predicted_action": item.predicted_action, "executed_action": item.executed_action}
-            for item in _top_k(failures)
+            for item in _top_k(failures, self.summary_limit)
         ]
-        frontier = _top_k(frontier)
-        archive_summary = _top_k(archive_summary)
+        frontier = _top_k(frontier, self.summary_limit)
+        archive_summary = _top_k(archive_summary, self.summary_limit)
         prompt = (
             "Design reusable customer interaction strategies for a customer-service benchmark. "
             "Do not mention case IDs, order IDs, expected paths/actions, hidden values, evaluators, "
-            "or parser manipulation. Return a JSON array only. Each item must contain name, "
+            "or parser manipulation. Do not mention any concrete backend field names, status values, "
+            "identifiers, or case-specific facts. "
+            "Use only generic interaction language such as authoritative result, required identifier, "
+            "or failed action. strategy_tags must be a subset of this exact list: "
+            f"{json.dumps(self.allowed_strategy_tags)}. Do not invent tags such as transparent. "
+            "Return a JSON array only. Each item must contain name, "
             "description, strategy_tags, disclosure_strategy, pressure_strategy, "
             "contradiction_strategy, response_to_verification, response_to_rejection.\n"
             f"Current strategy tags: {json.dumps(incumbent.strategy_tags)}\n"

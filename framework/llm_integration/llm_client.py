@@ -82,28 +82,57 @@ class LLMClient(ABC):
     def _init_request_stats(self) -> None:
         self.request_count = 0
         self.retry_count = 0
+        self.attempts = 0
+        self.successes = 0
+        self.failures = 0
+        self.timeouts = 0
         self.input_tokens = 0
         self.output_tokens = 0
         self.latency_seconds = 0.0
+        self.total_attempt_latency = 0.0
+        self.max_attempt_latency = 0.0
 
     def _record_request(self, attempt: int) -> None:
         self.request_count = getattr(self, "request_count", 0) + 1
+        self.attempts = getattr(self, "attempts", 0) + 1
         if attempt:
             self.retry_count = getattr(self, "retry_count", 0) + 1
+
+    def _record_attempt_timing(self, latency_seconds: float, success: bool,
+                               timeout: bool = False) -> None:
+        elapsed = max(0.0, float(latency_seconds or 0.0))
+        self.total_attempt_latency = getattr(self, "total_attempt_latency", 0.0) + elapsed
+        self.max_attempt_latency = max(getattr(self, "max_attempt_latency", 0.0), elapsed)
+        if success:
+            self.successes = getattr(self, "successes", 0) + 1
+        else:
+            self.failures = getattr(self, "failures", 0) + 1
+            if timeout:
+                self.timeouts = getattr(self, "timeouts", 0) + 1
+
+    def _record_failed_attempt(self, started_at: float, timeout: bool = False) -> None:
+        self._record_attempt_timing(time.perf_counter() - started_at, success=False, timeout=timeout)
 
     def _record_completed(self, input_tokens: int = 0, output_tokens: int = 0,
                           latency_seconds: float = 0.0) -> None:
         self.input_tokens = getattr(self, "input_tokens", 0) + int(input_tokens or 0)
         self.output_tokens = getattr(self, "output_tokens", 0) + int(output_tokens or 0)
         self.latency_seconds = getattr(self, "latency_seconds", 0.0) + float(latency_seconds or 0.0)
+        self._record_attempt_timing(latency_seconds, success=True)
 
     def request_stats(self) -> Dict[str, Any]:
         return {
             "requests": int(getattr(self, "request_count", 0) or 0),
             "retries": int(getattr(self, "retry_count", 0) or 0),
+            "attempts": int(getattr(self, "attempts", 0) or 0),
+            "successes": int(getattr(self, "successes", 0) or 0),
+            "failures": int(getattr(self, "failures", 0) or 0),
+            "timeouts": int(getattr(self, "timeouts", 0) or 0),
             "input_tokens": int(getattr(self, "input_tokens", 0) or 0),
             "output_tokens": int(getattr(self, "output_tokens", 0) or 0),
             "latency_seconds": float(getattr(self, "latency_seconds", 0.0) or 0.0),
+            "total_attempt_latency": float(getattr(self, "total_attempt_latency", 0.0) or 0.0),
+            "max_attempt_latency": float(getattr(self, "max_attempt_latency", 0.0) or 0.0),
         }
     
     @abstractmethod
@@ -260,6 +289,7 @@ class VLLMLocalClient(LLMClient):
                     raise ValueError("No choices in response")
             
             except requests.exceptions.Timeout:
+                self._record_failed_attempt(request_started, timeout=True)
                 logger.warning(f"Timeout on attempt {attempt + 1}/{self.max_retries}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -267,6 +297,7 @@ class VLLMLocalClient(LLMClient):
                     raise
             
             except requests.exceptions.ConnectionError:
+                self._record_failed_attempt(request_started)
                 logger.warning(f"Connection error on attempt {attempt + 1}/{self.max_retries}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -274,6 +305,7 @@ class VLLMLocalClient(LLMClient):
                     raise
             
             except Exception as e:
+                self._record_failed_attempt(request_started)
                 logger.error(f"Error on attempt {attempt + 1}/{self.max_retries}: {e}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -432,6 +464,10 @@ class VLLMChatClient(LLMClient):
                     raise ValueError("No choices in response")
             
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                self._record_failed_attempt(
+                    request_started,
+                    timeout=isinstance(e, requests.exceptions.Timeout),
+                )
                 logger.warning(f"Error on attempt {attempt + 1}/{self.max_retries}: {e}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -439,6 +475,7 @@ class VLLMChatClient(LLMClient):
                     raise
             
             except requests.exceptions.HTTPError as e:
+                self._record_failed_attempt(request_started)
                 if e.response.status_code == 429:
                     logger.warning(f"Rate limit exceeded (429) on attempt {attempt + 1}/{self.max_retries}. Waiting 120 seconds...")
                     if attempt < self.max_retries - 1:
@@ -454,6 +491,7 @@ class VLLMChatClient(LLMClient):
                     raise
             
             except Exception as e:
+                self._record_failed_attempt(request_started)
                 logger.error(f"Error on attempt {attempt + 1}/{self.max_retries}: URL={url}, Model={self.model_name}, Error={e}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -602,6 +640,7 @@ class OpenAIAPIClient(LLMClient):
                     raise ValueError("No choices in response")
             
             except requests.exceptions.Timeout:
+                self._record_failed_attempt(request_started, timeout=True)
                 logger.warning(f"Timeout on attempt {attempt + 1}/{self.max_retries}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -609,6 +648,7 @@ class OpenAIAPIClient(LLMClient):
                     raise
             
             except requests.exceptions.HTTPError as e:
+                self._record_failed_attempt(request_started)
                 if e.response.status_code == 429:
                     logger.warning(f"Rate limit exceeded (429) on attempt {attempt + 1}/{self.max_retries}. Waiting 120 seconds...")
                     if attempt < self.max_retries - 1:
@@ -624,6 +664,7 @@ class OpenAIAPIClient(LLMClient):
                     raise
             
             except Exception as e:
+                self._record_failed_attempt(request_started)
                 logger.error(f"Error on attempt {attempt + 1}/{self.max_retries}: {e}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
@@ -736,6 +777,7 @@ class LiteLLMClient(LLMClient):
                     raw_response=raw_response,
                 )
             except Exception as exc:
+                self._record_failed_attempt(request_started)
                 if attempt >= self.max_retries - 1:
                     raise
                 logger.warning(
