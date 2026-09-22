@@ -20,7 +20,14 @@
         "seed": 7,
         "commit_sha": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
         "freeze_tag": "exp-freeze-2026-09-22",
+        "runtime_freeze_commit": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
+        "runtime_freeze_tag": "exp-freeze-2026-09-22",
+        "runtime_freeze_match_status": "matched",
+        "observed_runtime_freeze_commit": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
+        "observed_runtime_freeze_tag": "exp-freeze-2026-09-22",
         "generations": 2,
+        "case_count": 3,
+        "run_status": "complete",
         "run_dir": "demo/static",
         "scenario": "ecommerce_refund",
         "split_strategy": "instance_holdout",
@@ -39,6 +46,7 @@
         "action_execution": 0.5,
         "goal_fulfillment": 0.5,
         "legitimate_failures": 2,
+        "legitimate_failure_rate": 0.5,
         "unique_failure_signatures": 1,
         "requests": 38,
         "input_tokens": 11342,
@@ -125,9 +133,15 @@
       "service_candidates": [],
       "weakness_frontier": [ { "generation": 0, "sop_node": "shipping_verification", "failure_rate": 0.5, "unique_customer_strategies": 1 }, { "generation": 1, "sop_node": "shipping_verification", "failure_rate": 0.5, "unique_customer_strategies": 1 } ],
       "failure_signatures": ["failure_missing_order_id"],
+      "failure_analysis": {
+        "unique_count": 1,
+        "legitimate_failure_count": 1,
+        "signatures": [{ "signature_id": "failure_missing_order_id", "count": 1, "first_seen_generation": 1, "last_seen_generation": 1, "error_types": ["missed_backend_verification"], "sop_nodes": ["shipping_verification"], "tools": ["query_order"], "customer_policy_ids": [], "service_policy_ids": [], "representative_episode_ids": ["demo-static-failure"], "new": true, "repeated": false }],
+        "trajectory": [{ "generation": 0, "new_signatures": [], "repeated_signatures": [], "new_count": 0, "repeated_count": 0 }, { "generation": 1, "new_signatures": ["failure_missing_order_id"], "repeated_signatures": [], "new_count": 1, "repeated_count": 0 }]
+      },
       "heldout": null,
       "fresh_adversary": [],
-      "completeness": { "metrics": true, "split_manifest": true, "episodes": true, "traces": true, "candidate_provenance": null, "valid_invalid_separated": true, "heldout_not_used_by_evolver": null }
+      "completeness": { "metrics": true, "split_manifest": true, "episodes": true, "traces": true, "candidate_provenance": null, "valid_invalid_separated": true, "heldout_not_used_by_evolver": null, "artifacts": { "provenance": "confirmed", "split_manifest": "confirmed", "generations": "confirmed", "customer_candidates": "confirmed", "service_gate": "not_applicable", "raw_trace": "confirmed", "orchestration_metrics": "confirmed", "heldout": "not_evaluated", "fresh_adversary": "not_evaluated" } }
     },
     {
       "id": "customer-only",
@@ -139,7 +153,14 @@
         "seed": 7,
         "commit_sha": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
         "freeze_tag": "exp-freeze-2026-09-22",
+        "runtime_freeze_commit": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
+        "runtime_freeze_tag": "exp-freeze-2026-09-22",
+        "runtime_freeze_match_status": "matched",
+        "observed_runtime_freeze_commit": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
+        "observed_runtime_freeze_tag": "exp-freeze-2026-09-22",
         "generations": 2,
+        "case_count": 3,
+        "run_status": "complete",
         "run_dir": "demo/customer-only",
         "scenario": "ecommerce_refund",
         "split_strategy": "instance_holdout",
@@ -148,7 +169,7 @@
         "judge_in_evolution": false,
         "candidate_counts": { "customer": 1, "service": 0 }
       },
-      "metrics": { "episodes": 4, "valid_episodes": 4, "invalid_episodes": 0, "valid_episode_rate": 1, "invalid_rate": 0, "task_success": 0.25, "action_execution": 0.25, "goal_fulfillment": 0.25, "legitimate_failures": 3, "unique_failure_signatures": 2, "requests": 64, "input_tokens": 19850, "output_tokens": 2810, "tokens": 22660, "latency_seconds": 142.7, "timeouts": 0, "provider_failures": 0, "retries": 2 },
+      "metrics": { "episodes": 4, "valid_episodes": 4, "invalid_episodes": 0, "valid_episode_rate": 1, "invalid_rate": 0, "task_success": 0.25, "action_execution": 0.25, "goal_fulfillment": 0.25, "legitimate_failures": 3, "legitimate_failure_rate": 0.75, "unique_failure_signatures": 2, "requests": 64, "input_tokens": 19850, "output_tokens": 2810, "tokens": 22660, "latency_seconds": 142.7, "timeouts": 0, "provider_failures": 0, "retries": 2 },
       "generation_metrics": [ { "generation": 0, "episodes": 2, "valid_rate": 1, "task_success": 0.5, "action_execution": 0.5, "goal_fulfillment": 0.5, "unique_failure_signatures": 1, "legitimate_failures": 1 }, { "generation": 1, "episodes": 2, "valid_rate": 1, "task_success": 0, "action_execution": 0, "goal_fulfillment": 0, "unique_failure_signatures": 2, "legitimate_failures": 2 } ],
       "episodes": [
         {
@@ -186,9 +207,15 @@
       "service_candidates": [],
       "weakness_frontier": [ { "generation": 0, "sop_node": "shipping_verification", "failure_rate": 0.5, "unique_customer_strategies": 1 }, { "generation": 1, "sop_node": "shipping_verification", "failure_rate": 1, "unique_customer_strategies": 2 } ],
       "failure_signatures": ["failure_missing_order_id", "failure_claimed_action"],
+      "failure_analysis": {
+        "unique_count": 1,
+        "legitimate_failure_count": 1,
+        "signatures": [{ "signature_id": "failure_missing_order_id", "count": 1, "first_seen_generation": 0, "last_seen_generation": 0, "error_types": ["missed_backend_verification"], "sop_nodes": ["shipping_verification"], "tools": ["query_order"], "customer_policy_ids": [], "service_policy_ids": [], "representative_episode_ids": ["demo-customer-failure"], "new": true, "repeated": false }],
+        "trajectory": [{ "generation": 0, "new_signatures": ["failure_missing_order_id"], "repeated_signatures": [], "new_count": 1, "repeated_count": 0 }]
+      },
       "heldout": null,
       "fresh_adversary": [],
-      "completeness": { "metrics": true, "split_manifest": true, "episodes": true, "traces": true, "candidate_provenance": null, "valid_invalid_separated": true, "heldout_not_used_by_evolver": null }
+      "completeness": { "metrics": true, "split_manifest": true, "episodes": true, "traces": true, "candidate_provenance": null, "valid_invalid_separated": true, "heldout_not_used_by_evolver": null, "artifacts": { "provenance": "confirmed", "split_manifest": "confirmed", "generations": "confirmed", "customer_candidates": "confirmed", "service_gate": "not_applicable", "raw_trace": "confirmed", "orchestration_metrics": "confirmed", "heldout": "not_evaluated", "fresh_adversary": "not_evaluated" } }
     },
     {
       "id": "coevolution",
@@ -200,7 +227,14 @@
         "seed": 7,
         "commit_sha": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
         "freeze_tag": "exp-freeze-2026-09-22",
+        "runtime_freeze_commit": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
+        "runtime_freeze_tag": "exp-freeze-2026-09-22",
+        "runtime_freeze_match_status": "matched",
+        "observed_runtime_freeze_commit": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
+        "observed_runtime_freeze_tag": "exp-freeze-2026-09-22",
         "generations": 2,
+        "case_count": 3,
+        "run_status": "complete",
         "run_dir": "demo/coevolution",
         "scenario": "ecommerce_refund",
         "split_strategy": "instance_holdout",
@@ -209,7 +243,7 @@
         "judge_in_evolution": false,
         "candidate_counts": { "customer": 2, "service": 2 }
       },
-      "metrics": { "episodes": 4, "valid_episodes": 4, "invalid_episodes": 0, "valid_episode_rate": 1, "invalid_rate": 0, "task_success": 0.75, "action_execution": 0.75, "goal_fulfillment": 0.75, "legitimate_failures": 1, "unique_failure_signatures": 2, "requests": 112, "input_tokens": 43720, "output_tokens": 6120, "tokens": 49840, "latency_seconds": 288.4, "timeouts": 0, "provider_failures": 0, "retries": 3 },
+      "metrics": { "episodes": 4, "valid_episodes": 4, "invalid_episodes": 0, "valid_episode_rate": 1, "invalid_rate": 0, "task_success": 0.75, "action_execution": 0.75, "goal_fulfillment": 0.75, "legitimate_failures": 1, "legitimate_failure_rate": 0.25, "unique_failure_signatures": 2, "requests": 112, "input_tokens": 43720, "output_tokens": 6120, "tokens": 49840, "latency_seconds": 288.4, "timeouts": 0, "provider_failures": 0, "retries": 3 },
       "generation_metrics": [ { "generation": 0, "episodes": 2, "valid_rate": 1, "task_success": 0.5, "action_execution": 0.5, "goal_fulfillment": 0.5, "unique_failure_signatures": 1, "legitimate_failures": 1 }, { "generation": 1, "episodes": 2, "valid_rate": 1, "task_success": 1, "action_execution": 1, "goal_fulfillment": 1, "unique_failure_signatures": 1, "legitimate_failures": 0 } ],
       "episodes": [
         {
@@ -278,9 +312,15 @@
       "service_candidates": [ { "generation": 0, "accepted": false, "delta": 0.0, "reason": "insufficient_adversarial_improvement", "candidate_count": 2, "provenance_present": true, "candidates": [ { "patch_id": "patch-g0-1", "service_policy_id": "service_policy_g0_1", "accepted": false, "evaluation_status": "valid", "reason": "insufficient_adversarial_improvement", "delta": 0.0, "source_failure_ids": ["failure_missing_order_id"], "patch": { "rule_category": "VERIFICATION", "rule_text": "Verify the order before action." } }, { "patch_id": "patch-g0-2", "service_policy_id": "service_policy_g0_2", "accepted": false, "evaluation_status": "rejected", "reason": "normal_user_regression", "delta": 0.02, "source_failure_ids": ["failure_missing_order_id"], "patch": { "rule_category": "COMMUNICATION", "rule_text": "Ask for the identifier before querying." } } ] }, { "generation": 1, "accepted": true, "delta": 0.35, "reason": "latest_attack_improved_without_regression", "candidate_count": 2, "provenance_present": true, "candidates": [ { "patch_id": "patch-g1-1", "service_policy_id": "service_policy_g1_1", "accepted": true, "evaluation_status": "valid", "reason": "latest_attack_improved_without_regression", "delta": 0.35, "source_failure_ids": ["failure_missing_order_id"], "patch": { "rule_category": "ACTION_GROUNDING", "rule_text": "When order_id is unknown or empty, ask the customer first; call query_order only after a non-empty identifier is received." } }, { "patch_id": "patch-g1-2", "service_policy_id": "service_policy_g1_2", "accepted": false, "evaluation_status": "invalid", "reason": "output_truncated", "delta": null, "invalid_reasons": ["output_truncated"], "source_failure_ids": ["failure_missing_order_id"], "patch": { "rule_category": "TOOL_USE", "rule_text": "Use only grounded tool arguments." } } ] } ],
       "weakness_frontier": [ { "generation": 0, "sop_node": "shipping_verification", "failure_rate": 0.5, "unique_customer_strategies": 1 }, { "generation": 1, "sop_node": "document_check", "failure_rate": 0, "unique_customer_strategies": 2 } ],
       "failure_signatures": ["failure_missing_order_id", "failure_claimed_action"],
+      "failure_analysis": {
+        "unique_count": 1,
+        "legitimate_failure_count": 1,
+        "signatures": [{ "signature_id": "failure_missing_order_id", "count": 1, "first_seen_generation": 0, "last_seen_generation": 0, "error_types": ["missed_backend_verification"], "sop_nodes": ["shipping_verification"], "tools": ["query_order"], "customer_policy_ids": [], "service_policy_ids": ["service_policy_g0_1"], "representative_episode_ids": ["demo-coevo-failure"], "new": true, "repeated": false }],
+        "trajectory": [{ "generation": 0, "new_signatures": ["failure_missing_order_id"], "repeated_signatures": [], "new_count": 1, "repeated_count": 0 }, { "generation": 1, "new_signatures": [], "repeated_signatures": [], "new_count": 0, "repeated_count": 0 }]
+      },
       "heldout": null,
       "fresh_adversary": [],
-      "completeness": { "metrics": true, "split_manifest": true, "episodes": true, "traces": true, "candidate_provenance": true, "valid_invalid_separated": true, "heldout_not_used_by_evolver": null }
+      "completeness": { "metrics": true, "split_manifest": true, "episodes": true, "traces": true, "candidate_provenance": true, "valid_invalid_separated": true, "heldout_not_used_by_evolver": null, "artifacts": { "provenance": "confirmed", "split_manifest": "confirmed", "generations": "confirmed", "customer_candidates": "confirmed", "service_gate": "confirmed", "raw_trace": "confirmed", "orchestration_metrics": "confirmed", "heldout": "not_evaluated", "fresh_adversary": "not_evaluated" } }
     }
   ]
 }

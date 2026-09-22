@@ -17,8 +17,10 @@ npm run dev
 
 Open the URL printed by Vite, normally `http://localhost:5173`.
 
-The UI initially loads `public/data/demo.json`. The dataset is explicitly
-marked `DEMO` and must not be treated as a real experiment result.
+The UI first tries to load `public/data/runs.json` (the output of the exporter)
+and falls back to `public/data/demo.json` when that file is absent. The demo
+dataset is explicitly marked `DEMO` and must not be treated as a real
+experiment result.
 
 ## Export real run artifacts
 
@@ -32,6 +34,36 @@ Run from the repository root:
   --model deepseek-v4-flash \
   --provider InferAI \
   --output dashboard/public/data/runs.json
+```
+
+For formal artifacts, keep the runtime and protocol provenance explicit when
+the run itself does not record it:
+
+```bash
+.venv/bin/python scripts/analyze_evolution_trajectory.py \
+  --run coevolution=results/formal_20260923_coevolution_seed07 \
+  --output /tmp/evosage-trajectory.json
+
+.venv/bin/python scripts/export_dashboard_data.py \
+  --run coevolution=results/formal_20260923_coevolution_seed07 \
+  --model deepseek-v4-flash \
+  --provider InferAI \
+  --analysis coevolution=/tmp/evosage-trajectory.json \
+  --formal-protocol-commit <formal-protocol-sha> \
+  --formal-protocol-tag <formal-protocol-tag> \
+  --output dashboard/public/data/runs.json
+```
+
+Both tools are read-only artifact analysis. The trajectory analyzer and
+exporter do not invoke a model, evaluator, scorer, or experiment runner, and
+they do not rescore raw dialogue. The normal workflow is:
+
+```text
+completed run artifacts
+  -> analyze_evolution_trajectory.py (optional offline analysis)
+  -> export_dashboard_data.py
+  -> dashboard/public/data/runs.json
+  -> npm run dev
 ```
 
 The exporter only reads structured JSON/JSONL artifacts. Trace files are
@@ -48,10 +80,22 @@ The dashboard can display missing held-out/fresh-adversary artifacts as
 
 - Overview: run metadata, compact metrics, comparison and featured failure.
 - Experiments: table-first comparison of selected runs.
-- Evolution: generation timeline for Customer and Service lanes.
+- Evolution: generation timeline for Customer, failure surface, and Service lanes.
 - Episodes: filterable trace list and episode detail panel.
-- Failures: legitimate versus invalid evaluation explorer.
-- Diagnostics: request, token, latency, provider and reproducibility checks.
+- Failures: aggregated legitimate-failure signatures; invalid evaluations stay separate.
+- Robustness: latest/replay/normal/held-out/fresh artifact-backed checks.
+- Diagnostics: request, token, latency, provider, artifact, and reproducibility checks.
+
+The Evolution page is compatible with the formal 3/1/3 search protocol
+(Customer candidate count 3, Customer elite count 1, Service candidate count 3,
+with replay count read from artifacts). It displays all persisted candidate
+provenance and gate outcomes rather than inferring outcomes from text. Missing
+held-out or fresh-adversary artifacts are displayed as `Not evaluated`, never
+as zero.
+
+Generations are trajectory steps, not independent statistical samples. Any
+statistical claim must be made offline using independent cases, seeds, and
+repetitions from the experiment plan.
 
 The layout intentionally uses a narrow sidebar, compact tabs, subtle borders,
 table-first density and a vertical generation timeline. It borrows the
