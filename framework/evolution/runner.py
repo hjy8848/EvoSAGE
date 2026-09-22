@@ -16,6 +16,7 @@ from .customer_evolver import CustomerEvolver
 from .customer_policy import CustomerPolicyValidator
 from .customer_selector import CustomerSelector
 from .evaluator_adapter import BudgetedEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
+from .generation_protocol import GenerationProtocolError, PROTOCOL_RETRY_LIMIT
 from .persistence import RunStore
 from .reporting import generate_report
 from .schemas import CustomerPolicy, DefenseRecord, FailureSignature, ServicePolicy
@@ -60,6 +61,27 @@ class EvolutionRunner:
         self.defense_archive = DefenseArchive(self.store.run_dir / "archives" / "defenses.jsonl")
         self.frontier = WeaknessFrontier()
         self._generation_wall_times: dict[str, float] = {}
+        self._active_generation: Optional[int] = None
+
+    def _persist_evolver_record(self, generation: int, kind: str, **extra) -> None:
+        """Persist structured-generation provenance in the authoritative run dir."""
+        evolver = self.customer_evolver if kind == "customer" else self.service_evolver
+        record = getattr(evolver, "last_generation_record", None)
+        if not record:
+            return
+        payload = json.loads(json.dumps(record, ensure_ascii=False))
+        payload["generation"] = generation
+        payload.update(extra)
+        self.store.write_json(
+            f"generations/gen_{generation:03d}/{kind}_generation.json",
+            payload,
+        )
+
+    def _persist_pending_evolver_records(self) -> None:
+        if self._active_generation is None:
+            return
+        self._persist_evolver_record(self._active_generation, "customer")
+        self._persist_evolver_record(self._active_generation, "service")
 
     @classmethod
     def resolve_run_dir(cls, config: EvolutionConfig) -> tuple[Path, bool]:
@@ -215,13 +237,17 @@ class EvolutionRunner:
             # the failure class in the same authoritative run directory so a
             # partial experiment remains auditable.
             try:
+                self._persist_pending_evolver_records()
                 metrics = self._runtime_stats()
+                inconclusive = isinstance(exc, GenerationProtocolError)
                 metrics.update({
-                    "run_status": "failed",
+                    "run_status": "inconclusive" if inconclusive else "failed",
                     "failure_type": type(exc).__name__,
                     "failure_message": str(exc),
                     "wall_time_seconds": time.monotonic() - run_started,
                 })
+                if inconclusive:
+                    metrics["inconclusive_reason"] = str(exc)
                 self.store.write_json("analysis/orchestration_metrics.json", metrics)
             except Exception:
                 # Never hide the original provider or evaluation exception if
@@ -252,6 +278,8 @@ class EvolutionRunner:
                 or getattr(self.service_evolver, "require_patch_generator", False)
             ),
             "customer_adversary_access": self.config.customer.adversary_access,
+            "token_budget": asdict(self.config.evaluation.token_budget),
+            "evolver_protocol_retry_limit": PROTOCOL_RETRY_LIMIT,
             "requested_output_dir": str(self.requested_output_dir),
             "run_dir": str(self.store.run_dir),
             "fresh_run_isolated": self.fresh_run_isolated,
@@ -265,6 +293,7 @@ class EvolutionRunner:
             self.store.write_json("environment/initial_service_policy.json", ServicePolicy().to_dict())
         history = []
         for generation in range(start, self.config.max_generations):
+            self._active_generation = generation
             generation_started = time.monotonic()
             gen_dir = self.store.generation_dir(generation)
             baseline_customer = customer
@@ -293,6 +322,13 @@ class EvolutionRunner:
                     "rejections": list(getattr(self.customer_evolver, "last_rejections", [])),
                     "source_failures": [failure.to_dict() for failure in prior_failures],
                 })
+                self._persist_evolver_record(
+                    generation,
+                    "customer",
+                    selected_policy=customer.to_dict(),
+                    selected_policy_id=customer.policy_id,
+                    scores=[score.to_dict() for score in scores],
+                )
                 selected_episodes = self.evaluator.evaluate(customer, service, splits.evolution, "evolution", generation, "selected_customer")
                 signatures = [
                     FailureSignature.from_episode(item)
@@ -323,6 +359,17 @@ class EvolutionRunner:
                     "patch": patch.to_dict() if patch else None,
                     "candidates": list(getattr(self.service_evolver, "last_candidate_records", [])),
                 })
+                self._persist_evolver_record(
+                    generation,
+                    "service",
+                    selected_policy=service.to_dict(),
+                    selected_policy_id=service.policy_id,
+                    gate={
+                        "accepted": decision.accepted,
+                        "reason": decision.reason,
+                        "delta": decision.delta,
+                    },
+                )
                 if decision.accepted and patch:
                     before = getattr(self.service_evolver, "last_baseline_metrics", {})
                     after = getattr(self.service_evolver, "last_selected_metrics", {})

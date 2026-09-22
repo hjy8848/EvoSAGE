@@ -24,7 +24,8 @@ from framework.evolution.service_gate import ServiceGate
 from framework.evolution.service_policy import ServicePolicySanitizer
 from framework.evolution.split_manager import SplitManager
 from framework.evolution.weakness_frontier import WeaknessFrontier
-from framework.llm_integration.llm_client import LiteLLMClient
+from framework.evolution.generation_protocol import GenerationProtocolError
+from framework.llm_integration.llm_client import LLMResponse, LiteLLMClient
 from framework.models import UserProfile
 
 
@@ -763,6 +764,146 @@ def test_llm_generators_return_valid_structured_candidates_without_api():
     patch = LLMServicePatchGenerator(FakeClient('[{"category":"VERIFICATION","text":"Verify authoritative results before deciding.","rationale":"failure-driven"}]')).generate(ServicePolicy(), [], 1, 1)
     assert generated[0].strategy_tags == ["authority_challenge"]
     assert patch[0].rules[0].category == "VERIFICATION"
+
+
+def _provider_json_response(text, *, finish_reason="stop", completion_tokens=100,
+                            reasoning_tokens=None):
+    usage = {
+        "prompt_tokens": 11,
+        "completion_tokens": completion_tokens,
+    }
+    if reasoning_tokens is not None:
+        usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+    return LLMResponse(
+        text=text,
+        model="fake-model",
+        metadata={
+            "finish_reason": finish_reason,
+            "usage": usage,
+            "latency_seconds": 0.01,
+        },
+        raw_response={
+            "id": "resp-test",
+            "choices": [{
+                "finish_reason": finish_reason,
+                "message": {"role": "assistant", "content": text},
+            }],
+            "usage": usage,
+        },
+    )
+
+
+class _SequenceClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def generate(self, **kwargs):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+def _valid_customer_json():
+    return ('[{"name":"authority","description":"ask for an explanation",'
+            '"strategy_tags":["authority_challenge"],'
+            '"disclosure_strategy":"answer necessary questions",'
+            '"pressure_strategy":"remain firm",'
+            '"contradiction_strategy":"ask for clarification",'
+            '"response_to_verification":"acknowledge the result",'
+            '"response_to_rejection":"request a reason"}]')
+
+
+def test_customer_generation_retries_protocol_truncation_and_persists_attempts():
+    client = _SequenceClient([
+        _provider_json_response("", finish_reason="length", completion_tokens=4096, reasoning_tokens=4096),
+        _provider_json_response(_valid_customer_json()),
+    ])
+    generator = LLMCustomerPolicyGenerator(client, max_tokens=4096)
+    evolver = CustomerEvolver(strategy_generator=generator, require_strategy_generator=True)
+    candidates = evolver.propose(CustomerPolicy(), 0, count=1)
+    assert len(candidates) == 1
+    assert client.calls == 2
+    record = evolver.last_generation_record
+    assert record["status"] == "valid"
+    assert record["retry_count"] == 1
+    assert record["attempts"][0]["finish_reason"] == "length"
+    assert record["attempts"][0]["parse_status"] == "FAIL"
+    assert record["attempts"][1]["parse_status"] == "PASS"
+    assert record["attempts"][0]["reasoning_tokens"] == 4096
+    assert evolver.last_candidate_records[0]["accepted"] is True
+
+
+def test_customer_generation_two_protocol_failures_is_inconclusive_not_fitness_zero():
+    client = _SequenceClient([
+        _provider_json_response("", finish_reason="length", completion_tokens=4096, reasoning_tokens=4096),
+        _provider_json_response("", finish_reason="length", completion_tokens=4096, reasoning_tokens=4096),
+    ])
+    generator = LLMCustomerPolicyGenerator(client, max_tokens=4096)
+    evolver = CustomerEvolver(strategy_generator=generator, require_strategy_generator=True)
+    with pytest.raises(GenerationProtocolError, match="customer_generation_invalid:output_truncated"):
+        evolver.propose(CustomerPolicy(), 0, count=1)
+    assert client.calls == 2
+    assert evolver.last_generation_record["status"] == "inconclusive"
+    assert evolver.last_generation_record["reason"] == "customer_generation_invalid:output_truncated"
+    assert len(evolver.last_generation_record["attempts"]) == 2
+
+
+def test_customer_validator_rejection_does_not_trigger_protocol_retry():
+    invalid = _valid_customer_json().replace("authority_challenge", "not_a_business_strategy")
+    client = _SequenceClient([_provider_json_response(invalid)])
+    generator = LLMCustomerPolicyGenerator(client, max_tokens=4096)
+    evolver = CustomerEvolver(strategy_generator=generator, require_strategy_generator=True)
+    with pytest.raises(RuntimeError, match="no valid candidates"):
+        evolver.propose(CustomerPolicy(), 0, count=1)
+    assert client.calls == 1
+    assert evolver.last_generation_record["status"] == "candidate_rejected"
+    candidate = evolver.last_candidate_records[0]
+    assert candidate["accepted"] is False
+    assert any(
+        check["status"] == "FAIL" and "unapproved strategy tag" in check["exact_reason"]
+        for check in candidate["validator"]
+    )
+
+
+def test_service_generation_retries_protocol_truncation_and_keeps_raw_candidate():
+    client = _SequenceClient([
+        _provider_json_response("", finish_reason="length", completion_tokens=4096, reasoning_tokens=4096),
+        _provider_json_response('[{"category":"VERIFICATION","text":"Verify before acting.","rationale":"ground the action"}]'),
+    ])
+    generator = LLMServicePatchGenerator(client, max_tokens=8192)
+    patches = generator.generate(ServicePolicy(), [], 0, 1)
+    assert len(patches) == 1
+    assert client.calls == 2
+    assert generator.last_generation_record["retry_count"] == 1
+    assert generator.last_generation_record["attempts"][0]["finish_reason"] == "length"
+    assert generator.last_generation_record["attempts"][1]["parse_status"] == "PASS"
+    assert generator.last_generation_record["candidates"][0]["raw_candidate"]["category"] == "VERIFICATION"
+
+
+def test_runner_persists_inconclusive_customer_generation_provenance(tmp_path):
+    client = _SequenceClient([
+        _provider_json_response("", finish_reason="length", completion_tokens=4096, reasoning_tokens=4096),
+        _provider_json_response("", finish_reason="length", completion_tokens=4096, reasoning_tokens=4096),
+    ])
+    config = EvolutionConfig(
+        max_generations=1,
+        splits=SplitConfig(max_cases=3),
+        persistence=PersistenceConfig(output_dir=str(tmp_path / "run")),
+    )
+    customer_evolver = CustomerEvolver(
+        strategy_generator=LLMCustomerPolicyGenerator(client, max_tokens=4096),
+        require_strategy_generator=True,
+    )
+    runner = EvolutionRunner(config, evaluator=MockEpisodeEvaluator(), customer_evolver=customer_evolver)
+    with pytest.raises(GenerationProtocolError):
+        runner.run()
+    generation_record = tmp_path / "run" / "generations" / "gen_000" / "customer_generation.json"
+    metrics_path = tmp_path / "run" / "analysis" / "orchestration_metrics.json"
+    assert generation_record.exists()
+    assert json.loads(generation_record.read_text())["status"] == "inconclusive"
+    assert len(json.loads(generation_record.read_text())["attempts"]) == 2
+    assert json.loads(metrics_path.read_text())["run_status"] == "inconclusive"
+    assert not (tmp_path / "run" / "generations" / "gen_000" / "COMPLETE.json").exists()
 
 
 def test_real_mode_does_not_silently_fallback_to_templates():

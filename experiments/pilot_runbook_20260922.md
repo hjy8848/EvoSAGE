@@ -193,3 +193,52 @@ After the main pilot and only in separate run directories:
 Both must reuse the same CaseSpec, CustomerPolicy, model and seed/config. They
 must not change evaluator or scoring and must be reported separately from the
 main experiment.
+
+## Calibrated protocol pilot
+
+The original pilot configs remain historical and are not overwritten. The
+standalone `deepseek-v4-flash` Customer Evolver probe showed that a 4096-token
+structured-generation budget can be exhausted by reasoning before JSON is
+returned. The calibrated pilot therefore uses:
+
+- Agent: 4096
+- Customer Evolver: 8192
+- Service Evolver: 8192
+- User: 512
+- Judge: 1024
+- Evolver protocol retry: at most one retry, only for truncation/empty or
+  malformed structured output, timeout, or provider error
+
+These are protocol-calibration settings, not settings selected from formal
+research results. A protocol-invalid generation is marked inconclusive and
+is not treated as fitness zero or a legitimate business failure.
+
+Run the new one-generation pilots in this order:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/run_adversarial_coevolution.py \
+  --config configs/ecommerce_pilot_20260922_calibrated_static.yaml \
+  --real --model deepseek-v4-flash --api-url https://inferaiapi.com/v1 --client openai_api
+
+PYTHONPATH=. .venv/bin/python scripts/run_adversarial_coevolution.py \
+  --config configs/ecommerce_pilot_20260922_calibrated_customer_only.yaml \
+  --real --model deepseek-v4-flash --api-url https://inferaiapi.com/v1 --client openai_api
+
+PYTHONPATH=. .venv/bin/python scripts/run_adversarial_coevolution.py \
+  --config configs/ecommerce_pilot_20260922_calibrated_coevolution.yaml \
+  --real --model deepseek-v4-flash --api-url https://inferaiapi.com/v1 --client openai_api
+```
+
+Expected output directories:
+
+- `results/pilot_20260922_calibrated_static`
+- `results/pilot_20260922_calibrated_customer_only`
+- `results/pilot_20260922_calibrated_coevolution`
+
+For Customer-only, inspect
+`generations/gen_000/customer_generation.json` before proceeding. At least
+one candidate must be recoverable with a validator PASS, selected policy,
+fitness and source failure IDs. A first invalid attempt followed by a valid
+retry is valid with retry provenance; two invalid attempts are INCONCLUSIVE and
+block the co-evolution pilot. If Customer-only passes, start co-evolution
+immediately with the same calibrated budgets.

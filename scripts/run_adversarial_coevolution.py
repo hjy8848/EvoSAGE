@@ -73,6 +73,9 @@ def main() -> int:
         evolution_client = get_llm_client(
             args.client, api_key=api_key, base_url=args.api_url, model_name=args.model,
             timeout=config.evaluation.api_timeout,
+            # Structured Evolver retries are owned by generation_protocol so
+            # each logical attempt has one provider request at most.
+            max_retries=1,
         )
         customer_evolver = CustomerEvolver(
             config.seed,

@@ -1,0 +1,35 @@
+{
+  "purpose": "Protocol-validity calibration pilot; not a formal statistical result.",
+  "parent_freeze": {
+    "commit": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
+    "tag": "exp-freeze-2026-09-22"
+  },
+  "calibration_basis": {
+    "source": "standalone Customer Evolver probe",
+    "model": "deepseek-v4-flash",
+    "provider": "InferAI",
+    "observation": "At customer_evolver=4096, one sample stopped with valid JSON while two samples exhausted the completion budget with empty content and reasoning_tokens=4096.",
+    "interpretation": "The structured policy generator needs a larger reasoning/output budget; this is protocol calibration, not tuning on formal experiment results."
+  },
+  "protocol": {
+    "agent_max_tokens": 4096,
+    "customer_evolver_max_tokens": 8192,
+    "service_evolver_max_tokens": 8192,
+    "user_max_tokens": 512,
+    "judge_max_tokens": 1024,
+    "protocol_retry_limit": 1,
+    "retry_on": ["output_truncated", "empty_content", "malformed_json", "timeout", "provider_error"],
+    "retry_on_validator_rejection": false
+  },
+  "configs": {
+    "static": "configs/ecommerce_pilot_20260922_calibrated_static.yaml",
+    "customer_only": "configs/ecommerce_pilot_20260922_calibrated_customer_only.yaml",
+    "coevolution": "configs/ecommerce_pilot_20260922_calibrated_coevolution.yaml"
+  },
+  "pilot_runs": {
+    "static": "results/pilot_20260922_calibrated_static",
+    "customer_only": "results/pilot_20260922_calibrated_customer_only",
+    "coevolution": "results/pilot_20260922_calibrated_coevolution"
+  },
+  "interpretation": "A first-attempt protocol failure followed by a successful retry is valid with retry provenance. Two protocol-invalid attempts are inconclusive and are not fitness-zero or legitimate business failures."
+}

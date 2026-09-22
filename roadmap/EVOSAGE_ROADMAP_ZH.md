@@ -786,3 +786,26 @@ Agent 提出 SOP 修改
 - 之后仍按 static → customer-only → coevolution 顺序运行，并单独统计 protocol-invalid 与 legitimate failure。
 
 在此之前，所有结果只能用于 orchestration/provider diagnosis，不能用于正式研究结论。
+
+## 结构化 Evolver 协议校准（2026-09-22）
+
+Standalone probe 显示 `deepseek-v4-flash` 的 Customer Evolver 在 `4096` completion budget 下存在明显的 reasoning 截断：3 次探针中 1 次生成合法 JSON，2 次以 `finish_reason=length` 结束，`content` 为空且 `reasoning_tokens=4096`。这被判定为 structured-generation protocol 风险，而不是 Customer fitness 或业务失败。
+
+因此建立独立的 calibrated pilot protocol，不覆盖旧配置：
+
+- Agent：`4096`（此前真实 static pilot 已验证，不提高到 8192）；
+- Customer Evolver：`8192`；
+- Service Evolver：`8192`；
+- User：`512`；Judge：`1024`；
+- Evolver protocol retry：最多一次，只针对截断、空响应、malformed JSON、timeout/provider error；正常 JSON 的 validator rejection 不重试。
+
+每次 Evolver generation 保存 `*_generation.json`，包括 prompt、每个 provider attempt、finish reason、token usage、reasoning tokens、raw content、parse diagnostics、request id/latency、candidate JSON、构造结果和拒绝原因；不保存 API key。两次 protocol-invalid 后状态为 `inconclusive`，不记 fitness=0、不进入 legitimate failure archive。
+
+新配置与 manifest：
+
+- `configs/ecommerce_pilot_20260922_calibrated_static.yaml`
+- `configs/ecommerce_pilot_20260922_calibrated_customer_only.yaml`
+- `configs/ecommerce_pilot_20260922_calibrated_coevolution.yaml`
+- `experiments/pilot_calibration_20260922.json`
+
+这些配置均为 1-generation protocol pilot，用来验证 provider 稳定性和 candidate provenance，不作为正式统计结果。旧 freeze `exp-freeze-2026-09-22` 保持不变；完成测试后需创建新的 calibrated freeze。Customer-only 通过后才允许立即运行 coevolution，之后不再因普通业务失败继续调 budget。

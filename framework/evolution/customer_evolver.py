@@ -9,6 +9,7 @@ import re
 
 from .customer_policy import CustomerPolicyValidator
 from .customer_selector import CustomerSelector
+from .generation_protocol import GenerationProtocolError, request_json_with_retry
 from .schemas import CustomerPolicy
 
 
@@ -35,11 +36,14 @@ class CustomerEvolver:
         self.strategy_generator = strategy_generator
         self.require_strategy_generator = require_strategy_generator
         self.last_rejections = []
+        self.last_candidate_records = []
+        self.last_generation_record = None
 
     def propose(self, incumbent: CustomerPolicy, generation: int, count: int = 5, source_failures=None,
                 service_policy=None, frontier=None, archive_summary=None, validation_cases=None) -> list[CustomerPolicy]:
         failures = list(source_failures or [])
         self.last_rejections = []
+        self.last_candidate_records = []
         if self.strategy_generator is not None:
             try:
                 generated = self.strategy_generator.generate(
@@ -47,27 +51,96 @@ class CustomerEvolver:
                     frontier=frontier, archive_summary=archive_summary,
                     generation=generation, count=count,
                 )
+                self.last_generation_record = copy.deepcopy(
+                    getattr(self.strategy_generator, "last_generation_record", None)
+                )
+            except GenerationProtocolError:
+                self.last_generation_record = copy.deepcopy(
+                    getattr(self.strategy_generator, "last_generation_record", None)
+                )
+                if self.require_strategy_generator:
+                    raise
+                generated = []
             except Exception as exc:
                 if self.require_strategy_generator:
                     raise RuntimeError("LLM customer policy generation failed in strict real mode") from exc
                 generated = []
             valid = []
+            candidate_records = list(
+                (self.last_generation_record or {}).get("candidates", [])
+            )
+            # Preserve schema-invalid candidates from the generator even
+            # though they do not produce a CustomerPolicy object.  They are
+            # protocol/candidate evidence, not silent drops.
+            self.last_candidate_records = list(candidate_records)
+            records_by_policy = {
+                item.get("policy_id"): item
+                for item in candidate_records
+                if item.get("policy_id")
+            }
             for policy in generated:
+                candidate_record = records_by_policy.setdefault(
+                    policy.policy_id,
+                    {
+                        "candidate_index": len(candidate_records) + 1,
+                        "raw_candidate": None,
+                        "policy_id": policy.policy_id,
+                        "schema_construction": {"status": "PASS"},
+                    },
+                )
+                checks = []
                 try:
                     self.validator.validate(policy)
-                    for case in validation_cases or []:
-                        case_spec = getattr(case, "case_spec", None)
-                        if isinstance(case_spec, dict):
-                            from ..backend.types import CaseSpec
-                            case_spec = CaseSpec(**copy.deepcopy(case_spec))
-                        self.validator.validate(policy, case_spec)
-                    valid.append(policy)
+                    checks.append({"check": "generic", "status": "PASS"})
                 except Exception as exc:
-                    self.last_rejections.append({"policy_id": policy.policy_id, "reason": str(exc)})
-                    continue
+                    checks.append({
+                        "check": "generic",
+                        "status": "FAIL",
+                        "exact_reason": str(exc),
+                    })
+                for case in validation_cases or []:
+                    case_spec = getattr(case, "case_spec", None)
+                    if isinstance(case_spec, dict):
+                        from ..backend.types import CaseSpec
+                        case_spec = CaseSpec(**copy.deepcopy(case_spec))
+                    try:
+                        self.validator.validate(policy, case_spec)
+                        checks.append({"check": "same_case", "status": "PASS"})
+                    except Exception as exc:
+                        checks.append({
+                            "check": "same_case",
+                            "status": "FAIL",
+                            "exact_reason": str(exc),
+                        })
+                candidate_record["constructed_policy"] = policy.to_dict()
+                candidate_record["validator"] = checks
+                candidate_record["accepted"] = all(
+                    check["status"] == "PASS" for check in checks
+                )
+                if candidate_record not in self.last_candidate_records:
+                    self.last_candidate_records.append(candidate_record)
+                if candidate_record["accepted"]:
+                    valid.append(policy)
+                else:
+                    failed_check = next(
+                        (check for check in checks if check.get("status") == "FAIL"),
+                        None,
+                    )
+                    self.last_rejections.append({
+                        "policy_id": policy.policy_id,
+                        "reason": (failed_check or {}).get("exact_reason", "candidate validation failed"),
+                    })
             if valid:
+                if self.last_generation_record is not None:
+                    self.last_generation_record["status"] = "valid"
+                    self.last_generation_record["accepted_candidate_count"] = len(valid)
+                    self.last_generation_record["candidates"] = self.last_candidate_records
                 return valid[:count]
             if self.require_strategy_generator:
+                if self.last_generation_record is not None:
+                    self.last_generation_record["status"] = "candidate_rejected"
+                    self.last_generation_record["reason"] = "customer_candidate_rejected:all_candidates"
+                    self.last_generation_record["candidates"] = self.last_candidate_records
                 raise RuntimeError("LLM customer policy generator returned no valid candidates")
         elif self.require_strategy_generator:
             raise RuntimeError("strict real mode requires an LLM customer policy generator")
@@ -133,6 +206,7 @@ class LLMCustomerPolicyGenerator:
         if adversary_access not in {"black_box", "white_box"}:
             raise ValueError("adversary_access must be black_box or white_box")
         self.adversary_access = adversary_access
+        self.last_generation_record = None
 
     def generate(self, incumbent, failures, service_policy, generation, count, frontier=None, archive_summary=None):
         failure_view = [
@@ -160,18 +234,61 @@ class LLMCustomerPolicyGenerator:
             f"Historical attack summary: {json.dumps(archive_summary or [], ensure_ascii=False)[:6000]}\n"
             f"Generate up to {count} distinct candidates."
         )
-        response = self.llm_client.generate(
-            prompt=prompt,
-            temperature=0.7,
-            max_tokens=self.max_tokens,
-        )
-        text = re.sub(r"^```(?:json)?|```$", "", response.text.strip(), flags=re.I | re.M).strip()
-        value = json.loads(text)
+        try:
+            value, generation_record = request_json_with_retry(
+                client=self.llm_client,
+                prompt=prompt,
+                role="customer",
+                max_tokens=self.max_tokens,
+                temperature=0.7,
+            )
+        except GenerationProtocolError as exc:
+            # The helper raises after the final attempt, so retain the full
+            # attempt provenance before propagating the inconclusive result.
+            self.last_generation_record = copy.deepcopy(exc.record)
+            raise
+        self.last_generation_record = generation_record
         if isinstance(value, dict):
             value = value.get("candidates", [value])
         policies = []
+        candidate_records = []
+        required_fields = {
+            "name", "description", "strategy_tags", "disclosure_strategy",
+            "pressure_strategy", "contradiction_strategy",
+            "response_to_verification", "response_to_rejection",
+        }
         for index, item in enumerate(value if isinstance(value, list) else []):
+            candidate_record = {
+                "candidate_index": index + 1,
+                "raw_candidate": item,
+                "policy_id": None,
+                "schema_construction": {"status": "PASS"},
+                "constructed_policy": None,
+                "validator": [],
+                "accepted": False,
+            }
+            candidate_records.append(candidate_record)
             if not isinstance(item, dict):
+                candidate_record["schema_construction"] = {
+                    "status": "FAIL",
+                    "reason": "candidate must be a JSON object",
+                }
+                continue
+            missing_fields = sorted(required_fields - set(item))
+            wrong_types = {}
+            if "strategy_tags" in item and not isinstance(item["strategy_tags"], list):
+                wrong_types["strategy_tags"] = type(item["strategy_tags"]).__name__
+            for field in required_fields - {"strategy_tags"}:
+                if field in item and not isinstance(item[field], str):
+                    wrong_types[field] = type(item[field]).__name__
+                elif field in item and not item[field].strip():
+                    wrong_types[field] = "empty_string"
+            if missing_fields or wrong_types:
+                candidate_record["schema_construction"] = {
+                    "status": "FAIL",
+                    "missing_fields": missing_fields,
+                    "wrong_types": wrong_types,
+                }
                 continue
             data = incumbent.to_dict()
             data.update({key: item[key] for key in item if key in data and key not in {"policy_id", "generation", "parent_policy_ids"}})
@@ -182,5 +299,10 @@ class LLMCustomerPolicyGenerator:
                 "mutation_rationale": "LLM-generated from abstract failure signatures",
                 "source_failure_ids": [item.signature_id for item in failures],
             })
-            policies.append(CustomerPolicy.from_dict(data))
+            policy = CustomerPolicy.from_dict(data)
+            candidate_record["policy_id"] = policy.policy_id
+            candidate_record["constructed_policy"] = policy.to_dict()
+            policies.append(policy)
+        generation_record["candidates"] = candidate_records
+        generation_record["response_candidate_count"] = len(candidate_records)
         return policies

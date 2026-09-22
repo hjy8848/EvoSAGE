@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import copy
 
 from .evaluator_adapter import aggregate_episode_metrics
+from .generation_protocol import GenerationProtocolError, request_json_with_retry
 from .schemas import ServicePatch, ServicePolicy, ServiceRule
 from .service_gate import ServiceGate
 from .service_policy import ServicePolicyCompiler, ServicePolicySanitizer
@@ -21,6 +23,7 @@ class ServiceEvolver:
         self.patch_generator = patch_generator
         self.require_patch_generator = require_patch_generator
         self.last_candidate_records = []
+        self.last_generation_record = None
         self.last_baseline_metrics = {}
         self.last_selected_metrics = {}
 
@@ -28,15 +31,36 @@ class ServiceEvolver:
         if self.patch_generator is not None:
             try:
                 generated = self.patch_generator.generate(policy, failures, generation, count, defense_summary, historical_summary)
+                self.last_generation_record = copy.deepcopy(
+                    getattr(self.patch_generator, "last_generation_record", None)
+                )
                 valid = []
                 for patch in generated:
                     try:
-                        valid.append(self.sanitizer.sanitize(patch))
-                    except Exception:
+                        sanitized = self.sanitizer.sanitize(patch)
+                        valid.append(sanitized)
+                        self._mark_generation_candidate(sanitized.patch_id, accepted=True)
+                    except Exception as exc:
+                        self._mark_generation_candidate(
+                            patch.patch_id,
+                            accepted=False,
+                            reason=f"service_candidate_rejected:{exc}",
+                        )
                         continue
                 if valid:
                     return valid[:count]
+                if self.last_generation_record is not None:
+                    self.last_generation_record["status"] = "candidate_rejected"
+                    self.last_generation_record["reason"] = "service_candidate_rejected:all_candidates"
             except Exception as exc:
+                self.last_generation_record = copy.deepcopy(
+                    getattr(self.patch_generator, "last_generation_record", None)
+                )
+                if isinstance(exc, GenerationProtocolError):
+                    if self.last_generation_record is not None:
+                        self.last_generation_record["status"] = "inconclusive"
+                    if self.require_patch_generator:
+                        raise
                 if self.require_patch_generator:
                     raise RuntimeError("LLM service patch generation failed in strict real mode") from exc
                 pass
@@ -64,6 +88,19 @@ class ServiceEvolver:
                                         rules=[rule], rationale="failure-driven structured patch",
                                         evidence_count=len(failures), source_failure_ids=[failure.signature_id for failure in failures]))
         return patches
+
+    def _mark_generation_candidate(self, patch_id: str, *, accepted: bool, reason: str | None = None) -> None:
+        """Annotate the raw generation record without changing gate semantics."""
+        if not self.last_generation_record:
+            return
+        for item in self.last_generation_record.get("candidates", []):
+            if item.get("patch_id") == patch_id:
+                item["accepted"] = accepted
+                item["candidate_validation"] = {
+                    "status": "PASS" if accepted else "FAIL",
+                    "exact_reason": reason,
+                }
+                return
 
     def evolve(self, incumbent, failures, normal_cases, adversarial_cases, evaluator, generation, count=5,
                customer_policy=None, replay_policies=None, replay_attack_count=0, defense_summary=None, historical_summary=None):
@@ -347,6 +384,7 @@ class LLMServicePatchGenerator:
         self.llm_client = llm_client
         self.max_tokens = max_tokens
         self.summary_limit = max(1, int(summary_limit))
+        self.last_generation_record = None
 
     def generate(self, policy, failures, generation, count, defense_summary=None, historical_summary=None):
         view = [{"errors": list(item.error_types), "node": item.sop_node,
@@ -371,19 +409,44 @@ class LLMServicePatchGenerator:
             f"Historical regression summary: {json.dumps(historical_summary or [], ensure_ascii=False)[:6000]}\n"
             f"Generate up to {count} distinct patches."
         )
-        response = self.llm_client.generate(
-            prompt=prompt,
-            temperature=0.3,
-            max_tokens=self.max_tokens,
-        )
-        text = re.sub(r"^```(?:json)?|```$", "", response.text.strip(), flags=re.I | re.M).strip()
-        value = json.loads(text)
+        try:
+            value, generation_record = request_json_with_retry(
+                client=self.llm_client,
+                prompt=prompt,
+                role="service",
+                max_tokens=self.max_tokens,
+                temperature=0.3,
+            )
+        except GenerationProtocolError as exc:
+            self.last_generation_record = copy.deepcopy(exc.record)
+            raise
+        self.last_generation_record = generation_record
         if isinstance(value, dict):
             value = value.get("patches", [value])
         source_ids = [item.signature_id for item in failures]
         patches = []
+        candidate_records = []
         for index, item in enumerate(value if isinstance(value, list) else []):
-            if not isinstance(item, dict) or not item.get("text"):
+            candidate_record = {
+                "candidate_index": index + 1,
+                "raw_candidate": item,
+                "patch_id": None,
+                "schema_construction": {"status": "PASS"},
+                "constructed_patch": None,
+                "accepted": False,
+            }
+            candidate_records.append(candidate_record)
+            if not isinstance(item, dict):
+                candidate_record["schema_construction"] = {
+                    "status": "FAIL",
+                    "reason": "candidate must be a JSON object",
+                }
+                continue
+            if not item.get("text") or not isinstance(item.get("text"), str):
+                candidate_record["schema_construction"] = {
+                    "status": "FAIL",
+                    "reason": "candidate text must be a non-empty string",
+                }
                 continue
             rule = ServiceRule(
                 rule_id=f"service_rule_g{generation}_llm_{index}",
@@ -393,9 +456,14 @@ class LLMServicePatchGenerator:
                 source_failure_signatures=source_ids,
                 generation_added=generation,
             )
-            patches.append(ServicePatch(
+            patch = ServicePatch(
                 patch_id=f"service_patch_g{generation}_llm_{index}", patch_type="add",
                 rules=[rule], rationale="LLM-derived structured patch", evidence_count=len(failures),
                 source_failure_ids=source_ids,
-            ))
+            )
+            candidate_record["patch_id"] = patch.patch_id
+            candidate_record["constructed_patch"] = patch.to_dict()
+            patches.append(patch)
+        generation_record["candidates"] = candidate_records
+        generation_record["response_candidate_count"] = len(candidate_records)
         return patches
