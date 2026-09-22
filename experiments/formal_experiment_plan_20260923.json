@@ -31,6 +31,27 @@
     },
     "protocol_retry_limit": 1
   },
+  "primary_formal_batch": {
+    "case_set_id": "10_cases_split_seed7_instances1",
+    "max_cases": 10,
+    "instances_per_path": 1,
+    "split_seed": 7,
+    "split_strategy": "instance_holdout",
+    "case_ids": [
+      "CASE-2AF05D6AAC",
+      "CASE-C341020DF4",
+      "CASE-F23D4EEDF3",
+      "CASE-9FE126D3BB",
+      "CASE-25A1A38EB5",
+      "CASE-6277E4A3BB",
+      "CASE-DC292F1A50",
+      "CASE-6EF3246E9A",
+      "CASE-22C26E346F",
+      "CASE-6548F38545"
+    ],
+    "split_counts": {"evolution": 6, "validation": 2, "heldout": 2},
+    "seed_semantics": "Top-level evolution seeds are 7 and 17; split_seed remains 7 for both runs so the case set is identical across seeds."
+  },
   "evolution_search": {
     "customer_candidate_count": 3,
     "customer_elite_count": 1,
@@ -72,7 +93,7 @@
     "first_formal_scale": "10_cases",
     "generations": 3,
     "seeds": [7, 17],
-    "reason": "Use the smallest coverage option that still exercises multiple SOP paths, then add cases before adding generations. Reconfirm provider quota against the coevolution estimate in the runbook before launch.",
+    "reason": "The first formal batch is locked to 10 cases, 3 generations and two seeds. A larger case set is an explicitly predeclared budget/time extension only; it cannot be triggered by observed effects or success rates.",
     "fallback": {
       "customer_candidate_count": 2,
       "customer_elite_count": 1,

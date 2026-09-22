@@ -9,6 +9,7 @@
     "api_url": "https://inferaiapi.com/v1",
     "client": "openai_api",
     "api_key_env": "OPENAI_API_KEY",
+    "formal_case_set_id": "10_cases_split_seed7_instances1",
     "parent_freeze_commit": "1fc5aadf4e9294ef14d59f8ca096943b6d38eb67",
     "parent_freeze_tag": "exp-freeze-2026-09-22-calibrated"
   },
@@ -31,7 +32,7 @@
     "validation_ratio": 0.2,
     "heldout_ratio": 0.2,
     "instances_per_path": 1,
-    "max_cases": null
+    "max_cases": 10
   },
   "evaluation": {
     "repetitions": 1,

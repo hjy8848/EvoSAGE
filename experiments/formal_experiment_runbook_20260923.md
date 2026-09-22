@@ -33,12 +33,22 @@ The three modes use the same:
 - Judge budget: `1024`
 - structured-generation retry limit: `1`
 
-The configuration templates use `max_cases: null` so case count is not frozen
-prematurely. `cases_per_candidate: 0` means “evaluate candidates on all
-evolution cases” in the current runner. Before a real run, copy the selected
-template to a coverage-specific config and set `splits.max_cases` and
-`splits.instances_per_path` together according to the 10/20/30-case option in
-`formal_experiment_plan_20260923.json`.
+The primary formal batch is now locked before any outcome is observed:
+
+- case set: `10_cases_split_seed7_instances1`
+- `max_cases`: `10`
+- `instances_per_path`: `1`
+- split seed: `7`
+- evolution/validation/held-out counts: `6/2/2`
+- exact case IDs: recorded in `formal_experiment_plan_20260923.json`
+
+Both top-level evolution seeds (`7` and `17`) use this same split seed and
+case set. Only the evolution seed changes between runs.
+
+The configuration templates now contain the locked primary batch. In all three
+templates, `cases_per_candidate: 0` means “evaluate candidates on all six
+evolution cases” in the current runner. The 20/30-case options remain
+predeclared budget/time extensions only and are not part of the primary batch.
 
 ## Config templates
 
@@ -46,9 +56,11 @@ template to a coverage-specific config and set `splits.max_cases` and
 - `configs/formal_20260923_customer_only.yaml`
 - `configs/formal_20260923_coevolution.yaml`
 
-The templates use seed `7` and `resume: false`. For seed `17`, make a copied
-config with the same settings and only change `seed`, `splits.seed`, and
-`persistence.output_dir`. Never reuse a completed run directory.
+The templates use top-level seed `7`, fixed `splits.seed=7`, and `resume: false`.
+For seed `17`, make a copied config with the same settings and change only the
+top-level `seed` and `persistence.output_dir`; keep `splits.seed=7` so both
+seeds evaluate the exact same ten cases. Never reuse a completed run
+directory.
 
 The three mode semantics are:
 
@@ -119,8 +131,16 @@ PYTHONPATH=. .venv/bin/python scripts/run_adversarial_coevolution.py \
   --api-url https://inferaiapi.com/v1 --client openai_api
 ```
 
-Run the modes with the same chosen coverage and seed set. Do not start a
-second generation or mode in a directory that contains a previous attempt.
+Run the modes in this order for seed `7`, then repeat for seed `17`:
+
+1. Static
+2. Customer-only
+3. Coevolution
+
+Do not start a second generation or mode in a directory that contains a
+previous attempt. A 20/30-case extension may be started only if the
+predeclared budget/time condition is met; it cannot be selected because the
+first batch has a good or bad task-success result.
 
 ## Read-only trajectory analysis
 
