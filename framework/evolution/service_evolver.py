@@ -101,12 +101,47 @@ class ServiceEvolver:
                 robust["normal_task_success"] = aggregate_episode_metrics(normal)["task_success"]
             return robust
 
+        def invalid_reasons(episodes):
+            reasons = []
+            for episode in episodes or []:
+                if episode.is_evaluation_invalid():
+                    reasons.extend(
+                        episode.metadata.get("invalid_reasons", [])
+                        if isinstance(episode.metadata, dict) else []
+                    )
+                    if episode.invalid_reason:
+                        reasons.append(episode.invalid_reason)
+                    elif episode.error_types:
+                        reasons.extend(
+                            error for error in episode.error_types
+                            if error in {"protocol_failure", "json_parse_failed", "output_truncated", "timeout", "provider_error", "no_valid_agent_decision"}
+                        )
+            return list(dict.fromkeys(reasons or ["protocol_failure"]))
+
+        def attempt_count(*episode_groups):
+            return max(
+                [
+                    int((episode.metadata or {}).get("evaluation_attempts", 1) or 1)
+                    for group in episode_groups
+                    for episode in (group or [])
+                ]
+                or [0]
+            )
+
         baseline_latest, baseline_replay = evaluate_suite(incumbent, "service_baseline")
         baseline_normal = evaluator.evaluate(self._baseline_customer(), incumbent, normal_cases, "validation", generation, "service_normal_baseline")
         baseline_metrics = summarize(baseline_latest, baseline_replay, baseline_normal)
         self.last_baseline_metrics = baseline_metrics
+        baseline_invalid = invalid_reasons(baseline_latest + baseline_replay + baseline_normal)
+        baseline_has_invalid = any(
+            episode.is_evaluation_invalid()
+            for episode in baseline_latest + baseline_replay + baseline_normal
+        )
         accepted = []
+        invalid_candidate_reasons = []
+        substantive_candidate_rejection = False
         for patch in self.propose(incumbent, failures, generation, count, defense_summary, historical_summary):
+            candidate = None
             try:
                 candidate = self.compiler.apply_patch(
                     incumbent, patch, generation=incumbent.generation + 1
@@ -114,6 +149,26 @@ class ServiceEvolver:
                 # Candidate policies need independent provenance even when
                 # several patches are evaluated within the same generation.
                 candidate.policy_id = f"{candidate.policy_id}_{patch.patch_id}"
+                if baseline_has_invalid:
+                    reason = f"baseline_evaluation_invalid:{baseline_invalid[0]}"
+                    invalid_candidate_reasons.append(reason)
+                    self.last_candidate_records.append({
+                        "patch_id": patch.patch_id,
+                        "service_policy_id": candidate.policy_id,
+                        "source_failure_ids": list(patch.source_failure_ids),
+                        "patch": patch.to_dict(),
+                        "candidate_policy": candidate.to_dict(),
+                        "accepted": False,
+                        "evaluation_status": "invalid",
+                        "invalid_reason": reason,
+                        "invalid_reasons": baseline_invalid,
+                        "reason": reason,
+                        "delta": None,
+                        "metrics": None,
+                        "attempt_count": attempt_count(baseline_latest, baseline_replay, baseline_normal),
+                        "normal_regression_cases": [],
+                    })
+                    continue
                 # Stage 1 intentionally evaluates only the current/latest
                 # adversarial customer.  Historical replay and normal-user
                 # regression are paid only for candidates that first improve
@@ -124,15 +179,50 @@ class ServiceEvolver:
                 # regression and historical replay evaluation.
                 candidate_latest_metrics = summarize(candidate_latest, [])
                 latest_baseline_metrics = summarize(baseline_latest, [])
+                latest_invalid = invalid_reasons(candidate_latest)
+                if any(item.is_evaluation_invalid() for item in candidate_latest):
+                    reason = f"candidate_evaluation_invalid:{latest_invalid[0]}"
+                    invalid_candidate_reasons.append(reason)
+                    self.last_candidate_records.append({
+                        "patch_id": patch.patch_id,
+                        "service_policy_id": candidate.policy_id,
+                        "source_failure_ids": list(patch.source_failure_ids),
+                        "patch": patch.to_dict(),
+                        "candidate_policy": candidate.to_dict(),
+                        "accepted": False,
+                        "evaluation_status": "invalid",
+                        "invalid_reason": latest_invalid[0],
+                        "invalid_reasons": latest_invalid,
+                        "reason": reason,
+                        "delta": None,
+                        "metrics": None,
+                        "raw_metrics": candidate_latest_metrics,
+                        "attempt_count": attempt_count(candidate_latest),
+                        "stages": {"latest_attack": {"evaluation_status": "invalid", "invalid_reasons": latest_invalid}},
+                        "normal_regression_cases": [],
+                    })
+                    continue
                 latest_decision = self.gate.evaluate(latest_baseline_metrics, candidate_latest_metrics)
                 if not latest_decision.accepted:
                     self.last_candidate_records.append({
                         "patch_id": patch.patch_id,
                         "service_policy_id": candidate.policy_id,
+                        "source_failure_ids": list(patch.source_failure_ids),
+                        # Persist the proposal even when the staged gate
+                        # rejects it.  Rejected candidates are important
+                        # research evidence: without the patch text and
+                        # rationale we cannot tell whether the model's rule
+                        # was ineffective, invalid, or aimed at the wrong
+                        # failure mode.
+                        "patch": patch.to_dict(),
+                        "candidate_policy": candidate.to_dict(),
                         "accepted": False,
+                        "evaluation_status": "valid",
+                        "invalid_reasons": [],
                         "reason": f"latest_attack_filter:{latest_decision.reason}",
                         "delta": latest_decision.delta,
                         "metrics": candidate_latest_metrics,
+                        "attempt_count": attempt_count(candidate_latest),
                         "stages": {"latest_attack": latest_decision.metrics},
                         "normal_regression_cases": [],
                     })
@@ -144,6 +234,29 @@ class ServiceEvolver:
                         "service_candidate_replay"
                     ))
                 candidate_normal = evaluator.evaluate(self._baseline_customer(), candidate, normal_cases, "validation", generation, "service_normal_candidate")
+                suite_invalid = invalid_reasons(candidate_replay + candidate_normal)
+                if any(item.is_evaluation_invalid() for item in candidate_replay + candidate_normal):
+                    reason = f"candidate_evaluation_invalid:{suite_invalid[0]}"
+                    invalid_candidate_reasons.append(reason)
+                    self.last_candidate_records.append({
+                        "patch_id": patch.patch_id,
+                        "service_policy_id": candidate.policy_id,
+                        "source_failure_ids": list(patch.source_failure_ids),
+                        "patch": patch.to_dict(),
+                        "candidate_policy": candidate.to_dict(),
+                        "accepted": False,
+                        "evaluation_status": "invalid",
+                        "invalid_reason": suite_invalid[0],
+                        "invalid_reasons": suite_invalid,
+                        "reason": reason,
+                        "delta": None,
+                        "metrics": None,
+                        "raw_metrics": summarize(candidate_latest, candidate_replay, candidate_normal),
+                        "attempt_count": attempt_count(candidate_latest, candidate_replay, candidate_normal),
+                        "stages": {"replay_or_normal": {"evaluation_status": "invalid", "invalid_reasons": suite_invalid}},
+                        "normal_regression_cases": [],
+                    })
+                    continue
                 candidate_metrics = summarize(candidate_latest, candidate_replay, candidate_normal)
                 decision = self.gate.evaluate(
                     baseline_metrics, candidate_metrics,
@@ -157,18 +270,44 @@ class ServiceEvolver:
                 record = {
                     "patch_id": patch.patch_id,
                     "service_policy_id": candidate.policy_id,
+                    "source_failure_ids": list(patch.source_failure_ids),
+                    "patch": patch.to_dict(),
+                    "candidate_policy": candidate.to_dict(),
                     "accepted": decision.accepted,
+                    "evaluation_status": "valid",
+                    "invalid_reasons": [],
                     "reason": decision.reason,
                     "delta": decision.delta,
                     "metrics": candidate_metrics,
+                    "attempt_count": attempt_count(candidate_latest, candidate_replay, candidate_normal),
                     "normal_regression_cases": regression_cases,
                 }
                 self.last_candidate_records.append(record)
+                substantive_candidate_rejection = substantive_candidate_rejection or not decision.accepted
                 if decision.accepted:
                     self.last_selected_metrics = candidate_metrics
                     accepted.append((decision, candidate, patch, candidate_metrics))
-            except Exception:
-                self.last_candidate_records.append({"patch_id": patch.patch_id, "accepted": False, "reason": "candidate_evaluation_error"})
+            except Exception as exc:
+                # Keep the generated proposal available even if applying or
+                # evaluating it fails.  The error is part of the candidate's
+                # audit trail, not a reason to discard the candidate itself.
+                self.last_candidate_records.append({
+                    "patch_id": patch.patch_id,
+                    "source_failure_ids": list(patch.source_failure_ids),
+                    "patch": patch.to_dict(),
+                    "candidate_policy": candidate.to_dict() if candidate is not None else None,
+                    "accepted": False,
+                    "evaluation_status": "invalid",
+                    "invalid_reason": "provider_error",
+                    "invalid_reasons": ["provider_error"],
+                    "reason": "candidate_evaluation_invalid:provider_error",
+                    "delta": None,
+                    "metrics": None,
+                    "attempt_count": 1,
+                    "normal_regression_cases": [],
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                invalid_candidate_reasons.append("candidate_evaluation_invalid:provider_error")
                 continue
         if accepted:
             # Evaluate every candidate before selecting the largest robust
@@ -179,7 +318,12 @@ class ServiceEvolver:
             )[0]
             return candidate, decision, patch
         rejected = self.gate.evaluate(baseline_metrics, baseline_metrics)
-        rejected.reason = "no_candidate_passed_validation_gate"
+        if baseline_has_invalid:
+            rejected.reason = f"baseline_evaluation_invalid:{baseline_invalid[0]}"
+        elif invalid_candidate_reasons and not substantive_candidate_rejection:
+            rejected.reason = invalid_candidate_reasons[0]
+        else:
+            rejected.reason = "no_candidate_passed_validation_gate"
         return incumbent, rejected, None
 
     @staticmethod

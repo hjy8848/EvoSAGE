@@ -27,7 +27,15 @@ def generate_report(run_dir: str | Path) -> Path:
             selected_fitness = next((item.get("fitness", 0.0) for item in fitness if item.get("policy_id") == selected_id), "not evaluated")
             gate = json.loads((directory / "service_gate.json").read_text(encoding="utf-8")) if (directory / "service_gate.json").exists() else {}
             episodes = list(_read_jsonl(directory / "episodes.jsonl"))
-            validation = sum(bool(item.get("task_success")) for item in episodes) / len(episodes) if episodes else "not evaluated"
+            valid_episodes = [
+                item for item in episodes
+                if item.get("evaluation_status", "valid") == "valid"
+                and not (item.get("metadata", {}) or {}).get("protocol_failure", False)
+            ]
+            validation = (
+                sum(bool(item.get("task_success")) for item in valid_episodes) / len(valid_episodes)
+                if valid_episodes else "not evaluated"
+            )
             lines.append(f"| {generation} | `{selected_id}` | {selected_fitness} | {gate.get('reason', 'not evaluated')} | {validation} |")
         lines.append("")
     heldout = run_dir / "analysis" / "heldout_results.json"

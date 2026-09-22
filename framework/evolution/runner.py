@@ -273,7 +273,11 @@ class EvolutionRunner:
                 prior_customer_episodes = self.evaluator.evaluate(
                     customer, service, splits.evolution, "evolution", generation, "customer_failure_scan"
                 )
-                prior_failures = [FailureSignature.from_episode(item) for item in prior_customer_episodes if not item.task_success]
+                prior_failures = [
+                    FailureSignature.from_episode(item)
+                    for item in prior_customer_episodes
+                    if not item.task_success and not item.is_evaluation_invalid()
+                ]
                 customer, candidate_records, scores = self.customer_evolver.evolve(
                     customer, service, splits.evolution, self.evaluator, self.attack_archive, generation,
                     self.config.customer.candidate_count,
@@ -290,11 +294,21 @@ class EvolutionRunner:
                     "source_failures": [failure.to_dict() for failure in prior_failures],
                 })
                 selected_episodes = self.evaluator.evaluate(customer, service, splits.evolution, "evolution", generation, "selected_customer")
-                signatures = [FailureSignature.from_episode(item) for item in selected_episodes if not item.task_success]
+                signatures = [
+                    FailureSignature.from_episode(item)
+                    for item in selected_episodes
+                    if not item.task_success and not item.is_evaluation_invalid()
+                ]
                 self.attack_archive.add(customer, signatures, selected_episodes, generation)
                 self.frontier.add(selected_episodes)
             if self.config.experiment_mode in {"service_only", "coevolution"} and self.config.experiment_mode != "static":
-                failures = [FailureSignature.from_episode(item) for item in self.evaluator.evaluate(customer, service, splits.evolution, "evolution", generation, "service_failures") if not item.task_success]
+                failures = [
+                    FailureSignature.from_episode(item)
+                    for item in self.evaluator.evaluate(
+                        customer, service, splits.evolution, "evolution", generation, "service_failures"
+                    )
+                    if not item.task_success and not item.is_evaluation_invalid()
+                ]
                 service, decision, patch = self.service_evolver.evolve(
                     service, failures, splits.validation, splits.validation, self.evaluator, generation,
                     self.config.service.candidate_count,
@@ -336,7 +350,13 @@ class EvolutionRunner:
                 "customer_policy_id": customer.policy_id,
                 "orchestration": self._runtime_stats(),
             })
-            history.append({"generation": generation, "episode_count": len(episodes), "task_success": sum(item.task_success for item in episodes) / len(episodes) if episodes else 0.0})
+            generation_metrics = aggregate_episode_metrics(episodes)
+            history.append({
+                "generation": generation,
+                "episode_count": len(episodes),
+                "task_success": generation_metrics["task_success"],
+                "invalid_episodes": generation_metrics["invalid_episodes"],
+            })
         self.frontier.save(self.store.run_dir / "analysis" / "weakness_frontier.json", self.store.run_dir / "analysis" / "weakness_frontier.csv")
         if self.config.fresh_adversary.enabled:
             self.fresh_adversary_evaluation(

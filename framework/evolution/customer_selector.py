@@ -11,7 +11,7 @@ from .schemas import CustomerPolicy, EpisodeResult
 
 
 def _is_protocol_failure(episode: EpisodeResult) -> bool:
-    return (
+    return episode.is_evaluation_invalid() or (
         "json_parse_failed" in (episode.error_types or [])
         or "protocol_failure" in (episode.error_types or [])
         or bool(episode.metadata.get("protocol_failure", False))

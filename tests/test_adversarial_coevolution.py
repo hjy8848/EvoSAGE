@@ -12,7 +12,7 @@ from framework.evolution.attribution import infer_failure_location
 from framework.evolution.config import EvolutionConfig, PersistenceConfig, SplitConfig
 from framework.evolution.customer_policy import CustomerPolicyValidator, PolicyCustomerModel
 from framework.evolution.evaluator_adapter import MockEpisodeEvaluator
-from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
+from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator, aggregate_episode_metrics
 from framework.evolution.customer_evolver import LLMCustomerPolicyGenerator
 from framework.evolution.customer_evolver import CustomerEvolver
 from framework.evolution.customer_selector import CustomerSelector
@@ -532,6 +532,169 @@ def test_real_adapter_caches_episode_but_separates_judge_modes(tmp_path):
     assert fresh_calls == [True]
 
 
+def test_invalid_episode_is_retried_and_only_successful_result_is_cached(tmp_path):
+    calls = []
+
+    class Pipeline:
+        def run_single_simulation(self, intent, user_id=None, path_config=None, judge_enabled=True, phase=""):
+            calls.append((judge_enabled, phase))
+            if len(calls) == 1:
+                return _fake_real_simulation(), _fake_real_report(
+                    details={"diagnostics": {"json_parse_failed": True}},
+                )
+            return _fake_real_simulation(), _fake_real_report()
+
+    evaluator = EvoSAGEEpisodeEvaluator(
+        lambda *args, **kwargs: Pipeline(),
+        cache_path=tmp_path / "episode_cache.jsonl",
+        invalid_evaluation_retries=1,
+    )
+    case = SplitManager().build().evolution[0]
+    result = evaluator.evaluate(CustomerPolicy(), ServicePolicy(), [case], "validation", 0, "service_candidate_latest")[0]
+
+    assert len(calls) == 2
+    assert result.is_evaluation_invalid() is False
+    assert result.metadata["evaluation_attempts"] == 2
+    assert result.metadata["invalid_attempts"][0]["reason"] == "json_parse_failed"
+    assert aggregate_episode_metrics([result])["episodes"] == 1.0
+    assert len((tmp_path / "episode_cache.jsonl").read_text().splitlines()) == 1
+    assert len((tmp_path / "invalid_evaluations.jsonl").read_text().splitlines()) == 1
+
+
+def test_consecutive_invalid_candidate_evaluations_are_inconclusive(tmp_path):
+    class Pipeline:
+        def run_single_simulation(self, *args, **kwargs):
+            return _fake_real_simulation(), _fake_real_report(
+                details={"diagnostics": {"protocol_failure": True}},
+            )
+
+    evaluator = EvoSAGEEpisodeEvaluator(
+        lambda *args, **kwargs: Pipeline(),
+        cache_path=tmp_path / "episode_cache.jsonl",
+        invalid_evaluation_retries=1,
+    )
+    case = SplitManager().build().evolution[0]
+    result = evaluator.evaluate(CustomerPolicy(), ServicePolicy(), [case], "validation", 0, "service_candidate_latest")[0]
+
+    assert result.is_evaluation_invalid()
+    assert result.evaluation_status == "invalid"
+    assert result.invalid_reason == "protocol_failure"
+    assert result.metadata["evaluation_attempts"] == 2
+    assert result.metadata["invalid_attempts"][-1]["reason"] == "protocol_failure"
+    assert aggregate_episode_metrics([result]) == {
+        "task_success": 0.0,
+        "legitimate_attack_success": 0.0,
+        "execution_score": 0.0,
+        "verification": 0.0,
+        "policy": 0.0,
+        "action": 0.0,
+        "goal": 0.0,
+        "episodes": 0.0,
+        "invalid_episodes": 1.0,
+        "tool_calls": 0.0,
+        "transfer_rate": 0.0,
+        "reject_rate": 0.0,
+    }
+    assert not (tmp_path / "episode_cache.jsonl").exists() or not (tmp_path / "episode_cache.jsonl").read_text().strip()
+
+
+def test_finish_reason_length_is_detected_from_each_tool_loop_trace():
+    from framework.models.agent_model import AgentTurnOutput
+
+    simulation = _fake_real_simulation()
+    output = AgentTurnOutput(turn_id=0)
+    output.metadata["llm_attempts"] = [{
+        "finish_reason": "length",
+        "raw_provider_response": {"id": "req-1", "choices": [{"finish_reason": "length"}]},
+        "tool_calls": [],
+    }]
+    simulation.turns = [SimpleNamespace(agent_output=output)]
+    episode = EvoSAGEEpisodeEvaluator.from_evosage(
+        simulation, _fake_real_report(), CustomerPolicy(), ServicePolicy(), "validation", 0, "test",
+    )
+
+    assert episode.is_evaluation_invalid()
+    assert episode.invalid_reason == "output_truncated"
+    assert "output_truncated" in episode.metadata["invalid_reasons"]
+
+
+def test_timeout_provider_failure_is_invalid_but_retry_can_recover(tmp_path):
+    calls = 0
+
+    class Pipeline:
+        def run_single_simulation(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("provider timed out")
+            return _fake_real_simulation(), _fake_real_report()
+
+    evaluator = EvoSAGEEpisodeEvaluator(
+        lambda *args, **kwargs: Pipeline(),
+        cache_path=tmp_path / "episode_cache.jsonl",
+        invalid_evaluation_retries=1,
+    )
+    case = SplitManager().build().evolution[0]
+    result = evaluator.evaluate(CustomerPolicy(), ServicePolicy(), [case], "validation", 0, "service_candidate_latest")[0]
+
+    assert calls == 2
+    assert result.is_evaluation_invalid() is False
+    assert result.metadata["invalid_attempts"][0]["reason"] == "timeout"
+
+
+def test_service_candidate_protocol_failure_is_not_a_substantive_gate_rejection():
+    class PatchGenerator:
+        def generate(self, *args, **kwargs):
+            return [ServicePatch(
+                "invalid-patch", "add",
+                [ServiceRule("invalid-rule", "VERIFICATION", "Verify the required identifier before acting.")],
+            )]
+
+    class Evaluator:
+        def __init__(self):
+            self.phases = []
+
+        def evaluate(self, customer_policy, service_policy, cases, split, generation, phase):
+            self.phases.append(phase)
+            invalid = phase == "service_candidate_latest"
+            return [EpisodeResult(
+                episode_id=f"{phase}-{index}", scenario="ecommerce_refund",
+                case_id=getattr(case, "case_id", str(index)),
+                customer_policy_id=customer_policy.policy_id,
+                service_policy_id=service_policy.policy_id,
+                split=split, generation=generation, task_success=not invalid,
+                execution_score=1.0 if not invalid else 0.0,
+                verification_score=1.0 if not invalid else 0.0,
+                policy_score=1.0 if not invalid else 0.0,
+                action_execution_score=1.0 if not invalid else 0.0,
+                goal_fulfillment_score=1.0 if not invalid else 0.0,
+                error_types=["output_truncated"] if invalid else [],
+                evaluation_status="invalid" if invalid else "valid",
+                invalid_reason="output_truncated" if invalid else None,
+                metadata={"evaluation_status": "invalid"} if invalid else {},
+            ) for index, case in enumerate(cases)]
+
+    split = SplitManager().build()
+    evaluator = Evaluator()
+    evolver = ServiceEvolver(patch_generator=PatchGenerator())
+    _, decision, patch = evolver.evolve(
+        ServicePolicy(), [], split.validation, split.validation, evaluator, 0,
+        count=1, customer_policy=CustomerPolicy(),
+    )
+
+    assert patch is None
+    assert decision.accepted is False
+    assert decision.reason == "candidate_evaluation_invalid:output_truncated"
+    assert "service_candidate_replay" not in evaluator.phases
+    assert "service_normal_candidate" not in evaluator.phases
+    record = evolver.last_candidate_records[0]
+    assert record["evaluation_status"] == "invalid"
+    assert record["invalid_reason"] == "output_truncated"
+    assert record["delta"] is None
+    assert record["patch"]["patch_id"] == "invalid-patch"
+    assert record["candidate_policy"]["policy_id"].endswith("_invalid-patch")
+
+
 def test_service_latest_filter_skips_replay_and_normal_for_rejected_patch():
     class NonImprovingEvaluator:
         def __init__(self):
@@ -574,6 +737,13 @@ def test_service_latest_filter_skips_replay_and_normal_for_rejected_patch():
     assert "service_candidate_replay" not in evaluator.phases
     assert "service_normal_candidate" not in evaluator.phases
     assert evolver.last_candidate_records[0]["reason"].startswith("latest_attack_filter:")
+    assert evolver.last_candidate_records[0]["evaluation_status"] == "valid"
+    # A staged rejection must still preserve the exact generated strategy so
+    # that we can distinguish an ineffective rule from a generation failure.
+    rejected = evolver.last_candidate_records[0]
+    assert rejected["patch"]["patch_id"] == "non-improving"
+    assert rejected["patch"]["rules"][0]["text"] == "Be polite to the customer."
+    assert rejected["candidate_policy"]["policy_id"].endswith("_non-improving")
 
 
 def test_llm_generators_return_valid_structured_candidates_without_api():

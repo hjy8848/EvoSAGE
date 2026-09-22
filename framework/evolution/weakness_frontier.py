@@ -18,6 +18,8 @@ class WeaknessFrontier:
     def add(self, episodes: Iterable[EpisodeResult]) -> None:
         grouped = defaultdict(list)
         for episode in episodes:
+            if episode.is_evaluation_invalid():
+                continue
             for error in (episode.error_types or (["success"] if episode.task_success else ["unknown"])):
                 node = episode.sop_node
                 if not node and episode.path_step_index is not None:

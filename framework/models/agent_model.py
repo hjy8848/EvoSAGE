@@ -18,6 +18,24 @@ import json
 from datetime import datetime
 
 
+_TRACE_SECRET_KEYS = {"api_key", "authorization", "x-api-key", "access_token", "token"}
+
+
+def _trace_safe(value):
+    """Copy provider diagnostics while dropping credential-like fields."""
+    if isinstance(value, dict):
+        return {
+            key: _trace_safe(item)
+            for key, item in value.items()
+            if str(key).lower() not in _TRACE_SECRET_KEYS
+        }
+    if isinstance(value, list):
+        return [_trace_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
 @dataclass
 class ClassificationOutput:
     """分类输出 - online_education场景"""
@@ -1030,12 +1048,12 @@ class AgentModel:
                 turn_output.metadata["raw_llm_response"] = raw_text or ""
                 provider_response = getattr(response, "raw_response", None)
                 if provider_response is not None:
-                    turn_output.metadata["raw_provider_response"] = provider_response
+                    turn_output.metadata["raw_provider_response"] = _trace_safe(provider_response)
                 response_metadata = getattr(response, "metadata", None)
                 if isinstance(response_metadata, dict):
                     assistant_message = response_metadata.get("assistant_message")
                     if assistant_message is not None:
-                        turn_output.metadata["raw_final_assistant_message"] = assistant_message
+                        turn_output.metadata["raw_final_assistant_message"] = _trace_safe(assistant_message)
                 response_tool_calls = list(getattr(response, "tool_calls", []) or [])
                 # 兼容尚未实现原生 tool_calls 的 OpenAI-compatible 服务。
                 if not response_tool_calls and backend_environment is not None:
@@ -1074,6 +1092,69 @@ class AgentModel:
                             )
                     except (TypeError, ValueError, json.JSONDecodeError):
                         response_tool_calls = []
+
+                # Keep every provider response in the turn trace, not only
+                # the final response.  This is the evidence needed to tell
+                # apart a model decision, argument parsing, and backend
+                # execution failure in a multi-step tool loop.
+                response_metadata = getattr(response, "metadata", {}) or {}
+                assistant_message_for_trace = (
+                    response_metadata.get("assistant_message")
+                    if isinstance(response_metadata, dict) else None
+                )
+                raw_provider_response = _trace_safe(getattr(response, "raw_response", None))
+                finish_reason = (
+                    response_metadata.get("finish_reason")
+                    if isinstance(response_metadata, dict) else None
+                )
+                request_id = (
+                    response_metadata.get("request_id")
+                    if isinstance(response_metadata, dict) else None
+                )
+                if isinstance(raw_provider_response, dict):
+                    request_id = request_id or raw_provider_response.get("id")
+                    if not finish_reason:
+                        choices = raw_provider_response.get("choices") or []
+                        if choices and isinstance(choices[0], dict):
+                            finish_reason = choices[0].get("finish_reason")
+                attempt_trace = {
+                    "attempt_index": len(turn_output.metadata.setdefault("llm_attempts", [])),
+                    "turn_id": turn_output.turn_id,
+                    "raw_provider_response": raw_provider_response,
+                    "finish_reason": finish_reason,
+                    "content": getattr(response, "text", "") or "",
+                    "reasoning": (
+                        assistant_message_for_trace.get("reasoning_content", "")
+                        if isinstance(assistant_message_for_trace, dict) else ""
+                    ),
+                    "tool_calls": [call.to_dict() for call in response_tool_calls],
+                    "parsed_arguments": [
+                        {
+                            "name": call.name,
+                            "arguments": _trace_safe(call.arguments),
+                            "arguments_valid": getattr(call, "arguments_valid", True),
+                            "argument_error": getattr(call, "argument_error", None),
+                        }
+                        for call in response_tool_calls
+                    ],
+                    "parse_diagnostics": {
+                        "invalid_tool_arguments": [
+                            {
+                                "name": call.name,
+                                "error": getattr(call, "argument_error", None),
+                            }
+                            for call in response_tool_calls
+                            if not getattr(call, "arguments_valid", True)
+                        ],
+                    },
+                    "request_id": request_id,
+                    "latency_seconds": (
+                        response_metadata.get("latency_seconds")
+                        if isinstance(response_metadata, dict) else None
+                    ),
+                    "tool_results": [],
+                }
+                turn_output.metadata["llm_attempts"].append(attempt_trace)
                 if response_tool_calls and backend_environment is not None and tool_round >= max_tool_steps:
                     turn_output.metadata["tool_loop_limit"] = True
                     turn_output.metadata["termination_reason"] = "max_tool_steps"
@@ -1121,6 +1202,7 @@ class AgentModel:
                     )
                     turn_output.tool_calls.append(call.to_dict())
                     turn_output.tool_results.append(tool_result.to_dict())
+                    attempt_trace["tool_results"].append(_trace_safe(tool_result.to_dict()))
                     if backend_environment.is_action_tool(call.name):
                         turn_output.action = backend_environment.get_action_tool_map()[call.name]
                         if tool_result.success:
@@ -1489,18 +1571,58 @@ class AgentModel:
             logger.error(f"JSON解析失败 Turn {turn_output.turn_id}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
             
-            # 标记JSON解析失败
-            turn_output.json_parse_failed = True
+            # Keep provider/transport failures distinct from parser failures.
+            # The old code marked every exception as JSON parsing, which made
+            # a timeout look like a malformed model response in the evaluator.
+            error_name = type(e).__name__.lower()
+            error_text = str(e).lower()
+            is_timeout = (
+                "timeout" in error_name
+                or "timed out" in error_text
+                or "timeout" in error_text
+            )
+            if response is None:
+                invalid_reason = "timeout" if is_timeout else "provider_error"
+            elif isinstance(e, (json.JSONDecodeError, ValueError)) or "json" in error_name or "parse" in error_text:
+                invalid_reason = "json_parse_failed"
+            else:
+                invalid_reason = "agent_runtime_error"
+            turn_output.json_parse_failed = invalid_reason == "json_parse_failed"
             turn_output.metadata["parse_error"] = {
                 "type": type(e).__name__,
                 "message": str(e),
             }
+            turn_output.metadata["protocol_failure"] = True
+            turn_output.metadata["invalid_reason"] = invalid_reason
+            if invalid_reason == "timeout":
+                turn_output.metadata["timeout"] = True
+            elif invalid_reason == "provider_error":
+                turn_output.metadata["provider_error"] = True
             if response is not None and "raw_llm_response" not in turn_output.metadata:
                 turn_output.metadata["raw_llm_response"] = getattr(response, "text", "") or ""
+            turn_output.metadata.setdefault("llm_attempts", []).append({
+                "attempt_index": len(turn_output.metadata.get("llm_attempts", [])),
+                "turn_id": turn_output.turn_id,
+                "raw_provider_response": _trace_safe(getattr(response, "raw_response", None)) if response is not None else None,
+                "finish_reason": None,
+                "content": getattr(response, "text", "") or "" if response is not None else "",
+                "reasoning": "",
+                "tool_calls": [],
+                "parsed_arguments": [],
+                "parse_diagnostics": {"error": invalid_reason},
+                "request_id": None,
+                "latency_seconds": None,
+                "error": {"type": type(e).__name__, "message": str(e)},
+                "phase": None,
+            })
             
             # ⚠️ 关键修复: 返回带有失败标记的turn_output,而不是抛出异常
             # 这样评估器可以统计JSON解析错误率
-            turn_output.chat = "[JSON解析失败,无法生成回复]"
+            turn_output.chat = (
+                "[请求超时,无法生成回复]" if invalid_reason == "timeout"
+                else "[服务提供方错误,无法生成回复]" if invalid_reason == "provider_error"
+                else "[JSON解析失败,无法生成回复]"
+            )
             
             # 记录回复到历史
             self.add_agent_message(turn_output.chat)

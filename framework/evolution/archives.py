@@ -29,9 +29,7 @@ class AttackArchive:
             raise AssertionError("AttackArchive cannot ingest heldout episodes")
         legitimate_episodes = [
             episode for episode in episodes
-            if "json_parse_failed" not in (episode.error_types or [])
-            and "protocol_failure" not in (episode.error_types or [])
-            and not episode.metadata.get("protocol_failure", False)
+            if not episode.is_evaluation_invalid()
         ]
         legitimate_signature_ids = {
             FailureSignature.from_episode(episode).signature_id
@@ -60,11 +58,9 @@ class AttackArchive:
                 "induced_error_types": list(signature.error_types),
                 "failure_signature": signature.to_dict(),
                 "source_case_ids": sorted({episode.case_id for episode in legitimate_episodes if not episode.task_success}),
-                "attack_success_rate": sum(
-                    not episode.task_success
-                    and "json_parse_failed" not in (episode.error_types or [])
-                    and "protocol_failure" not in (episode.error_types or [])
-                    and not episode.metadata.get("protocol_failure", False)
+            "attack_success_rate": sum(
+                not episode.task_success
+                    and not episode.is_evaluation_invalid()
                     for episode in legitimate_episodes
                 ) / len(legitimate_episodes) if legitimate_episodes else 0.0,
                 "novelty_signature": key,

@@ -301,6 +301,21 @@ class EpisodeResult:
     dialogue: List[Dict[str, Any]] = field(default_factory=list)
     trace_ref: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # ``valid`` means the episode produced an evaluable Agent decision.  An
+    # invalid episode is kept for diagnostics, but must never be interpreted
+    # as a substantive task failure by a policy gate.
+    evaluation_status: str = "valid"
+    invalid_reason: Optional[str] = None
+
+    def is_evaluation_invalid(self) -> bool:
+        return (
+            self.evaluation_status != "valid"
+            or bool(self.invalid_reason)
+            or bool((self.metadata or {}).get("evaluation_status") == "invalid")
+            or bool((self.metadata or {}).get("protocol_failure", False))
+            or "protocol_failure" in (self.error_types or [])
+            or "json_parse_failed" in (self.error_types or [])
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         value = asdict(self)

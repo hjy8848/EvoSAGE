@@ -469,6 +469,7 @@ class LLMEvaluationPipeline:
         user_intent: str,
         user_id: str = None,
         path_config: Dict[str, Any] = None,
+        phase: str = "",
     ) -> tuple:
         """
         运行单次模拟
@@ -640,6 +641,22 @@ class LLMEvaluationPipeline:
         
         # 设置模型名称
         simulation_result.model_name = self.model_name
+        # Attach orchestration identity to every per-request provider trace.
+        # The response itself is captured by AgentModel; this context makes a
+        # trace useful after it has been merged into an episode JSONL record.
+        for turn in simulation_result.turns:
+            metadata = getattr(turn.agent_output, "metadata", None)
+            if not isinstance(metadata, dict):
+                continue
+            metadata["trace_context"] = {
+                "phase": phase or None,
+                "episode_id": simulation_result.simulation_id,
+                "turn": turn.turn_id,
+            }
+            for attempt in metadata.get("llm_attempts", []) or []:
+                attempt["phase"] = phase or None
+                attempt["episode_id"] = simulation_result.simulation_id
+                attempt["turn"] = turn.turn_id
         
         if self.verbose:
             print(f"  [对话完成] 总轮数: {len(simulation_result.turns)}")

@@ -159,6 +159,12 @@ class EcommerceBackendTests(unittest.TestCase):
         self.assertEqual(output.tool_results[0]["data"]["order_id"], order_id)
         self.assertEqual(output.action, "Refund")
         self.assertEqual(backend.state["order"]["refund_status"], "None")
+        attempts = output.metadata["llm_attempts"]
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0]["tool_calls"][0]["name"], "query_order")
+        self.assertEqual(attempts[0]["parsed_arguments"][0]["arguments"]["order_id"], order_id)
+        self.assertEqual(attempts[0]["tool_results"][0]["data"]["order_id"], order_id)
+        self.assertEqual(attempts[1]["tool_calls"], [])
 
     def test_formal_action_tool_changes_state_once(self):
         case = self._case()
