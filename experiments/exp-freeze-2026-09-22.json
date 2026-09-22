@@ -1,0 +1,51 @@
+{
+  "experiment_name": "EvoSAGE-CoEvo pilot",
+  "freeze": {
+    "commit": "4dfc56d6c92fff86f8310e7fcf2fda12b41df42c",
+    "tag": "exp-freeze-2026-09-22",
+    "repository": "https://github.com/hjy8848/EvoSAGE.git"
+  },
+  "runtime": {
+    "python": "3.9.6",
+    "environment": ".venv",
+    "key_dependencies": {
+      "litellm": "1.83.9",
+      "openai": "2.24.0",
+      "requests": "2.32.5",
+      "pytest": "8.4.2",
+      "PyYAML": "6.0.3"
+    }
+  },
+  "default_evolution_config": "configs/ecommerce_coevolution.yaml",
+  "pilot_protocol": {
+    "scenario": "ecommerce_refund",
+    "model": "deepseek-v4-flash",
+    "provider": "InferAI",
+    "api_url": "https://inferaiapi.com/v1",
+    "client": "openai_api",
+    "api_key_source": "macOS Keychain; never store in repository",
+    "seed": 7,
+    "max_generations": 2,
+    "max_turns": 5,
+    "cases_per_customer_candidate": 1,
+    "customer_candidate_count": 1,
+    "service_candidate_count": 1,
+    "replay_attack_count": 0,
+    "split": {
+      "strategy": "instance_holdout",
+      "seed": 7,
+      "evolution_ratio": 0.6,
+      "validation_ratio": 0.2,
+      "heldout_ratio": 0.2,
+      "instances_per_path": 1,
+      "max_cases": 3
+    },
+    "judge_in_evolution": false,
+    "fresh_adversary": false
+  },
+  "comparison_runs": {
+    "static": "results/pilot_20260922_static",
+    "customer_only": "results/pilot_20260922_customer_only",
+    "coevolution": "results/pilot_20260922_coevolution"
+  }
+}
