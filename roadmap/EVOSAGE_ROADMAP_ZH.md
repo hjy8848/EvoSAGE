@@ -706,3 +706,83 @@ Agent 提出 SOP 修改
 - `answer_evidence`：回答中可验证的关键内容。
 
 只有在 `answer_completed=true` 或明确完成转人工且用户目标允许转交时，才能计入目标完成。这样可以避免“已安排导师，请稍候”被误判为已经回答。
+
+## 当前实验状态（2026-09-22）
+
+### 代码与实验冻结
+
+- 实验 runtime freeze commit：`4dfc56d6c92fff86f8310e7fcf2fda12b41df42c`
+- 实验 freeze tag：`exp-freeze-2026-09-22`
+- Dashboard 独立 commit：`68674683e49a85822677c77ea04edab4c47113ea`
+- Dashboard tag：`dashboard-mvp-2026-09-22`
+- 当前原则：不修改 frozen runtime、evaluator、scoring、gate 或 fitness；实验结果只读取现有 artifacts。
+
+### Provider 和模型验证
+
+- Provider：InferAI，经 `https://inferaiapi.com/v1` 和本地 `65533` 代理。
+- 模型：`deepseek-v4-flash`。
+- API key 从 macOS Keychain 注入，没有写入仓库。
+- `/v1/models` 预检成功，独立 4096-token JSON 探针成功。
+- 结论：Key、代理和基础 Chat Completion 可用，但完整演化流程还需要分别验证 Agent 输出协议和 Evolver 候选协议。
+
+### Pilot 实际结果
+
+#### 原始 runbook 配置（Agent 1536）
+
+`results/pilot_20260922_static` 已判定为 `provider-aborted`，不计入实验结果：
+
+- 2 个 episode，valid episode 为 0；invalid rate 为 100%；
+- 观察到 HTTP 520；后续响应出现 `finish_reason=length`、空 `content`、`json_parse_failed`；
+- 这说明 1536 的 Agent completion budget 对该模型/Prompt 组合不足，不能把这些记录解释成业务失败。
+
+#### Static（Agent 4096）
+
+`results/pilot_20260922_4096_static` 已完整结束：
+
+- 2 个 episode，全部 valid；invalid rate 为 0%；
+- provider failure 为 0，timeout 为 0；
+- 6 次 LLM 请求，input 14,525 tokens，output 5,570 tokens，记录 latency 68.02 秒；
+- task success 为 0，但失败包含真实工具调用/动作决策错误，属于 legitimate business failure，不是协议失败。
+
+这证明：Agent episode 层在提高 completion budget 后可以形成有效、可评分的真实轨迹。
+
+#### Customer-only（Agent 4096，Customer Evolver 2048）
+
+`results/pilot_20260922_4096_customer_only` 已标记为 `protocol-aborted`：
+
+- Gen 0 可以完成；
+- Gen 1 的 Customer policy JSON 出现 `Unterminated string`，strict real mode 中止；
+- provider failure 为 0，timeout 为 0；问题发生在候选策略生成协议，而不是业务 episode。
+
+#### Customer-only（Agent/Customer Evolver/Service Evolver 4096）
+
+`results/pilot_20260922_4096b_customer_only` 仍未形成可用结果：
+
+- episode 本身可以运行；
+- provider failure 为 0，timeout 为 0；
+- Customer Evolver 最终返回 0 个通过 `CustomerPolicyValidator` 的 candidate；
+- strict real mode 以 `LLM customer policy generator returned no valid candidates` 中止；
+- 没有生成可恢复的 `customer_candidates.json`，因此不能宣称 Customer evolution 已跑通。
+
+### 当前判断
+
+当前不能输出 `FORMAL EXPERIMENT: GO`，也不能声称 co-evolution 提升了鲁棒性。
+
+已确认的事实是：
+
+1. 真实 Agent episode、Backend、trace 和环境评分可以在 4096 budget 下工作；
+2. task success 低不等于系统失败，当前 static 失败主要是合法业务失败；
+3. Customer Evolver 的 LLM candidate contract 仍未稳定，尚未完成一代有效 Customer evolution；
+4. 因为 Customer candidate 链路未通过，coevolution 尚未启动，不能把缺失结果当作 0 分；
+5. 当前最大 blocker 是候选策略生成的 JSON/schema 合规性和可诊断性，不是 frozen evaluator 或 scoring 逻辑。
+
+### 下一步（仍不修改 frozen runtime）
+
+在正式实验前必须先完成一次独立的 Customer Evolver contract diagnosis：
+
+- 保存并检查 policy-generation 的原始 provider response、`finish_reason`、解析错误和 validator rejection reason；
+- 区分 JSON 截断、非 JSON 输出、候选字段缺失、非法 strategy tag 和 validator 拒绝；
+- 只有当至少一个 Customer candidate 能被持久化、评估并选出，才继续启动 coevolution；
+- 之后仍按 static → customer-only → coevolution 顺序运行，并单独统计 protocol-invalid 与 legitimate failure。
+
+在此之前，所有结果只能用于 orchestration/provider diagnosis，不能用于正式研究结论。
