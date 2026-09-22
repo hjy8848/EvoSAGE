@@ -1,0 +1,60 @@
+{
+  "scenario": "ecommerce_refund",
+  "experiment_mode": "static",
+  "seed": 7,
+  "max_generations": 3,
+  "model_metadata": {
+    "provider": "InferAI",
+    "model": "deepseek-v4-flash",
+    "api_url": "https://inferaiapi.com/v1",
+    "client": "openai_api",
+    "api_key_env": "OPENAI_API_KEY",
+    "parent_freeze_commit": "1fc5aadf4e9294ef14d59f8ca096943b6d38eb67",
+    "parent_freeze_tag": "exp-freeze-2026-09-22-calibrated"
+  },
+  "customer": {
+    "candidate_count": 3,
+    "elite_count": 1,
+    "cases_per_candidate": 0,
+    "adversary_access": "black_box"
+  },
+  "service": {
+    "candidate_count": 3,
+    "min_delta": 0.01,
+    "normal_regression_tolerance": 0.03,
+    "replay_attack_count": 1
+  },
+  "splits": {
+    "strategy": "instance_holdout",
+    "seed": 7,
+    "evolution_ratio": 0.6,
+    "validation_ratio": 0.2,
+    "heldout_ratio": 0.2,
+    "instances_per_path": 1,
+    "max_cases": null
+  },
+  "evaluation": {
+    "repetitions": 1,
+    "max_turns": 5,
+    "concurrency": 1,
+    "api_timeout": 120,
+    "judge_in_evolution": false,
+    "token_budget": {
+      "user": 512,
+      "agent": 4096,
+      "judge": 1024,
+      "customer_evolver": 8192,
+      "service_evolver": 8192
+    },
+    "summary_limit": 5
+  },
+  "persistence": {
+    "output_dir": "results/formal_20260923_static_seed07",
+    "resume": false
+  },
+  "fresh_adversary": {
+    "enabled": false,
+    "rounds": 1,
+    "candidate_count": 1
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "status": "planning_only",
+  "runtime_modified": false,
+  "parent_freeze": {
+    "commit": "1fc5aadf4e9294ef14d59f8ca096943b6d38eb67",
+    "tag": "exp-freeze-2026-09-22-calibrated"
+  },
+  "modes": {
+    "static": "configs/formal_20260923_static.yaml",
+    "customer_only": "configs/formal_20260923_customer_only.yaml",
+    "coevolution": "configs/formal_20260923_coevolution.yaml"
+  },
+  "shared_protocol": {
+    "provider": "InferAI",
+    "model": "deepseek-v4-flash",
+    "api_url": "https://inferaiapi.com/v1",
+    "client": "openai_api",
+    "seed_set": [7, 17],
+    "split_strategy": "instance_holdout",
+    "max_generations": 3,
+    "max_turns": 5,
+    "repetitions": 1,
+    "concurrency": 1,
+    "judge_in_evolution": false,
+    "token_budget": {
+      "user": 512,
+      "agent": 4096,
+      "judge": 1024,
+      "customer_evolver": 8192,
+      "service_evolver": 8192
+    },
+    "protocol_retry_limit": 1
+  },
+  "evolution_search": {
+    "customer_candidate_count": 3,
+    "customer_elite_count": 1,
+    "service_candidate_count": 3,
+    "replay_attack_count": 1,
+    "cases_per_candidate": 0,
+    "cases_per_candidate_semantics": "0 means all evolution cases in the current config; change only in a copied coverage config if a budgeted cap is chosen."
+  },
+  "coverage_options": [
+    {
+      "label": "10_cases",
+      "max_cases": 10,
+      "instances_per_path": 1,
+      "split_counts": {"evolution": 6, "validation": 2, "heldout": 2}
+    },
+    {
+      "label": "20_cases",
+      "max_cases": 20,
+      "instances_per_path": 2,
+      "split_counts": {"evolution": 12, "validation": 4, "heldout": 4}
+    },
+    {
+      "label": "30_cases",
+      "max_cases": 30,
+      "instances_per_path": 2,
+      "split_counts": {"evolution": 18, "validation": 6, "heldout": 6}
+    }
+  ],
+  "cost_estimate_basis": {
+    "source_runs": {
+      "static": "results/pilot_20260922_4096_static",
+      "customer_only": "results/pilot_20260922_calibrated_customer_only",
+      "coevolution": "results/pilot_20260922_calibrated_coevolution"
+    },
+    "method": "Scale calibrated real-pilot per-episode request, token and latency averages. Static uses validation episodes; customer-only uses evolution failure scan + three child evaluations + selected evaluation; coevolution uses three customer candidates, one replay policy, and a low/high range because the latest-attack filter may skip or admit replay/normal evaluation.",
+    "caveat": "Planning estimate only; no provider price was available. It is not a measured result and must not be used as a statistical claim."
+  },
+  "recommendation": {
+    "first_formal_scale": "10_cases",
+    "generations": 3,
+    "seeds": [7, 17],
+    "reason": "Use the smallest coverage option that still exercises multiple SOP paths, then add cases before adding generations. Reconfirm provider quota against the coevolution estimate in the runbook before launch.",
+    "fallback": {
+      "customer_candidate_count": 2,
+      "customer_elite_count": 1,
+      "service_candidate_count": 2,
+      "replay_attack_count": 1,
+      "max_generations": 3,
+      "condition": "Only if the 3/1/3 request budget is not affordable; never fall back to 1/0/1 for a formal evolution claim."
+    }
+  }
+}
