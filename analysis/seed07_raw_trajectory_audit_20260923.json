@@ -1,0 +1,174 @@
+{
+  "schema_version": "1.0",
+  "title": "Seed 7 raw trajectory validity audit",
+  "artifact_commit": "77e3ae8045788776de7297d5c217828e25b33ad8",
+  "runtime_freeze": {
+    "commit": "1fc5aadf4e9294ef14d59f8ca096943b6d38eb67",
+    "tag": "exp-freeze-2026-09-22-calibrated"
+  },
+  "read_only": true,
+  "sources": {
+    "episodes": "experiments/seed07_raw_artifacts/episodes.jsonl",
+    "evolution_outputs": "experiments/seed07_raw_artifacts/evolution_outputs.jsonl",
+    "ablation_plan": "experiments/pilot_analysis_plan.md",
+    "run_dirs": {
+      "static": "results/formal_20260923_static_seed07",
+      "customer_only": "results/formal_20260923_customer_only_seed07_fresh_20260923_011241_230e88",
+      "coevolution": "results/formal_20260923_coevolution_seed07"
+    }
+  },
+  "method": {
+    "dedup_key": ["mode", "simulation_id"],
+    "unique_episodes": 204,
+    "tool_call_counting": "Canonical conversation[].tool_calls only; provider/model-attempt duplicates are not counted.",
+    "initial_order_id_presence": "Matched the exact CaseSpec order ID against the first user message; actual synthetic IDs are not copied here.",
+    "generation": "Joined from local cache keys; raw transcript generation is absent for most records.",
+    "phase": "Not uniquely available. Cache key omits orchestration phase and cached episodes can be reused across phases.",
+    "ask_user_first": "An earlier Agent turn asks for the ID before any backend tool call; same-turn ask plus tool call does not count.",
+    "scoring": "Stored evaluation_status/task_success and current selector semantics only; no rescoring, evaluator call, model call, or rerun."
+  },
+  "tool_contract": {
+    "tool": "query_order",
+    "order_id": {"type": "string", "required": true, "minLength": null},
+    "execution_boundary_json_schema_validation": false,
+    "empty_string_reaches_backend": true,
+    "backend_response": "order_not_found"
+  },
+  "mode_summary": {
+    "static": {"episodes": 6, "empty_initial_user_messages": 0, "initial_no_id": 3, "initial_has_id": 3, "first_tool_query_order": 6, "empty_order_id_query": 3, "non_empty_order_id_query": 3, "missing_key": 0, "no_query_order": 0, "ask_user_first": 0, "tool_failure": 3, "order_not_found": 3, "p_empty_given_no_id": 1.0, "p_empty_given_id": 0.0},
+    "customer_only": {"episodes": 87, "empty_initial_user_messages": 31, "initial_no_id": 71, "initial_has_id": 16, "first_tool_query_order": 85, "empty_order_id_query": 34, "non_empty_order_id_query": 51, "missing_key": 0, "no_query_order": 2, "ask_user_first": 32, "tool_failure": 37, "order_not_found": 37, "p_empty_given_no_id": 0.478873, "p_empty_given_id": 0.0},
+    "coevolution": {"episodes": 111, "empty_initial_user_messages": 39, "initial_no_id": 85, "initial_has_id": 26, "first_tool_query_order": 110, "empty_order_id_query": 49, "non_empty_order_id_query": 59, "missing_key": 2, "no_query_order": 1, "ask_user_first": 33, "tool_failure": 51, "order_not_found": 51, "p_empty_given_no_id": 0.576471, "p_empty_given_id": 0.0}
+  },
+  "generation_summary": {
+    "static": {
+      "g0": {"n": 2, "empty_initial": 0, "no_id/has_id": [1, 1], "first_query_order": 2, "empty/nonempty/missing": [1, 1, 0], "ask_first": 0, "tool_failure": 1},
+      "g1": {"n": 2, "empty_initial": 0, "no_id/has_id": [1, 1], "first_query_order": 2, "empty/nonempty/missing": [1, 1, 0], "ask_first": 0, "tool_failure": 1},
+      "g2": {"n": 2, "empty_initial": 0, "no_id/has_id": [1, 1], "first_query_order": 2, "empty/nonempty/missing": [1, 1, 0], "ask_first": 0, "tool_failure": 1}
+    },
+    "customer_only": {
+      "g0": {"n": 26, "empty_initial": 11, "no_id/has_id": [19, 7], "first_query_order": 25, "empty/nonempty/missing": [9, 16, 0], "ask_first": 9, "tool_failure": 9},
+      "g1": {"n": 31, "empty_initial": 7, "no_id/has_id": [24, 7], "first_query_order": 31, "empty/nonempty/missing": [13, 18, 0], "ask_first": 8, "tool_failure": 16},
+      "g2": {"n": 30, "empty_initial": 13, "no_id/has_id": [28, 2], "first_query_order": 29, "empty/nonempty/missing": [12, 17, 0], "ask_first": 15, "tool_failure": 12}
+    },
+    "coevolution": {
+      "g0": {"n": 32, "empty_initial": 11, "no_id/has_id": [21, 11], "first_query_order": 32, "empty/nonempty/missing": [13, 19, 0], "ask_first": 8, "tool_failure": 13},
+      "g1": {"n": 39, "empty_initial": 9, "no_id/has_id": [30, 9], "first_query_order": 39, "empty/nonempty/missing": [20, 18, 1], "ask_first": 9, "tool_failure": 21},
+      "g2": {"n": 40, "empty_initial": 19, "no_id/has_id": [34, 6], "first_query_order": 39, "empty/nonempty/missing": [16, 22, 1], "ask_first": 16, "tool_failure": 17}
+    }
+  },
+  "empty_query_evidence": {
+    "count": 86,
+    "reasoning_explicitly_acknowledges_missing_id": 86,
+    "all_on_turn_zero": true,
+    "ask_user_first_before_any_tool": 0,
+    "order_not_found": 86,
+    "tool_failure_termination": 86,
+    "simulation_ids_by_mode": {
+      "static": ["sim_1834a6e5", "sim_1de02adf", "sim_fb25ed51"],
+      "customer_only": ["sim_acb395a8", "sim_7a237bf7", "sim_a902199b", "sim_79f36818", "sim_467c7e90", "sim_565b7476", "sim_536e06ee", "sim_e0dc5efb", "sim_386b5424", "sim_b3ff9d72", "sim_09f16cb8", "sim_6635448a", "sim_e2960166", "sim_bf2a5115", "sim_8cf16c7e", "sim_25cc1558", "sim_940ae99f", "sim_20db7238", "sim_58bbb7e3", "sim_af608150", "sim_532734a6", "sim_1d94f9d9", "sim_e3b64f41", "sim_984645c7", "sim_0218b985", "sim_d242f47d", "sim_a96c7016", "sim_7977fc50", "sim_b7dad2ff", "sim_885e068d", "sim_ee82477b", "sim_2ea51b8f", "sim_8c2b6b4b", "sim_4990eb5e"],
+      "coevolution": ["sim_6644b7a6", "sim_0eab3329", "sim_d8e4c88e", "sim_40f5e696", "sim_4b699e19", "sim_0bce4db3", "sim_a70537f0", "sim_a6edb457", "sim_09c183d9", "sim_8b621f25", "sim_dc2bbfc6", "sim_b2234e19", "sim_b2581ad3", "sim_b8d2990d", "sim_a98f0e51", "sim_d62e21d3", "sim_c8f5b2c3", "sim_af141339", "sim_75338326", "sim_add15ecf", "sim_cb471e92", "sim_0e3bc3a7", "sim_3714a067", "sim_bfe3f778", "sim_48c6bcae", "sim_9f7ee705", "sim_6ef4774b", "sim_e839bfc3", "sim_3075bc38", "sim_0931917f", "sim_19c8188f", "sim_aff1d8b5", "sim_a10d0bca", "sim_29dbd57d", "sim_53ea1792", "sim_8f7ba1f9", "sim_4f58ed6a", "sim_4f5d4b16", "sim_a41e9432", "sim_a516c57c", "sim_afdaf5f3", "sim_b27b3dbd", "sim_b77c1de5", "sim_66036e80", "sim_f0aeb340", "sim_212450ef", "sim_aba7b254", "sim_541c1f3a", "sim_4020b60c"]
+    },
+    "source_of_exact_user_message_reasoning_and_arguments": "experiments/seed07_raw_artifacts/episodes.jsonl by the simulation IDs above."
+  },
+  "static_exact_episodes": [
+    {"generation": 0, "simulation_id": "sim_1834a6e5", "intent": "user_return_high_credit", "initial_has_case_order_id": false, "tool": "query_order", "arguments": {"order_id": ""}, "backend": {"success": false, "error_code": "order_not_found"}, "termination": "tool_failure", "goal_solved": false},
+    {"generation": 0, "simulation_id": "sim_4bde767a", "intent": "user_return_low_credit_no_doc", "initial_has_case_order_id": true, "tool": "query_order", "arguments": {"order_id": "ORD-29DBFF5311"}, "backend": {"success": true, "shipping_status": "Signed"}, "subsequent_tools": ["query_customer_profile", "request_document"], "termination": "user_ended", "goal_solved": false},
+    {"generation": 1, "simulation_id": "sim_1de02adf", "intent": "user_return_high_credit", "initial_has_case_order_id": false, "tool": "query_order", "arguments": {"order_id": ""}, "backend": {"success": false, "error_code": "order_not_found"}, "termination": "tool_failure", "goal_solved": false},
+    {"generation": 1, "simulation_id": "sim_21b3b9f6", "intent": "user_return_low_credit_no_doc", "initial_has_case_order_id": true, "tool": "query_order", "arguments": {"order_id": "ORD-6959C9BD34"}, "backend": {"success": true, "shipping_status": "Signed"}, "subsequent_tools": ["request_document"], "termination": "no_more_user_messages", "goal_solved": false},
+    {"generation": 2, "simulation_id": "sim_fb25ed51", "intent": "user_return_high_credit", "initial_has_case_order_id": false, "tool": "query_order", "arguments": {"order_id": ""}, "backend": {"success": false, "error_code": "order_not_found"}, "termination": "tool_failure", "goal_solved": false},
+    {"generation": 2, "simulation_id": "sim_d7df7e20", "intent": "user_return_low_credit_no_doc", "initial_has_case_order_id": true, "tool": "query_order", "arguments": {"order_id": "ORD-3673D0006C"}, "backend": {"success": true, "shipping_status": "Signed"}, "subsequent_tools": ["request_document"], "termination": "user_ended", "goal_solved": false}
+  ],
+  "empty_initial_user_messages": {
+    "count": 70,
+    "share": 0.343137,
+    "by_generation": {
+      "customer_only": {"g0": 11, "g1": 7, "g2": 13},
+      "coevolution": {"g0": 11, "g1": 9, "g2": 19},
+      "static": {"total": 0}
+    },
+    "all_204_case_specs_know_and_show_id": true,
+    "evaluation_status": {"valid": 47, "invalid_only": 23},
+    "valid_task_failures": 43,
+    "valid_task_successes": 4,
+    "later_nonempty_customer_message": {"customer_only": 25, "coevolution": 29, "total": 54},
+    "termination_counts": {
+      "customer_only": {"end_step_reached": 12, "user_ended": 6, "max_turns": 5, "tool_failure": 5, "no_more_user_messages": 2, "goal_fulfilled": 1},
+      "coevolution": {"tool_failure": 9, "user_ended": 9, "end_step_reached": 9, "max_turns": 5, "no_more_user_messages": 4, "goal_fulfilled": 3}
+    },
+    "customer_policy_counts": {
+      "customer_only": {"customer_policy_c0": 2, "customer_policy_g0_llm_1": 6, "customer_policy_g0_llm_2": 5, "customer_policy_g1_llm_0": 3, "customer_policy_g1_llm_1": 3, "customer_policy_g1_llm_2": 1, "customer_policy_g2_llm_0": 2, "customer_policy_g2_llm_1": 5, "customer_policy_g2_llm_2": 4},
+      "coevolution": {"customer_policy_c0": 14, "customer_policy_g0_llm_0": 3, "customer_policy_g0_llm_2": 1, "customer_policy_g1_llm_0": 1, "customer_policy_g1_llm_1": 2, "customer_policy_g1_llm_2": 3, "customer_policy_g2_llm_0": 6, "customer_policy_g2_llm_1": 5, "customer_policy_g2_llm_2": 4}
+    },
+    "fitness_exposure": {
+      "customer_only": {"candidate_score_blank_records": 31, "valid_failures": 17, "valid_successes": 1, "invalid": 13, "selected_policy_blank_records": 7, "selected_policy_valid_failures": 5, "selected_policy_invalid": 2},
+      "coevolution": {"candidate_score_blank_records": 35, "valid_failures": 22, "valid_successes": 3, "invalid": 10, "selected_policy_blank_records": 11, "selected_policy_valid_failures": 8, "selected_policy_invalid": 3},
+      "combined_candidate_cohorts": {"valid_failures": 39, "valid_successes": 4, "invalid": 23},
+      "service_source_failure_simulation_ids": {
+        "g0": ["sim_0eab3329", "sim_bad92ce1"],
+        "g1": ["sim_40c3a868"],
+        "g2": ["sim_a516c57c", "sim_aed8514d", "sim_fb2a6154", "sim_afdaf5f3"]
+      }
+    },
+    "user_provider_response_saved": false,
+    "phase": null,
+    "phase_note": "Raw/cache artifacts cannot assign a unique orchestration phase; cache reuse is phase-independent."
+  },
+  "customer_policy_role_audit": {
+    "method": "Manual semantic classification; no LLM judge.",
+    "classification_counts": {"SERVICE_BEHAVIOR": 5, "MIXED": 6, "USER_BEHAVIOR": 7},
+    "exact_fields_retained_in_source": ["name", "description", "strategy_tags", "disclosure_strategy", "pressure_strategy", "contradiction_strategy", "response_to_verification", "response_to_rejection"],
+    "candidates": [
+      {"mode": "customer_only", "generation": 0, "name": "Authoritative Verification Before Comfort", "tags": ["truthful", "cooperative", "withholding"], "classification": "SERVICE_BEHAVIOR"},
+      {"mode": "customer_only", "generation": 0, "name": "Direct Correction of Claimed Success", "tags": ["contradiction", "truthful", "paraphrase"], "classification": "SERVICE_BEHAVIOR"},
+      {"mode": "customer_only", "generation": 0, "name": "Escalation After Repeated Incomplete Execution", "tags": ["escalation", "delayed_disclosure", "delayed_contradiction", "cooperative"], "classification": "MIXED"},
+      {"mode": "customer_only", "generation": 1, "name": "Required Identifier Clarification Before Action", "tags": ["withholding", "truthful", "paraphrase"], "classification": "SERVICE_BEHAVIOR"},
+      {"mode": "customer_only", "generation": 1, "name": "Delayed Disclosure of Unverified Failure", "tags": ["delayed_disclosure", "truthful", "contradiction"], "classification": "SERVICE_BEHAVIOR"},
+      {"mode": "customer_only", "generation": 1, "name": "Escalation on Persistent Verification Failure", "tags": ["escalation", "contradiction", "cooperative", "withholding"], "classification": "MIXED"},
+      {"mode": "customer_only", "generation": 2, "name": "Required Identifier Gate with Delayed Contradiction", "tags": ["withholding", "truthful", "delayed_contradiction", "delayed_disclosure"], "classification": "MIXED"},
+      {"mode": "customer_only", "generation": 2, "name": "Authority-Challenging Completion Demand", "tags": ["authority_challenge", "pressure", "contradiction", "escalation"], "classification": "USER_BEHAVIOR"},
+      {"mode": "customer_only", "generation": 2, "name": "Cooperative Paraphrase Re-request", "tags": ["cooperative", "paraphrase", "truthful", "withholding"], "classification": "MIXED"},
+      {"mode": "coevolution", "generation": 0, "name": "Confirmed_Only_Action", "tags": ["truthful", "cooperative"], "classification": "SERVICE_BEHAVIOR"},
+      {"mode": "coevolution", "generation": 0, "name": "Delayed_Disclosure_Recovery", "tags": ["delayed_disclosure", "withholding", "truthful", "cooperative"], "classification": "MIXED"},
+      {"mode": "coevolution", "generation": 0, "name": "Escalation_After_Failed_Action", "tags": ["truthful", "escalation", "cooperative"], "classification": "MIXED"},
+      {"mode": "coevolution", "generation": 1, "name": "Persistent Verification Advocate", "tags": ["contradiction", "pressure", "paraphrase"], "classification": "USER_BEHAVIOR"},
+      {"mode": "coevolution", "generation": 1, "name": "Escalation-Driven Authority Challenger", "tags": ["authority_challenge", "escalation", "withholding"], "classification": "USER_BEHAVIOR"},
+      {"mode": "coevolution", "generation": 1, "name": "Gradual Disclosure Paraphraser", "tags": ["delayed_contradiction", "delayed_disclosure", "paraphrase", "cooperative"], "classification": "USER_BEHAVIOR"},
+      {"mode": "coevolution", "generation": 2, "name": "Verification-First Persistence", "tags": ["truthful", "cooperative", "pressure"], "classification": "MIXED"},
+      {"mode": "coevolution", "generation": 2, "name": "Delayed-Claim Contradiction", "tags": ["delayed_disclosure", "contradiction", "truthful"], "classification": "USER_BEHAVIOR"},
+      {"mode": "coevolution", "generation": 2, "name": "Escalating Authority Challenge", "tags": ["authority_challenge", "delayed_contradiction", "escalation"], "classification": "USER_BEHAVIOR"}
+    ],
+    "runtime_overlay": "CustomerPolicy.runtime_guidance() is appended to LLM Customer system prompt. Actual transcripts remain user-side messages; field-level causal effect is not isolated."
+  },
+  "service_patch_audit": {
+    "count": 9,
+    "required_argument_precondition_patches": 0,
+    "all_valid_evaluations": true,
+    "all_delta_zero": true,
+    "rejection": "latest_attack_filter:insufficient_adversarial_improvement",
+    "patches": [
+      {"generation": 0, "category": "VERIFICATION", "target": "backend verification before final decision"},
+      {"generation": 0, "category": "TOOL_SELECTION", "target": "select necessary tool; avoid repeated calls"},
+      {"generation": 0, "category": "ACTION_GROUNDING", "target": "claim completion only after successful tool result"},
+      {"generation": 1, "category": "VERIFICATION", "target": "verify backend state/action before final"},
+      {"generation": 1, "category": "ACTION_GROUNDING", "target": "align final action with execution and goal"},
+      {"generation": 1, "category": "RECOVERY", "target": "retry/switch/escalate after failed tool"},
+      {"generation": 2, "category": "VERIFICATION", "target": "confirm promised action before final"},
+      {"generation": 2, "category": "TOOL_SELECTION", "target": "select tools by information need; retry/explain failure"},
+      {"generation": 2, "category": "ACTION_GROUNDING", "target": "align final action with verified state/goal"}
+    ],
+    "conclusion": "CAUSAL PRECONDITION TARGET MISSED: no patch says to validate a required argument before invocation and ask for it first."
+  },
+  "deferred_ablation": {
+    "predeclared": ["manual missing-required-identifier ServicePolicy", "query_order.order_id minLength:1"],
+    "same_case_customer_model_seed_config": true,
+    "combined_arm_explicitly_in_plan": false,
+    "minLength_is_hard_backend_validation": false,
+    "note": "Current execution boundary has no JSON Schema validation. minLength is provider-exposed only unless hard validation is separately added. No ablation was run."
+  },
+  "conclusion": {
+    "empty_query": "Systematic baseline weakness plus prompt/tool-contract interaction, not isolated stochastic error.",
+    "adaptive_customer": "exposed/amplified a latent weakness; did not create it.",
+    "formal_validity": "POTENTIAL FORMAL VALIDITY BLOCKER: 70 empty initial messages; 47 valid; 43 valid failures; 39 valid failures entered candidate score cohorts; 7 entered Service source-failure sets.",
+    "result_handling": "Preserve the batch; qualify adaptive Customer-fitness and Service-source attribution."
+  }
+}
