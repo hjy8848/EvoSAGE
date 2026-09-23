@@ -22,6 +22,8 @@ from ..core.customer_contract import get_customer_opening_contract
 
 logger = logging.getLogger(__name__)
 
+CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT = 1
+
 
 class CustomerSimulatorProtocolError(RuntimeError):
     """Raised when a Customer message remains invalid after one retry."""
@@ -53,6 +55,7 @@ class LLMUserModel(UserModel):
         temperature: float = 0.7,
         max_tokens: Optional[int] = 512,
         case_spec: Optional[CaseSpec] = None,
+        thinking_mode: Optional[str] = None,
     ):
         """
         初始化LLM用户模型
@@ -69,7 +72,10 @@ class LLMUserModel(UserModel):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.case_spec = case_spec
-        self.generation_retry_limit = 1
+        if thinking_mode not in {None, "enabled", "disabled"}:
+            raise ValueError("thinking_mode must be None, 'enabled', or 'disabled'")
+        self.thinking_mode = thinking_mode
+        self.generation_retry_limit = CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT
         self.customer_simulator_provenance: list[dict[str, Any]] = []
         self.backend_events = []
         self.environment_state = UserEnvironmentState(
@@ -239,10 +245,14 @@ class LLMUserModel(UserModel):
             provider_error = None
             timed_out = False
             try:
+                request_options = {}
+                if self.thinking_mode is not None:
+                    request_options["thinking"] = {"type": self.thinking_mode}
                 response = self.llm_client.generate(
                     prompt=prompt,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
+                    **request_options,
                 )
                 latency = float(
                     (getattr(response, "metadata", {}) or {}).get("latency_seconds")
@@ -252,6 +262,15 @@ class LLMUserModel(UserModel):
                 finish_reason = self._response_finish_reason(response)
                 metadata = getattr(response, "metadata", {}) or {}
                 raw_response = getattr(response, "raw_response", None)
+                assistant_message = metadata.get("assistant_message")
+                if not isinstance(assistant_message, dict) and isinstance(raw_response, dict):
+                    choices = raw_response.get("choices") or []
+                    if choices and isinstance(choices[0], dict):
+                        assistant_message = choices[0].get("message")
+                reasoning_content_present = bool(
+                    isinstance(assistant_message, dict)
+                    and assistant_message.get("reasoning_content")
+                )
                 request_id = metadata.get("request_id") or metadata.get("id")
                 if not request_id and isinstance(raw_response, dict):
                     request_id = raw_response.get("id")
@@ -275,6 +294,7 @@ class LLMUserModel(UserModel):
                 input_tokens = 0
                 completion_tokens = 0
                 reasoning_tokens = None
+                reasoning_content_present = False
                 timed_out = self._timeout_exception(exc)
                 provider_error = self._safe_provenance_text(
                     f"{type(exc).__name__}: {exc}"
@@ -295,6 +315,7 @@ class LLMUserModel(UserModel):
 
             attempt_record = {
                 "attempt_index": attempt_index,
+                "thinking_mode": self.thinking_mode or "default",
                 "finish_reason": finish_reason,
                 "max_tokens": self.max_tokens,
                 "raw_content": self._safe_provenance_text(raw_content),
@@ -303,6 +324,7 @@ class LLMUserModel(UserModel):
                 "input_tokens": int(input_tokens or 0),
                 "completion_tokens": int(completion_tokens or 0),
                 "reasoning_tokens": reasoning_tokens,
+                "reasoning_content_present": reasoning_content_present,
                 "provider_error": provider_error,
                 "timeout": timed_out,
                 "parse_status": "NOT_APPLICABLE",
@@ -315,6 +337,7 @@ class LLMUserModel(UserModel):
                 self.customer_simulator_provenance.append({
                     "stage": stage,
                     "turn_index": turn_index,
+                    "thinking_mode": self.thinking_mode or "default",
                     "status": "valid",
                     "retry_count": attempt_index - 1,
                     "attempts": attempts,
@@ -325,6 +348,7 @@ class LLMUserModel(UserModel):
         generation_record = {
             "stage": stage,
             "turn_index": turn_index,
+            "thinking_mode": self.thinking_mode or "default",
             "status": "invalid",
             "invalid_reason": invalid_reason,
             "retry_count": max_attempts - 1,

@@ -1,9 +1,17 @@
 {
-  "status": "planning_only",
-  "runtime_modified": false,
-  "parent_freeze": {
+  "status": "ready_for_formal_rerun_after_tag_verification",
+  "runtime_modified": true,
+  "historical_parent_freeze": {
     "commit": "1fc5aadf4e9294ef14d59f8ca096943b6d38eb67",
     "tag": "exp-freeze-2026-09-22-calibrated"
+  },
+  "runtime_freeze": {
+    "tag": "exp-freeze-2026-09-23-validity-v2",
+    "commit": "resolved from the annotated tag and recorded in each run provenance"
+  },
+  "formal_protocol": {
+    "tag": "formal-protocol-2026-09-23-v2",
+    "commit": "resolved from the annotated tag and recorded in each run provenance"
   },
   "modes": {
     "static": "configs/formal_20260923_static.yaml",
@@ -22,6 +30,7 @@
     "repetitions": 1,
     "concurrency": 1,
     "judge_in_evolution": false,
+    "customer_thinking_mode": "disabled",
     "token_budget": {
       "user": 512,
       "agent": 4096,
@@ -29,7 +38,8 @@
       "customer_evolver": 8192,
       "service_evolver": 8192
     },
-    "protocol_retry_limit": 1
+    "customer_protocol_retry_limit": 1,
+    "evolver_protocol_retry_limit": 1
   },
   "primary_formal_batch": {
     "case_set_id": "10_cases_split_seed7_instances1",

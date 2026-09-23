@@ -21,7 +21,7 @@ from framework.evolution.runner import EvolutionRunner, GenerationEvaluationInco
 from framework.evolution.schemas import CustomerPolicy, EpisodeResult, FailureSignature, ServicePolicy
 from framework.evolution.service_gate import GateDecision
 from framework.evolution.split_manager import SplitManager
-from framework.llm_integration.llm_client import LLMResponse
+from framework.llm_integration.llm_client import LLMResponse, OpenAIAPIClient
 from framework.llm_integration.llm_user_model import (
     CustomerSimulatorProtocolError,
     LLMUserModel,
@@ -59,13 +59,17 @@ def _case(*, show_order_id_initially=True):
     )
 
 
-def _response(content, *, finish_reason="stop", request_id="req-1", usage=None):
+def _response(content, *, finish_reason="stop", request_id="req-1", usage=None,
+              reasoning_content=None):
     usage = usage or {"prompt_tokens": 23, "completion_tokens": 7}
     raw = {
         "id": request_id,
         "choices": [{
             "finish_reason": finish_reason,
-            "message": {"role": "assistant", "content": content},
+            "message": {
+                "role": "assistant", "content": content,
+                **({"reasoning_content": reasoning_content} if reasoning_content is not None else {}),
+            },
         }],
         "usage": usage,
     }
@@ -86,11 +90,13 @@ class _SequenceClient:
     def __init__(self, responses):
         self.responses = list(responses)
         self.prompts = []
+        self.request_kwargs = []
         self.calls = 0
 
     def generate(self, **kwargs):
         self.calls += 1
         self.prompts.append(kwargs["prompt"])
+        self.request_kwargs.append(dict(kwargs))
         response = self.responses.pop(0)
         if isinstance(response, BaseException):
             raise response
@@ -152,6 +158,143 @@ def test_non_mandatory_opening_without_identifier_remains_valid():
     assert "ORD-123456" not in prompt
     assert user.generate_initial_message() == "I want to return my earbuds."
     assert user.get_customer_simulator_provenance()[0]["status"] == "valid"
+
+
+def test_customer_thinking_mode_is_opt_in_and_saved_in_generation_provenance():
+    default_client = _SequenceClient([_response("我要申请退款，订单号是 ORD-123456。")])
+    default_user = LLMUserModel(
+        _profile(), llm_client=default_client, case_spec=_case(), max_tokens=1536
+    )
+    assert default_user.generate_initial_message()
+    assert "thinking" not in default_client.request_kwargs[0]
+    assert default_user.get_customer_simulator_provenance()[0]["thinking_mode"] == "default"
+
+    disabled_client = _SequenceClient([_response(
+        "我要申请退款，订单号是 ORD-123456。",
+        reasoning_content="test-only hidden reasoning",
+        usage={"prompt_tokens": 23, "completion_tokens": 17,
+               "completion_tokens_details": {"reasoning_tokens": 9}},
+    )])
+    disabled_user = LLMUserModel(
+        _profile(), llm_client=disabled_client, case_spec=_case(), max_tokens=1536,
+        thinking_mode="disabled",
+    )
+    assert disabled_user.generate_initial_message()
+    assert disabled_client.request_kwargs[0]["thinking"] == {"type": "disabled"}
+    generation = disabled_user.get_customer_simulator_provenance()[0]
+    assert generation["thinking_mode"] == "disabled"
+    assert generation["attempts"][0]["thinking_mode"] == "disabled"
+    assert generation["attempts"][0]["reasoning_content_present"] is True
+    assert "reasoning_content" not in generation["attempts"][0]
+
+
+def test_openai_api_client_forwards_only_explicit_thinking_control(monkeypatch):
+    sent_payloads = []
+
+    class FakeHTTPResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "id": "req-thinking-test",
+                "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+            }
+
+    def fake_post(_url, *, json, headers, timeout):
+        sent_payloads.append(json)
+        return FakeHTTPResponse()
+
+    monkeypatch.setattr("framework.llm_integration.llm_client.requests.post", fake_post)
+    client = OpenAIAPIClient(
+        api_key="test-only", base_url="https://inferaiapi.com/v1",
+        model_name="deepseek-v4-flash", max_retries=1,
+    )
+    client.generate("Say hello briefly.", max_tokens=1536)
+    client.generate(
+        "Say hello briefly.", max_tokens=1536, thinking={"type": "disabled"}
+    )
+
+    assert sent_payloads[0]["max_tokens"] == 1536
+    assert "thinking" not in sent_payloads[0]
+    assert sent_payloads[1]["thinking"] == {"type": "disabled"}
+
+
+def test_pipeline_thinking_setting_is_customer_scoped(tmp_path, monkeypatch):
+    import run_evaluation_with_llm
+
+    created_clients = []
+    created_users = []
+    created_agents = []
+
+    class FakeClient:
+        def __init__(self, role, config):
+            self.role = role
+            self.config = config
+
+    def fake_get_llm_client(_client_type, **config):
+        client = FakeClient(len(created_clients), config)
+        created_clients.append(client)
+        return client
+
+    class CapturingUser(LLMUserModel):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created_users.append(self)
+
+        def generate_initial_message(self):
+            order_id = self._mandatory_opening_order_id()
+            return f"我想咨询一下订单 {order_id or 'unknown'}。"
+
+    class FakeAgent:
+        def __init__(self, *_args, **kwargs):
+            self.kwargs = kwargs
+            created_agents.append(self)
+
+    class FakeSimulationResult:
+        simulation_id = "thinking-mode-test"
+        turns = []
+        model_name = ""
+
+        def to_dict(self):
+            return {"simulation_id": self.simulation_id}
+
+    class FakeSimulator:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return FakeSimulationResult()
+
+    class FakeEvaluator:
+        def __init__(self, **_kwargs):
+            pass
+
+        def evaluate_simulation(self, **_kwargs):
+            return SimpleNamespace(to_dict=lambda: {})
+
+    monkeypatch.setattr(run_evaluation_with_llm, "get_llm_client", fake_get_llm_client)
+    monkeypatch.setattr(run_evaluation_with_llm, "LLMUserModel", CapturingUser)
+    monkeypatch.setattr(run_evaluation_with_llm, "AgentModel", FakeAgent)
+    monkeypatch.setattr(run_evaluation_with_llm, "DialogueSimulator", FakeSimulator)
+    monkeypatch.setattr(run_evaluation_with_llm, "Evaluator", FakeEvaluator)
+
+    pipeline = run_evaluation_with_llm.LLMEvaluationPipeline(
+        scenario_id="ecommerce_refund", model_name="deepseek-v4-flash",
+        output_dir=str(tmp_path / "pipeline"), eval_mode="api",
+        api_key="test-only", api_url="https://inferaiapi.com/v1",
+        user_model_name="deepseek-v4-flash", agent_model_type="api",
+        agent_model_name="deepseek-v4-flash", judge_model_name="deepseek-v4-flash",
+        user_max_tokens=1536, customer_thinking_mode="disabled", use_llm_judge=False,
+        verbose=False,
+    )
+    pipeline.run_single_simulation("exchange_product", user_id="thinking-test-user")
+
+    assert created_users[-1].thinking_mode == "disabled"
+    assert "thinking_mode" not in created_agents[-1].kwargs
+    assert len(created_clients) == 3
+    assert all("thinking" not in client.config for client in created_clients)
 
 
 def test_customer_opening_prompt_never_exposes_backend_only_values():

@@ -9,7 +9,7 @@ import requests
 from framework.backend.factory import build_case_spec
 from framework.evolution.archives import AttackArchive
 from framework.evolution.attribution import infer_failure_location
-from framework.evolution.config import EvolutionConfig, PersistenceConfig, SplitConfig
+from framework.evolution.config import EvolutionConfig, PersistenceConfig, SplitConfig, load_config
 from framework.evolution.customer_policy import CustomerPolicyValidator, PolicyCustomerModel
 from framework.evolution.evaluator_adapter import MockEpisodeEvaluator
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator, aggregate_episode_metrics
@@ -45,6 +45,86 @@ def test_role_token_budgets_load_as_nested_config():
     assert config.evaluation.token_budget.agent == 1024
     assert config.evaluation.token_budget.service_evolver == 3072
     assert config.evaluation.summary_limit == 3
+
+
+def test_customer_thinking_mode_config_is_optional_and_validated():
+    default = EvolutionConfig.from_dict({})
+    disabled = EvolutionConfig.from_dict({
+        "evaluation": {"customer_thinking_mode": "disabled"}
+    })
+    assert default.evaluation.customer_thinking_mode is None
+    assert disabled.evaluation.customer_thinking_mode == "disabled"
+    with pytest.raises(ValueError, match="customer_thinking_mode"):
+        EvolutionConfig.from_dict({
+            "evaluation": {"customer_thinking_mode": "turbo"}
+        })
+
+
+def test_primary_formal_configs_pin_identical_calibrated_protocol():
+    paths = [
+        "configs/formal_20260923_static.yaml",
+        "configs/formal_20260923_customer_only.yaml",
+        "configs/formal_20260923_coevolution.yaml",
+    ]
+    configs = [load_config(path) for path in paths]
+    expected_budgets = {
+        "user": 512, "agent": 4096, "judge": 1024,
+        "customer_evolver": 8192, "service_evolver": 8192,
+    }
+    for config in configs:
+        assert config.evaluation.customer_thinking_mode == "disabled"
+        assert config.evaluation.token_budget.__dict__ == expected_budgets
+        assert config.max_generations == 3
+        assert config.customer.candidate_count == 3
+        assert config.customer.elite_count == 1
+        assert config.service.candidate_count == 3
+        assert config.service.replay_attack_count == 1
+        assert config.persistence.resume is False
+        assert config.model_metadata["runtime_freeze_tag"] == "exp-freeze-2026-09-23-validity-v2"
+        assert config.model_metadata["formal_protocol_tag"] == "formal-protocol-2026-09-23-v2"
+    assert {config.experiment_mode for config in configs} == {"static", "customer_only", "coevolution"}
+    assert len({json.dumps(config.splits.__dict__, sort_keys=True) for config in configs}) == 1
+
+
+def test_run_provenance_records_model_budget_git_and_exact_split_manifest(tmp_path):
+    config = EvolutionConfig.from_dict({
+        "seed": 23,
+        "max_generations": 0,
+        "model_metadata": {
+            "provider": "InferAI", "model": "deepseek-v4-flash",
+            "api_url": "https://inferaiapi.com/v1", "client": "openai_api",
+        },
+        "splits": {"seed": 7, "max_cases": 10},
+        "evaluation": {
+            "customer_thinking_mode": "disabled",
+            "token_budget": {"user": 512, "agent": 4096, "judge": 1024,
+                              "customer_evolver": 8192, "service_evolver": 8192},
+        },
+        "persistence": {"output_dir": str(tmp_path / "provenance-run"), "resume": False},
+    })
+    runner = EvolutionRunner(config, evaluator=MockEpisodeEvaluator())
+    runner.run()
+
+    provenance = json.loads((runner.store.run_dir / "environment/provenance.json").read_text())
+    assert provenance["provider"] == "InferAI"
+    assert provenance["model"] == "deepseek-v4-flash"
+    assert provenance["customer_thinking_mode"] == "disabled"
+    assert provenance["token_budget"] == config.evaluation.token_budget.__dict__
+    assert provenance["customer_protocol_retry_limit"] == 1
+    assert provenance["evolver_protocol_retry_limit"] == 1
+    assert provenance["seed"] == 23
+    assert provenance["runtime_commit_sha"]
+    assert "runtime_freeze_tag" in provenance
+    assert "formal_protocol_tag" in provenance
+    assert provenance["split_manifest"]["strategy"] == "instance_holdout"
+    assert provenance["split_manifest"]["seed"] == 7
+    manifest_files = provenance["split_manifest"]["files"]
+    assert set(manifest_files) == {
+        "evolution_cases.json", "validation_cases.json", "heldout_cases.json",
+    }
+    all_case_ids = [case_id for item in manifest_files.values() for case_id in item["case_ids"]]
+    assert len(all_case_ids) == 10
+    assert all(len(item["sha256"]) == 64 for item in manifest_files.values())
 
 
 def test_customer_policy_roundtrip_and_leakage_gate():

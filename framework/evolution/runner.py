@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
+import subprocess
 import time
 from typing import Any, Optional
 import uuid
@@ -17,6 +19,7 @@ from .customer_policy import CustomerPolicyValidator
 from .customer_selector import CustomerSelector
 from .evaluator_adapter import BudgetedEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
 from .generation_protocol import GenerationProtocolError, PROTOCOL_RETRY_LIMIT
+from ..llm_integration.llm_user_model import CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT
 from .persistence import RunStore
 from .reporting import generate_report
 from .schemas import CustomerPolicy, DefenseRecord, FailureSignature, ServicePolicy
@@ -88,6 +91,78 @@ class EvolutionRunner:
             return
         self._persist_evolver_record(self._active_generation, "customer")
         self._persist_evolver_record(self._active_generation, "service")
+
+    def _git_provenance(self) -> dict[str, Any]:
+        """Resolve configured freeze tags against the exact checked-out commit."""
+        repository_root = Path(__file__).resolve().parents[2]
+
+        def git_value(*args: str) -> Optional[str]:
+            try:
+                result = subprocess.run(
+                    ["git", *args], cwd=repository_root, check=False,
+                    capture_output=True, text=True, timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+            value = result.stdout.strip()
+            return value if result.returncode == 0 else None
+
+        metadata = self.config.model_metadata
+        commit_sha = git_value("rev-parse", "HEAD")
+        runtime_tag = metadata.get("runtime_freeze_tag")
+        protocol_tag = metadata.get("formal_protocol_tag")
+
+        def tag_commit(tag: Optional[str]) -> Optional[str]:
+            if not isinstance(tag, str) or not tag.strip():
+                return None
+            return git_value("rev-parse", "--verify", f"refs/tags/{tag.strip()}^{{commit}}")
+
+        runtime_tag_commit = tag_commit(runtime_tag)
+        protocol_tag_commit = tag_commit(protocol_tag)
+        worktree_status = git_value("status", "--porcelain")
+        runtime_tag_observed = runtime_tag if runtime_tag_commit == commit_sha and commit_sha else None
+        if not runtime_tag or not commit_sha or not runtime_tag_commit:
+            runtime_match = "not_confirmed"
+        else:
+            runtime_match = "matched" if runtime_tag_commit == commit_sha else "mismatch"
+        if not protocol_tag or not commit_sha or not protocol_tag_commit:
+            protocol_match = "not_confirmed"
+        else:
+            protocol_match = "matched" if protocol_tag_commit == commit_sha else "mismatch"
+
+        return {
+            "commit_sha": commit_sha,
+            "runtime_commit_sha": commit_sha,
+            "runtime_freeze_commit": runtime_tag_commit,
+            "runtime_freeze_tag": runtime_tag,
+            "observed_runtime_freeze_commit": commit_sha,
+            "observed_runtime_freeze_tag": runtime_tag_observed,
+            "runtime_freeze_match_status": runtime_match,
+            "formal_protocol_commit": protocol_tag_commit,
+            "formal_protocol_tag": protocol_tag,
+            "formal_protocol_match_status": protocol_match,
+            "git_worktree_clean": None if worktree_status is None else worktree_status == "",
+        }
+
+    def _split_manifest_provenance(self) -> dict[str, Any]:
+        manifest_dir = self.store.run_dir / "split_manifest"
+        manifest = {
+            "strategy": self.config.splits.strategy,
+            "seed": self.config.splits.seed,
+            "files": {},
+        }
+        for filename in ("evolution_cases.json", "validation_cases.json", "heldout_cases.json"):
+            path = manifest_dir / filename
+            if not path.exists():
+                continue
+            raw = path.read_bytes()
+            content = json.loads(raw)
+            manifest["files"][filename] = {
+                "path": f"split_manifest/{filename}",
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "case_ids": [item.get("case_id") for item in content.get("cases", [])],
+            }
+        return manifest
 
     @classmethod
     def resolve_run_dir(cls, config: EvolutionConfig) -> tuple[Path, bool]:
@@ -272,10 +347,15 @@ class EvolutionRunner:
         # instances_per_path/seed from silently running against stale data.
         splits = SplitManager.load(self.store.run_dir / "split_manifest") if (manifest_exists and self.config.persistence.resume) else self.split_manager.build()
         self.store.write_json("config/evolution.json", self.config.to_dict())
+        model_metadata = self.config.model_metadata
         self.store.write_json("environment/provenance.json", {
             "scenario": self.config.scenario,
             "seed": self.config.seed,
             "mode": self.config.experiment_mode,
+            "model": model_metadata.get("model"),
+            "provider": model_metadata.get("provider"),
+            "api_url": model_metadata.get("api_url"),
+            "client": model_metadata.get("client"),
             "evaluator": "mock" if isinstance(self.base_evaluator, MockEpisodeEvaluator) else "real",
             "repetitions": self.config.evaluation.repetitions,
             "concurrency": self.config.evaluation.concurrency,
@@ -287,8 +367,16 @@ class EvolutionRunner:
                 or getattr(self.service_evolver, "require_patch_generator", False)
             ),
             "customer_adversary_access": self.config.customer.adversary_access,
+            "customer_thinking_mode": self.config.evaluation.customer_thinking_mode or "default",
             "token_budget": asdict(self.config.evaluation.token_budget),
+            "customer_protocol_retry_limit": CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT,
             "evolver_protocol_retry_limit": PROTOCOL_RETRY_LIMIT,
+            "max_generations": self.config.max_generations,
+            "max_turns": self.config.evaluation.max_turns,
+            "repetitions_per_case": self.config.evaluation.repetitions,
+            "model_metadata": model_metadata,
+            "split_manifest": self._split_manifest_provenance(),
+            **self._git_provenance(),
             "requested_output_dir": str(self.requested_output_dir),
             "run_dir": str(self.store.run_dir),
             "fresh_run_isolated": self.fresh_run_isolated,

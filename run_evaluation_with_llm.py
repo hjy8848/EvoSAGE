@@ -259,6 +259,7 @@ class LLMEvaluationPipeline:
         user_max_tokens: int = 512,
         agent_max_tokens: int = 1536,
         judge_max_tokens: int = 1024,
+        customer_thinking_mode: Optional[str] = None,
     ):
         """
         初始化LLM评测管道
@@ -302,6 +303,9 @@ class LLMEvaluationPipeline:
         self.user_max_tokens = user_max_tokens
         self.agent_max_tokens = agent_max_tokens
         self.judge_max_tokens = judge_max_tokens
+        if customer_thinking_mode not in {None, "enabled", "disabled"}:
+            raise ValueError("customer_thinking_mode must be None, 'enabled', or 'disabled'")
+        self.customer_thinking_mode = customer_thinking_mode
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -562,6 +566,7 @@ class LLMEvaluationPipeline:
                     temperature=0.8,
                     max_tokens=self.user_max_tokens,
                     case_spec=case_spec,
+                    thinking_mode=self.customer_thinking_mode,
                 )
             else:
                 # Real co-evolution uses the LLM customer with a validated,
@@ -574,6 +579,7 @@ class LLMEvaluationPipeline:
                     temperature=0.8,
                     max_tokens=self.user_max_tokens,
                     case_spec=case_spec,
+                    thinking_mode=self.customer_thinking_mode,
                 )
         elif self.user_simulator_mode == "rule":
             user_model = RuleUserModel(user_profile, user_system_prompt, case_spec)
@@ -585,6 +591,7 @@ class LLMEvaluationPipeline:
                 temperature=0.8,
                 max_tokens=self.user_max_tokens,
                 case_spec=case_spec,
+                thinking_mode=self.customer_thinking_mode,
             )
         else:
             user_model = LLMUserModel(
@@ -594,6 +601,7 @@ class LLMEvaluationPipeline:
                 temperature=0.8,
                 max_tokens=self.user_max_tokens,
                 case_spec=case_spec,
+                thinking_mode=self.customer_thinking_mode,
             )
         
         # 创建客服模型

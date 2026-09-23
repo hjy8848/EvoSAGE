@@ -10,6 +10,8 @@
     "client": "openai_api",
     "api_key_env": "OPENAI_API_KEY",
     "formal_case_set_id": "10_cases_split_seed7_instances1",
+    "runtime_freeze_tag": "exp-freeze-2026-09-23-validity-v2",
+    "formal_protocol_tag": "formal-protocol-2026-09-23-v2",
     "parent_freeze_commit": "1fc5aadf4e9294ef14d59f8ca096943b6d38eb67",
     "parent_freeze_tag": "exp-freeze-2026-09-22-calibrated"
   },
@@ -40,6 +42,7 @@
     "concurrency": 1,
     "api_timeout": 120,
     "judge_in_evolution": false,
+    "customer_thinking_mode": "disabled",
     "token_budget": {
       "user": 512,
       "agent": 4096,
@@ -50,7 +53,7 @@
     "summary_limit": 5
   },
   "persistence": {
-    "output_dir": "results/formal_20260923_coevolution_seed07",
+    "output_dir": "results/formal_20260923_coevolution_seed07_thinking_off_v2",
     "resume": false
   },
   "fresh_adversary": {

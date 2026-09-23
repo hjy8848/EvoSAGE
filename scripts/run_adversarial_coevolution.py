@@ -47,6 +47,14 @@ def main() -> int:
         evaluator_mode = "mock"
     if evaluator_mode is None:
         raise SystemExit("choose --evaluator mock or --evaluator real")
+    if evaluator_mode == "real":
+        config.model_metadata.update({
+            "model": args.model,
+            "api_url": args.api_url,
+            "client": args.client,
+        })
+        if "inferaiapi.com" in args.api_url.lower():
+            config.model_metadata["provider"] = "InferAI"
     # Resolve the run directory before constructing the evaluator.  The real
     # evaluator creates its persistent episode cache in its constructor; if
     # the runner resolved a fresh directory afterwards, artifacts would be
@@ -69,7 +77,8 @@ def main() -> int:
                                         client_type=args.client,
                                         judge_in_evolution=config.evaluation.judge_in_evolution,
                                         resume=config.persistence.resume,
-                                        token_budget=config.evaluation.token_budget)
+                                        token_budget=config.evaluation.token_budget,
+                                        customer_thinking_mode=config.evaluation.customer_thinking_mode)
         evolution_client = get_llm_client(
             args.client, api_key=api_key, base_url=args.api_url, model_name=args.model,
             timeout=config.evaluation.api_timeout,

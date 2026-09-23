@@ -1,23 +1,23 @@
-# EvoSAGE formal experiment runbook (planning draft)
+# EvoSAGE formal experiment runbook
 
 This document prepares the formal experiment only. It does not change the
 frozen EvoSAGE runtime, evaluator, fitness, gate, validator, backend, or
 Dashboard.
 
-## Frozen parent
+## Immutable versions
 
-- Commit: `1fc5aadf4e9294ef14d59f8ca096943b6d38eb67`
-- Tag: `exp-freeze-2026-09-22-calibrated`
-- The tag is historical and must not be moved or rewritten.
-- The formal config/analysis files in this planning commit are not a new
-  runtime freeze.
+- Historical runtime parent: commit `1fc5aadf4e9294ef14d59f8ca096943b6d38eb67`,
+  tag `exp-freeze-2026-09-22-calibrated`. This tag is immutable and remains a
+  historical reference only.
+- New runtime freeze tag: `exp-freeze-2026-09-23-validity-v2`.
+- New formal protocol tag: `formal-protocol-2026-09-23-v2`.
+- Both new tags point to the finalized runtime/config/provenance commit. Its
+  exact SHA is resolved from Git and written into every run's
+  `environment/provenance.json`.
+- The prior tag `formal-protocol-2026-09-23` remains unchanged.
 
-The 2026-09-23 Customer-simulator validity correction is a separate, narrowly
-scoped runtime update. Once its real calibration passes, the new immutable
-runtime commit/tag recorded in the calibration report supersedes the parent
-above for all future primary formal runs. Never move either historical tag.
-Formal configs, token budgets, fitness, scoring, gate, cases, and task
-semantics remain unchanged.
+Never move or rewrite any existing tag. Formal runs must use the exact commit
+to which both v2 tags dereference.
 
 ## Shared formal protocol
 
@@ -33,12 +33,19 @@ The three modes use the same:
 - repetitions: `1`
 - concurrency: `1`
 - evaluator/scoring/gate: unchanged from the calibrated parent freeze
+- Customer simulator Thinking: explicitly disabled (`thinking={"type":"disabled"}`)
 - Agent budget: `4096`
 - Customer Evolver budget: `8192`
 - Service Evolver budget: `8192`
 - User budget: `512`
 - Judge budget: `1024`
-- structured-generation retry limit: `1`
+- Customer simulator protocol retry limit: `1`
+- Customer/Service Evolver structured-generation retry limit: `1`
+
+The three formal configs explicitly pin Customer Thinking disabled and User
+budget `512`; they do not rely on provider defaults. Agent and Evolver
+behavior/prompts, tool schemas, backend, evaluator, fitness and Service gate
+are unchanged by this calibration.
 
 The primary formal batch is now locked before any outcome is observed:
 
@@ -86,6 +93,9 @@ Do not put the key in a command, document, result, or repository file.
 git diff --check
 test "$(git rev-parse 'exp-freeze-2026-09-22-calibrated^{}')" = \
   1fc5aadf4e9294ef14d59f8ca096943b6d38eb67
+test "$(git rev-parse 'exp-freeze-2026-09-23-validity-v2^{}')" = \
+  "$(git rev-parse 'formal-protocol-2026-09-23-v2^{}')"
+test -z "$(git status --porcelain)"
 test -x .venv/bin/python
 test -n "$OPENAI_API_KEY"
 ```
@@ -114,6 +124,8 @@ protocol failure interrupts a run:
 
 The old partial directory remains provenance and is excluded from outcome
 rates. Never merge its cache, archive, or episodes into the replacement run.
+The v2 configs use fresh `_v2` output paths so the historical Seed 7 data
+cannot be reused accidentally.
 
 Seed 7 runs made under the old Customer-simulator protocol must be preserved,
 not deleted or post-hoc filtered. In particular, the old Customer-only and
@@ -256,71 +268,45 @@ eliminates stagnation; the current claim is limited to population-based
 candidate proposal, elitist/gated incumbent retention, historical replay and
 grounded candidate evaluation.
 
-## Customer simulator protocol calibration
+## Completed Customer Thinking calibration (2026-09-23)
 
-Before restarting the primary batch under the new runtime freeze, run only a
-small, isolated REAL calibration. Do not resume or merge any old Seed 7 run.
-The calibration validates Customer output protocol handling and artifact
-provenance; it is not a new efficacy result and does not change the formal
-parameters or evaluation method.
+DeepSeek V4 Flash on InferAI used Thinking by default: paired REAL requests
+returned `reasoning_content`, with reasoning tokens sometimes consuming the
+entire completion budget. InferAI accepted the explicit OpenAI-compatible
+request field `thinking={"type":"disabled"}`; OFF requests had no reasoning
+tokens and normal visible output.
 
-Required offline regression checks cover: first-empty/second-valid retry;
-two invalid attempts becoming an invalid/inconclusive episode; exclusion from
-fitness, attack archive and Service source failures; and a non-empty message
-without an order ID remaining valid when the CaseSpec has no mandatory opening
-identifier contract. The latter must continue to allow the Agent's existing
-`query_order("")` behavior to be measured as a Service weakness. An explicit
-machine-readable `show_order_id_initially` or
-`mandatory_opening_disclosures` CaseSpec contract is enforced; no natural-
-language heuristic is used.
+At User budget `1536`, the paired sample was 10/10 valid for both modes after
+retry; default Thinking had 3 length-truncated attempts in 13 physical
+requests, while Thinking OFF had none in 10 requests. At User budget `512`,
+Thinking OFF achieved 10/10 valid openings, zero truncation, zero empty
+messages, zero mandatory-disclosure violations, zero provider failures, and
+zero timeouts. Therefore the formal User budget is fixed at the smallest
+tested stable value: `512`.
 
-If all Customer candidate evaluations in a generation have zero valid episode
-evidence, their fitness fields are `null` (not zero), the selection is marked
-`inconclusive`, the run is marked `INCONCLUSIVE`, and no generation `COMPLETE`
-marker is written. Likewise, a generation with no valid final evaluation
-episode is inconclusive. Invalid records remain in the diagnostic artifact;
-they do not enter a substantive denominator. With mixed valid/invalid episodes,
-only valid episodes contribute to the unchanged score formula.
+Customer-only REAL E2E completed successfully with valid Customer candidate
+generation/evaluation provenance. Coevolution REAL E2E completed the full
+Customer → failure → Service proposal → gate chain; all three Service
+proposals were valid and normally rejected at delta 0. It recorded 4 transport
+timeouts in 121 requests and one candidate evaluation inconclusive because of
+Agent output truncation. These remain protocol/reliability diagnostics; they do
+not alter scoring or gate semantics and are not efficacy evidence for the
+formal batch.
 
-For any Customer candidates generated by the REAL calibration, manually
-classify the saved candidate text as `USER_BEHAVIOR`, `MIXED`, or
-`SERVICE_BEHAVIOR` in a read-only table. Do not add a keyword blacklist or
-validator rule based on this small calibration. If role drift remains
-substantial, propose a separate role-anchoring study after reporting the
-evidence.
+No further prompt or token-budget tuning is authorized for this freeze. The
+formal rerun is GO only after both v2 tags are verified and uses six fresh,
+uninterrupted runs (Static, Customer-only, Coevolution for seeds 7 and 17).
+Previously observed Seed 7 runs remain forensic only; do not resume, merge, or
+reuse their caches/archives.
 
-The calibrated token budgets remain User=512, Agent=4096, Judge=1024,
-Customer Evolver=8192, Service Evolver=8192; protocol retry remains one.
+Each run's `environment/provenance.json` records model/provider, explicit
+Customer Thinking mode, all role budgets, actual Git commit, dereferenced
+runtime/formal tags and match statuses, seed, and split-manifest paths, case
+IDs, and SHA-256 digests. The split files retain the complete CaseSpecs.
 
-### Calibration result (2026-09-23)
-
-The protocol-correctness regression tests pass, but the REAL Customer-only
-calibration is **INCONCLUSIVE** and does not authorize a new freeze tag or a
-formal adaptive run yet. With the fixed User=512 budget, all five evaluated
-Customer episodes in the final one-generation calibration exhausted both
-Customer-message attempts with `finish_reason=length`; there were zero valid
-episodes, zero Agent requests, zero provider failures, and zero timeouts. The
-runner recorded `run_status=inconclusive`, candidate fitness as `null`, and no
-`COMPLETE.json`. The model did successfully generate and validate three
-Customer candidates. This is a protocol-output limitation, not a legitimate
-Service failure; do not count it as fitness evidence.
-
-Read-only manual role audit of those generated candidates:
-
-| Candidate | Generated name | Role label | Evidence |
-|---|---|---|---|
-| `customer_policy_g0_llm_0` | Cooperative Truthful Support | `SERVICE_BEHAVIOR` | Instructions center on authoritative results and restricted information. |
-| `customer_policy_g0_llm_1` | Authoritative Boundary Enforcer | `SERVICE_BEHAVIOR` | Directs firm refusal/negotiation behavior and escalation by a service agent. |
-| `customer_policy_g0_llm_2` | Stepwise Disclosure Support | `SERVICE_BEHAVIOR` | Specifies staged release after verification, a service-side workflow. |
-
-This small sample is diagnostic only; it does not justify a role blacklist or
-validator change. An isolated real-Agent check with a non-empty withholding
-message and no opening order ID asked the user for the identifier without
-calling a tool (one request). The deterministic regression test separately
-confirms that the same kind of valid message can still reach the existing
-`query_order("")` backend behavior. The real one-sample ask-first outcome does
-not erase the Seed 7 trace evidence.
-
-Local calibration artifacts (not formal data and not committed):
-`/tmp/evosage_customer_protocol_calibration_final_b7eaaafc/customer_only` and
-`/tmp/evosage_no_order_agent_calibration_3200749d`.
+After the rerun starts, do not intervene for low task success, strong Customer
+attacks, rejected Service candidates, zero accepted patches, weak robustness,
+or absent weakness migration. Stop only for systematic provider failure,
+protocol-invalid evaluations dominating the run, artifact corruption,
+scoring/evaluator correctness errors, wrong executed config, split leakage,
+cross-run contamination, missing provenance, or a run-level abort.

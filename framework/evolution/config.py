@@ -78,6 +78,13 @@ class EvaluationConfig:
     judge_in_evolution: bool = False
     token_budget: TokenBudgetConfig = field(default_factory=TokenBudgetConfig)
     summary_limit: int = 5
+    # None preserves provider defaults; explicit values currently target the
+    # Customer simulator only, leaving Agent/Evolver/Judge requests unchanged.
+    customer_thinking_mode: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.customer_thinking_mode not in {None, "enabled", "disabled"}:
+            raise ValueError("customer_thinking_mode must be None, 'enabled', or 'disabled'")
 
     @classmethod
     def from_dict(cls, value: Optional[Dict[str, Any]]) -> "EvaluationConfig":

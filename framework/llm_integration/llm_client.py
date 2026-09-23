@@ -411,7 +411,6 @@ class VLLMChatClient(LLMClient):
             payload["tools"] = kwargs["tools"]
         if kwargs.get("tool_choice") is not None:
             payload["tool_choice"] = kwargs["tool_choice"]
-        
         # Qwen3模型:thinking模式应该在vLLM服务器启动时通过--chat-template-kwargs参数禁用
         # API调用时通过extra_body传递该参数无效,vLLM不支持运行时动态修改chat_template_kwargs
         # 参考: run.sh中的start_server_single函数会在启动时自动为Qwen3添加--chat-template-kwargs参数
@@ -595,6 +594,11 @@ class OpenAIAPIClient(LLMClient):
             payload["tools"] = kwargs["tools"]
         if kwargs.get("tool_choice") is not None:
             payload["tool_choice"] = kwargs["tool_choice"]
+        # Provider-specific optional controls are forwarded only when a role
+        # explicitly opts in. In particular, DeepSeek's top-level `thinking`
+        # field is absent from historical/default requests.
+        if kwargs.get("thinking") is not None:
+            payload["thinking"] = kwargs["thinking"]
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
