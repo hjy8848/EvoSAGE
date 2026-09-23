@@ -65,6 +65,7 @@ class SimulationResult:
     backend_events: List[Dict[str, Any]] = field(default_factory=list)
     backend_final_state: Dict[str, Any] = field(default_factory=dict)
     user_environment_state: Dict[str, Any] = field(default_factory=dict)
+    customer_simulator_provenance: List[Dict[str, Any]] = field(default_factory=list)
     
     # 终止信息
     termination_reason: str = ""
@@ -108,6 +109,7 @@ class SimulationResult:
             "backend_events": self.backend_events,
             "backend_final_state": self.backend_final_state,
             "user_environment_state": self.user_environment_state,
+            "customer_simulator_provenance": self.customer_simulator_provenance,
             "duration_seconds": self.duration_seconds,
             "turns": [
                 {
@@ -301,6 +303,10 @@ class DialogueSimulator:
                 print(f"  执行的动作: {result.actions_taken}")
             
         except Exception as e:
+            # Customer protocol-invalid generations must be classified by the
+            # evaluation adapter, not converted into a normal failed dialogue.
+            if getattr(e, "customer_simulator_protocol_invalid", False):
+                raise
             import traceback
             result.final_status = "failed"
             result.termination_reason = str(e)
@@ -309,6 +315,9 @@ class DialogueSimulator:
                 traceback.print_exc()
         
         finally:
+            provenance_getter = getattr(self.user_model, "get_customer_simulator_provenance", None)
+            if callable(provenance_getter):
+                result.customer_simulator_provenance = provenance_getter()
             result.end_time = datetime.now().isoformat()
             result.duration_seconds = time.time() - start_time
         

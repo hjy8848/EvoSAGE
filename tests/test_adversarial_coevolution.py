@@ -292,8 +292,11 @@ def test_customer_fitness_uses_legitimate_failures_only():
     selector = CustomerSelector()
     protocol_score = selector.score(CustomerPolicy(), [protocol], set())
     legitimate_score = selector.score(CustomerPolicy(), [legitimate], set())
-    assert protocol_score.attack_success == 0.0
-    assert protocol_score.novelty == 0.0
+    assert protocol_score.evaluation_status == "inconclusive"
+    assert protocol_score.attack_success is None
+    assert protocol_score.novelty is None
+    assert protocol_score.fitness is None
+    assert protocol_score.episodes == 0
     assert legitimate_score.attack_success == 1.0
     assert legitimate_score.novelty > 0.0
 

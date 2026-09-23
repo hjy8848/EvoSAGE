@@ -67,6 +67,9 @@ def aggregate_episode_metrics(episodes: Iterable[EpisodeResult]) -> dict[str, fl
 
 def _exception_invalid_reason(exc: BaseException) -> str:
     """Map transport/provider exceptions to a stable diagnostic reason."""
+    customer_reason = getattr(exc, "reason", None)
+    if getattr(exc, "customer_simulator_protocol_invalid", False) and customer_reason:
+        return str(customer_reason)
     name = type(exc).__name__.lower()
     text = str(exc).lower()
     if "timeout" in name or "timed out" in text or "timeout" in text:
@@ -424,6 +427,10 @@ class EvoSAGEEpisodeEvaluator:
             "invalid_reason": reason,
             "evaluation_attempt": attempt,
         }
+        customer_provenance = getattr(error, "customer_simulator_provenance", None) if error else None
+        if customer_provenance is not None:
+            metadata["customer_simulator_protocol_invalid"] = True
+            metadata["customer_simulator_provenance"] = copy.deepcopy(customer_provenance)
         if error is not None:
             metadata["exception"] = {
                 "type": type(error).__name__,
@@ -440,7 +447,11 @@ class EvoSAGEEpisodeEvaluator:
             task_success=False,
             execution_score=0.0,
             error_types=["protocol_failure", reason],
-            termination_reason="evaluation_invalid",
+            termination_reason=(
+                "customer_simulator_invalid"
+                if reason.startswith("customer_simulator_invalid:")
+                else "evaluation_invalid"
+            ),
             metadata=metadata,
             evaluation_status="invalid",
             invalid_reason=reason,
@@ -548,6 +559,7 @@ class EvoSAGEEpisodeEvaluator:
             for attempt in range(1, max_attempts + 1):
                 simulation = None
                 report = None
+                terminal_customer_invalid = False
                 try:
                     simulation, report = self._call_pipeline(
                         pipeline,
@@ -560,6 +572,9 @@ class EvoSAGEEpisodeEvaluator:
                     )
                 except Exception as exc:
                     reason = _exception_invalid_reason(exc)
+                    terminal_customer_invalid = bool(
+                        getattr(exc, "customer_simulator_protocol_invalid", False)
+                    )
                     episode = self._invalid_episode(
                         customer_policy, service_policy, case, split, generation, phase,
                         reason, attempt, error=exc,
@@ -592,7 +607,7 @@ class EvoSAGEEpisodeEvaluator:
                         "reasons": reasons,
                     })
                     self._persist_invalid_attempt(key, episode, attempt)
-                    if attempt < max_attempts:
+                    if attempt < max_attempts and not terminal_customer_invalid:
                         continue
                 break
 
@@ -728,6 +743,9 @@ class EvoSAGEEpisodeEvaluator:
                 "invalid_reason": invalid_reasons[0] if invalid_reasons else None,
                 "invalid_reasons": invalid_reasons,
                 "failure_location": location,
+                "customer_simulator_provenance": copy.deepcopy(
+                    getattr(simulation, "customer_simulator_provenance", []) or []
+                ),
             },
             evaluation_status=evaluation_status,
             invalid_reason=invalid_reasons[0] if invalid_reasons else None,

@@ -27,6 +27,12 @@ from .split_manager import SplitManager
 from .weakness_frontier import WeaknessFrontier
 
 
+class GenerationEvaluationInconclusive(RuntimeError):
+    """Raised when a generation has no valid episode evidence to evaluate."""
+
+    inconclusive = True
+
+
 class EvolutionRunner:
     def __init__(self, config: Optional[EvolutionConfig] = None, evaluator=None, store: Optional[RunStore] = None,
                  split_manager: Optional[SplitManager] = None, customer_evolver=None, service_evolver=None,
@@ -239,7 +245,10 @@ class EvolutionRunner:
             try:
                 self._persist_pending_evolver_records()
                 metrics = self._runtime_stats()
-                inconclusive = isinstance(exc, GenerationProtocolError)
+                inconclusive = (
+                    isinstance(exc, GenerationProtocolError)
+                    or bool(getattr(exc, "inconclusive", False))
+                )
                 metrics.update({
                     "run_status": "inconclusive" if inconclusive else "failed",
                     "failure_type": type(exc).__name__,
@@ -316,11 +325,31 @@ class EvolutionRunner:
                     frontier=self.frontier.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
                     archive_summary=self.attack_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
                 )
+                customer_evaluation_inconclusive = bool(scores) and not any(
+                    score.episodes > 0 for score in scores
+                )
+                customer_evaluation_status = (
+                    "inconclusive" if customer_evaluation_inconclusive else "valid"
+                )
                 self.store.write_json(f"generations/gen_{generation:03d}/customer_candidates.json", {
                     "selected_policy": customer.to_dict(), "scores": [score.to_dict() for score in scores],
                     "candidate_episode_counts": [len(items) for _, items in candidate_records],
+                    "candidate_valid_episode_counts": [
+                        sum(not item.is_evaluation_invalid() for item in items)
+                        for _, items in candidate_records
+                    ],
+                    "candidate_invalid_episode_counts": [
+                        sum(item.is_evaluation_invalid() for item in items)
+                        for _, items in candidate_records
+                    ],
                     "rejections": list(getattr(self.customer_evolver, "last_rejections", [])),
                     "source_failures": [failure.to_dict() for failure in prior_failures],
+                    "evaluation_status": customer_evaluation_status,
+                    "selection_status": customer_evaluation_status,
+                    "reason": (
+                        "customer_candidate_evaluation_invalid:no_valid_episode_evidence"
+                        if customer_evaluation_inconclusive else None
+                    ),
                 })
                 self._persist_evolver_record(
                     generation,
@@ -328,7 +357,13 @@ class EvolutionRunner:
                     selected_policy=customer.to_dict(),
                     selected_policy_id=customer.policy_id,
                     scores=[score.to_dict() for score in scores],
+                    evaluation_status=customer_evaluation_status,
+                    selection_status=customer_evaluation_status,
                 )
+                if customer_evaluation_inconclusive:
+                    raise GenerationEvaluationInconclusive(
+                        "customer_candidate_evaluation_invalid:no_valid_episode_evidence"
+                    )
                 selected_episodes = self.evaluator.evaluate(customer, service, splits.evolution, "evolution", generation, "selected_customer")
                 signatures = [
                     FailureSignature.from_episode(item)
@@ -386,10 +421,14 @@ class EvolutionRunner:
                         regression_cases=[case for item in getattr(self.service_evolver, "last_candidate_records", []) if item.get("accepted") and item.get("patch_id") == patch.patch_id for case in item.get("normal_regression_cases", [])],
                     ))
             episodes = self.evaluator.evaluate(customer, service, splits.validation, "validation", generation, "generation_summary")
-            self.frontier.add(episodes)
             self.store.append_jsonl(f"generations/gen_{generation:03d}/episodes.jsonl", [item.to_dict() for item in episodes])
             self.store.write_json(f"generations/gen_{generation:03d}/customer_policy.json", customer.to_dict())
             self.store.write_json(f"generations/gen_{generation:03d}/service_policy.json", service.to_dict())
+            if not episodes or all(item.is_evaluation_invalid() for item in episodes):
+                raise GenerationEvaluationInconclusive(
+                    "generation_summary_invalid:no_valid_episode_evidence"
+                )
+            self.frontier.add(episodes)
             self._generation_wall_times[str(generation)] = time.monotonic() - generation_started
             self.store.mark_generation_complete(generation, {
                 "episode_count": len(episodes),

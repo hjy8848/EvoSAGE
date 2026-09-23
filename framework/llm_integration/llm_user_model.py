@@ -8,8 +8,11 @@ LLM-powered User Model
 """
 
 from typing import Optional, Dict, Any
+import copy
 import json
 import logging
+import re
+import time
 
 from ..models import UserModel, UserProfile
 from .llm_client import LLMClient
@@ -17,6 +20,21 @@ from ..backend.types import CaseSpec
 from ..backend.types import UserEnvironmentState
 
 logger = logging.getLogger(__name__)
+
+
+class CustomerSimulatorProtocolError(RuntimeError):
+    """Raised when a Customer message remains invalid after one retry."""
+
+    customer_simulator_protocol_invalid = True
+    retry_exhausted = True
+
+    def __init__(self, reason: str, provenance: list[dict[str, Any]]):
+        self.reason = (
+            reason if reason.startswith("customer_simulator_invalid:")
+            else f"customer_simulator_invalid:{reason}"
+        )
+        self.customer_simulator_provenance = copy.deepcopy(provenance)
+        super().__init__(self.reason)
 
 
 class LLMUserModel(UserModel):
@@ -50,6 +68,8 @@ class LLMUserModel(UserModel):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.case_spec = case_spec
+        self.generation_retry_limit = 1
+        self.customer_simulator_provenance: list[dict[str, Any]] = []
         self.backend_events = []
         self.environment_state = UserEnvironmentState(
             goal=case_spec.user_goal if case_spec else {"type": profile.user_intent},
@@ -109,26 +129,11 @@ class LLMUserModel(UserModel):
             # 没有LLM客户端，返回默认消息
             return "您好，我有个问题想咨询一下。"
         
-        # 构建初始消息生成提示词
         prompt = self._build_initial_message_prompt()
-        
-        try:
-            response = self.llm_client.generate(
-                prompt=prompt,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-            
-            message = response.text.strip()
-            
-            # 清理生成的消息
-            message = self._clean_generated_message(message)
-            
-            return message
-        
-        except Exception as e:
-            logger.error(f"Error generating initial user message: {e}")
-            return "您好，我有个问题想咨询一下。"
+        return self._generate_protocol_checked_message(
+            prompt, stage="opening", turn_index=0,
+            required_order_id=self._mandatory_opening_order_id(),
+        )
     
     def generate_next_message(
         self,
@@ -158,23 +163,195 @@ class LLMUserModel(UserModel):
             context=context,
         )
         
-        try:
-            response = self.llm_client.generate(
-                prompt=prompt,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
-            
-            message = response.text.strip()
-            
-            # 清理生成的消息
-            message = self._clean_generated_message(message)
-            
-            return message
-        
-        except Exception as e:
-            logger.error(f"Error generating user message: {e}")
-            return self._default_next_message(agent_last_message, turn_count)
+        return self._generate_protocol_checked_message(
+            prompt, stage="reply", turn_index=turn_count,
+        )
+
+    def get_customer_simulator_provenance(self) -> list[dict[str, Any]]:
+        return copy.deepcopy(self.customer_simulator_provenance)
+
+    def _mandatory_opening_order_id(self) -> Optional[str]:
+        """Return an ID only when the CaseSpec explicitly requires opening disclosure.
+
+        ``show_order_id_initially`` is the existing machine-readable CaseSpec
+        contract.  An explicit ``mandatory_opening_disclosures`` list is also
+        supported for cases that use the more general contract form.  Missing
+        IDs are not invalid when neither contract is present.
+        """
+        if self.case_spec is None:
+            return None
+        knowledge = self.case_spec.user_knowledge or {}
+        policy = self.case_spec.user_policy or {}
+        knows_id = bool(knowledge.get("knows_order_id") and knowledge.get("order_id"))
+        mandatory = policy.get("mandatory_opening_disclosures", [])
+        if isinstance(mandatory, str):
+            mandatory = [mandatory]
+        required = "order_id" in mandatory or policy.get("show_order_id_initially") is True
+        if knows_id and required:
+            return str(knowledge["order_id"])
+        return None
+
+    @staticmethod
+    def _raw_response_content(response: Any) -> str:
+        raw = getattr(response, "raw_response", None)
+        if isinstance(raw, dict):
+            choices = raw.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                message = choices[0].get("message") or {}
+                if isinstance(message, dict) and message.get("content") is not None:
+                    return str(message.get("content"))
+                if choices[0].get("text") is not None:
+                    return str(choices[0]["text"])
+        metadata = getattr(response, "metadata", {}) or {}
+        assistant_message = metadata.get("assistant_message")
+        if isinstance(assistant_message, dict) and assistant_message.get("content") is not None:
+            return str(assistant_message["content"])
+        return str(getattr(response, "text", "") or "")
+
+    @staticmethod
+    def _safe_provenance_text(value: Any) -> str:
+        text = str(value or "")
+        text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]", text)
+        text = re.sub(r"\bsk-[A-Za-z0-9_-]{16,}\b", "[REDACTED_API_KEY]", text)
+        return text
+
+    @staticmethod
+    def _response_finish_reason(response: Any) -> Optional[str]:
+        metadata = getattr(response, "metadata", {}) or {}
+        finish_reason = metadata.get("finish_reason")
+        raw = getattr(response, "raw_response", None)
+        if not finish_reason and isinstance(raw, dict):
+            choices = raw.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                finish_reason = choices[0].get("finish_reason")
+        return str(finish_reason) if finish_reason is not None else None
+
+    @staticmethod
+    def _timeout_exception(error: BaseException) -> bool:
+        return (
+            "timeout" in type(error).__name__.lower()
+            or "timed out" in str(error).lower()
+            or "timeout" in str(error).lower()
+        )
+
+    def _generate_protocol_checked_message(
+        self,
+        prompt: str,
+        stage: str,
+        turn_index: int,
+        required_order_id: Optional[str] = None,
+    ) -> str:
+        attempts: list[dict[str, Any]] = []
+        invalid_reason = "empty_message"
+        max_attempts = 1 + self.generation_retry_limit
+
+        for attempt_index in range(1, max_attempts + 1):
+            started = time.perf_counter()
+            response = None
+            provider_error = None
+            timed_out = False
+            try:
+                response = self.llm_client.generate(
+                    prompt=prompt,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+                latency = float(
+                    (getattr(response, "metadata", {}) or {}).get("latency_seconds")
+                    or (time.perf_counter() - started)
+                )
+                raw_content = self._raw_response_content(response)
+                finish_reason = self._response_finish_reason(response)
+                metadata = getattr(response, "metadata", {}) or {}
+                raw_response = getattr(response, "raw_response", None)
+                request_id = metadata.get("request_id") or metadata.get("id")
+                if not request_id and isinstance(raw_response, dict):
+                    request_id = raw_response.get("id")
+                usage = metadata.get("usage", {}) or {}
+                if not usage and isinstance(raw_response, dict):
+                    usage = raw_response.get("usage", {}) or {}
+                input_tokens = usage.get("prompt_tokens", usage.get("promptTokens", 0))
+                completion_tokens = usage.get(
+                    "completion_tokens", usage.get("completionTokens", getattr(response, "tokens", 0))
+                )
+                reasoning_tokens = usage.get("reasoning_tokens", usage.get("reasoningTokens"))
+                if reasoning_tokens is None:
+                    completion_details = usage.get("completion_tokens_details") or usage.get("completionTokensDetails") or {}
+                    reasoning_tokens = completion_details.get("reasoning_tokens", completion_details.get("reasoningTokens"))
+                provider_error = None
+            except Exception as exc:
+                latency = time.perf_counter() - started
+                raw_content = ""
+                finish_reason = None
+                request_id = None
+                input_tokens = 0
+                completion_tokens = 0
+                reasoning_tokens = None
+                timed_out = self._timeout_exception(exc)
+                provider_error = self._safe_provenance_text(
+                    f"{type(exc).__name__}: {exc}"
+                )
+                invalid_reason = "timeout" if timed_out else "provider_error"
+
+            if response is not None:
+                if str(finish_reason or "").lower() in {"length", "max_tokens"}:
+                    invalid_reason = "output_truncated"
+                else:
+                    cleaned = self._clean_generated_message(raw_content, record_courtesy=False)
+                    if not cleaned.strip():
+                        invalid_reason = "empty_message"
+                    elif required_order_id and required_order_id not in cleaned:
+                        invalid_reason = "missing_mandatory_order_id"
+                    else:
+                        invalid_reason = ""
+
+            attempt_record = {
+                "attempt_index": attempt_index,
+                "finish_reason": finish_reason,
+                "max_tokens": self.max_tokens,
+                "raw_content": self._safe_provenance_text(raw_content),
+                "provider_request_id": request_id,
+                "latency_seconds": latency,
+                "input_tokens": int(input_tokens or 0),
+                "completion_tokens": int(completion_tokens or 0),
+                "reasoning_tokens": reasoning_tokens,
+                "provider_error": provider_error,
+                "timeout": timed_out,
+                "parse_status": "NOT_APPLICABLE",
+                "generation_status": "valid" if not invalid_reason else "invalid",
+                "invalid_reason": invalid_reason or None,
+            }
+            attempts.append(attempt_record)
+
+            if not invalid_reason:
+                self.customer_simulator_provenance.append({
+                    "stage": stage,
+                    "turn_index": turn_index,
+                    "status": "valid",
+                    "retry_count": attempt_index - 1,
+                    "attempts": attempts,
+                })
+                self._record_courtesy(cleaned)
+                return cleaned
+
+        generation_record = {
+            "stage": stage,
+            "turn_index": turn_index,
+            "status": "invalid",
+            "invalid_reason": invalid_reason,
+            "retry_count": max_attempts - 1,
+            "attempts": attempts,
+        }
+        self.customer_simulator_provenance.append(generation_record)
+        raise CustomerSimulatorProtocolError(
+            invalid_reason, self.customer_simulator_provenance
+        )
+
+    def _record_courtesy(self, message: str) -> None:
+        thank_keywords = ["谢谢", "感谢", "thank"]
+        blessing_keywords = ["祝", "顺利", "愉快", "加油", "进步"]
+        if any(keyword in message for keyword in thank_keywords + blessing_keywords):
+            self.last_courtesy_turn = self.current_turn
     
     def _get_role_description(self) -> str:
         """
@@ -418,7 +595,7 @@ class LLMUserModel(UserModel):
                 if not has_questions and self.problem_status != "unsolved":
                     self.problem_status = "solved"
     
-    def _clean_generated_message(self, message: str) -> str:
+    def _clean_generated_message(self, message: str, record_courtesy: bool = True) -> str:
         """清理生成的消息"""
         # 移除可能的引号
         if message.startswith('"') and message.endswith('"'):
@@ -436,7 +613,7 @@ class LLMUserModel(UserModel):
         # 检测是否是礼貌性结束消息
         thank_keywords = ['谢谢', '感谢', 'thank']
         blessing_keywords = ['祝', '顺利', '愉快', '加油', '进步']
-        if (any(keyword in message for keyword in thank_keywords) or
+        if record_courtesy and (any(keyword in message for keyword in thank_keywords) or
             any(keyword in message for keyword in blessing_keywords)):
             # 记录这是一次礼貌性回复
             self.last_courtesy_turn = self.current_turn

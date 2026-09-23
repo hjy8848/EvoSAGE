@@ -386,6 +386,11 @@ class LLMEvaluationPipeline:
                 api_key=api_key,
                 model_name=user_model_name,
                 timeout=api_timeout,
+                # CustomerSimulatorProtocolError owns the single retry and
+                # records each provider response.  Disable hidden transport
+                # retries here so a logical two-attempt cap is also a true
+                # two-request cap for Customer generation.
+                max_retries=1,
             )
             self.agent_llm_client = get_llm_client(
                 client_type,
@@ -438,6 +443,7 @@ class LLMEvaluationPipeline:
             "vllm_chat",
             base_url=user_model_url,
             model_name=user_model_name,
+            max_retries=1,
         )
         
         # Agent模型：可以是本地vLLM或API
