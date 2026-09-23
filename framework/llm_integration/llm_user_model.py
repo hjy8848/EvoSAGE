@@ -18,6 +18,7 @@ from ..models import UserModel, UserProfile
 from .llm_client import LLMClient
 from ..backend.types import CaseSpec
 from ..backend.types import UserEnvironmentState
+from ..core.customer_contract import get_customer_opening_contract
 
 logger = logging.getLogger(__name__)
 
@@ -171,25 +172,12 @@ class LLMUserModel(UserModel):
         return copy.deepcopy(self.customer_simulator_provenance)
 
     def _mandatory_opening_order_id(self) -> Optional[str]:
-        """Return an ID only when the CaseSpec explicitly requires opening disclosure.
-
-        ``show_order_id_initially`` is the existing machine-readable CaseSpec
-        contract.  An explicit ``mandatory_opening_disclosures`` list is also
-        supported for cases that use the more general contract form.  Missing
-        IDs are not invalid when neither contract is present.
-        """
-        if self.case_spec is None:
-            return None
-        knowledge = self.case_spec.user_knowledge or {}
-        policy = self.case_spec.user_policy or {}
-        knows_id = bool(knowledge.get("knows_order_id") and knowledge.get("order_id"))
-        mandatory = policy.get("mandatory_opening_disclosures", [])
-        if isinstance(mandatory, str):
-            mandatory = [mandatory]
-        required = "order_id" in mandatory or policy.get("show_order_id_initially") is True
-        if knows_id and required:
-            return str(knowledge["order_id"])
-        return None
+        """Return the required opening identifier from the shared contract."""
+        return next((
+            item["value"]
+            for item in get_customer_opening_contract(self.case_spec)
+            if item["field"] == "order_id"
+        ), None)
 
     @staticmethod
     def _raw_response_content(response: Any) -> str:
@@ -391,7 +379,21 @@ class LLMUserModel(UserModel):
         # 根据场景选择人物身份
         scenario_id = self.profile.scenario_id
         role_desc = self._get_role_description()
-        
+        opening_contract = get_customer_opening_contract(self.case_spec)
+        contract_text = ""
+        if opening_contract:
+            disclosures = "\n".join(
+                f"- {item['field']}: {json.dumps(item['value'], ensure_ascii=False)}"
+                for item in opening_contract
+            )
+            contract_text = f"""
+【强制首轮披露约定】
+你的第一条消息必须包含以下你已知的信息：
+{disclosures}
+这是 CaseSpec 的硬约束，优先于 CustomerPolicy 中任何暂缓、隐瞒或延后披露这些字段的指示。CustomerPolicy 仍可调整表达方式、语气和对抗行为，但不得省略上述信息。
+不得披露 Customer 不知道的事实或任何后台私有状态。
+"""
+
         prompt = f"""你正在扮演{role_desc}，准备向客服发起对话。
 
 【你的身份】
@@ -405,13 +407,13 @@ class LLMUserModel(UserModel):
 
 【你实际知道的信息】
 {self._known_case_facts_text()}
+{contract_text}
 
 【要求】
-1. 根据你的身份和背景,生成第一条开场消息
-2. 消息应该自然、简洁(30-60字),直接表达你的问题或诉求
-3. 根据对抗强度调整语气: {intensity_desc}
-4. 只提供当前诉求和必要事实；不要主动泄露无关信息，也不要为了多轮而隐藏必要事实
-5. 只返回你要说的话,不要有额外的说明或格式
+1. 根据身份、背景、已知信息和以上强制约定，生成第一条开场消息
+2. 消息自然、简洁(30-60字)，直接表达问题或诉求，并按对抗强度调整语气: {intensity_desc}
+3. 只提供当前诉求和必要事实；不要主动泄露无关信息，也不要为了多轮而隐藏必要事实
+4. 只输出下一条 Customer 消息本身，不要提供解释、分析或额外格式
 
 【你的第一条消息】
 """

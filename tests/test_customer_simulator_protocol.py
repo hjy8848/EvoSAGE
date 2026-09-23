@@ -5,6 +5,7 @@ import pytest
 
 from framework.backend import CaseSpec, create_backend
 from framework.core.simulator import DialogueSimulator
+from framework.core.customer_contract import get_customer_opening_contract
 from framework.evolution.archives import AttackArchive
 from framework.evolution.config import (
     CustomerEvolutionConfig,
@@ -14,6 +15,7 @@ from framework.evolution.config import (
     SplitConfig,
 )
 from framework.evolution.customer_selector import CustomerSelector
+from framework.evolution.customer_policy import CustomerPolicyCompiler
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator, aggregate_episode_metrics
 from framework.evolution.runner import EvolutionRunner, GenerationEvaluationInconclusive
 from framework.evolution.schemas import CustomerPolicy, EpisodeResult, FailureSignature, ServicePolicy
@@ -102,6 +104,90 @@ def _profile():
         adversarial_intensity="weak_conflict",
         scenario_id="ecommerce_refund",
     )
+
+
+def test_mandatory_opening_contract_overrides_customer_withholding_policy():
+    case = _case(show_order_id_initially=True)
+    policy = CustomerPolicy(
+        policy_id="withholding-opening-test",
+        strategy_tags=["truthful", "withholding", "delayed_disclosure"],
+        disclosure_strategy="withhold optional known details until asked",
+    )
+    client = _SequenceClient([_response("我想办理换货，订单号是 ORD-123456。")])
+    user = LLMUserModel(
+        _profile(),
+        "Customer prompt base.",
+        llm_client=client,
+        max_tokens=1536,
+        case_spec=case,
+    )
+    user.system_prompt += CustomerPolicyCompiler().compile(policy, case).runtime_guidance()
+
+    prompt = user._build_initial_message_prompt()
+    contract = get_customer_opening_contract(case)
+    assert contract == [{
+        "field": "order_id",
+        "value": "ORD-123456",
+        "timing": "opening_turn",
+    }]
+    assert "强制首轮披露约定" in prompt
+    assert "ORD-123456" in prompt
+    assert "优先于 CustomerPolicy" in prompt
+    assert user._mandatory_opening_order_id() == contract[0]["value"]
+
+    message = user.generate_initial_message()
+    assert "ORD-123456" in message
+    assert user.get_customer_simulator_provenance()[0]["status"] == "valid"
+
+
+def test_non_mandatory_opening_without_identifier_remains_valid():
+    case = _case(show_order_id_initially=False)
+    client = _SequenceClient([_response("I want to return my earbuds.")])
+    user = LLMUserModel(_profile(), "Customer prompt base.", client, max_tokens=1536, case_spec=case)
+
+    assert get_customer_opening_contract(case) == []
+    assert user._mandatory_opening_order_id() is None
+    prompt = user._build_initial_message_prompt()
+    assert "强制首轮披露约定" not in prompt
+    assert "ORD-123456" not in prompt
+    assert user.generate_initial_message() == "I want to return my earbuds."
+    assert user.get_customer_simulator_provenance()[0]["status"] == "valid"
+
+
+def test_customer_opening_prompt_never_exposes_backend_only_values():
+    case = _case(show_order_id_initially=False)
+    case.user_knowledge = {
+        "knows_order_id": False,
+        "knows_customer_id": False,
+        "product_name": "customer-known product",
+    }
+    case.backend_record["customer"]["credit_level"] = "PRIVATE-CREDIT-SENTINEL"
+    case.backend_record["private_state"] = {
+        "system_variables": {"private_marker": "PRIVATE-BACKEND-SENTINEL"}
+    }
+    case.expected_outcome = {"private_expected_marker": "PRIVATE-GT-SENTINEL"}
+    user = LLMUserModel(_profile(), "Customer prompt base.", case_spec=case)
+
+    prompt = user._build_initial_message_prompt()
+    assert "PRIVATE-CREDIT-SENTINEL" not in prompt
+    assert "PRIVATE-BACKEND-SENTINEL" not in prompt
+    assert "PRIVATE-GT-SENTINEL" not in prompt
+    assert "credit_level" not in prompt
+    assert "expected_outcome" not in prompt
+
+
+def test_prompt_and_post_generation_guard_use_the_same_opening_contract():
+    mandatory_case = _case(show_order_id_initially=True)
+    optional_case = _case(show_order_id_initially=False)
+    mandatory_user = LLMUserModel(_profile(), "base", case_spec=mandatory_case)
+    optional_user = LLMUserModel(_profile(), "base", case_spec=optional_case)
+
+    contract = get_customer_opening_contract(mandatory_case)
+    assert mandatory_user._mandatory_opening_order_id() == contract[0]["value"]
+    assert contract[0]["value"] in mandatory_user._build_initial_message_prompt()
+    assert optional_user._mandatory_opening_order_id() is None
+    assert get_customer_opening_contract(optional_case) == []
+    assert "强制首轮披露约定" not in optional_user._build_initial_message_prompt()
 
 
 class _CapturingAgent:
