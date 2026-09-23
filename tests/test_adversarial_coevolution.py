@@ -769,6 +769,35 @@ def test_llm_generators_return_valid_structured_candidates_without_api():
     assert patch[0].rules[0].category == "VERIFICATION"
 
 
+def test_customer_generator_prompt_anchors_policy_to_customer_behavior():
+    class Response:
+        text = ('[{"name":"customer response",'
+                '"description":"ask the customer to request an explanation",'
+                '"strategy_tags":["authority_challenge"],'
+                '"disclosure_strategy":"share known facts when asked",'
+                '"pressure_strategy":"remain firm",'
+                '"contradiction_strategy":"politely question inconsistencies",'
+                '"response_to_verification":"ask why the result matters",'
+                '"response_to_rejection":"ask for the reason"}]')
+
+    class CapturingClient:
+        prompt = None
+
+        def generate(self, **kwargs):
+            self.prompt = kwargs["prompt"]
+            return Response()
+
+    client = CapturingClient()
+    LLMCustomerPolicyGenerator(client).generate(
+        CustomerPolicy(), [], ServicePolicy(), generation=1, count=1,
+    )
+
+    assert "simulated CUSTOMER only" in client.prompt
+    assert "not for the service agent" in client.prompt
+    assert "Never prescribe service-agent behavior" in client.prompt
+    assert "customer's reaction or utterance" in client.prompt
+
+
 def _provider_json_response(text, *, finish_reason="stop", completion_tokens=100,
                             reasoning_tokens=None):
     usage = {

@@ -217,6 +217,13 @@ class LLMCustomerPolicyGenerator:
         frontier = _top_k(frontier, self.summary_limit)
         archive_summary = _top_k(archive_summary, self.summary_limit)
         prompt = (
+            "You are designing reusable behavior policies for the simulated CUSTOMER only, "
+            "not for the service agent. Every strategy must describe what the customer says "
+            "or does during the interaction. Never prescribe service-agent behavior such as "
+            "classifying, querying tools, checking records, following SOP steps, approving, "
+            "or rejecting requests. The response_to_verification and response_to_rejection "
+            "fields must describe the customer's reaction or utterance after those events, "
+            "not instructions for what the agent should do. "
             "Design reusable customer interaction strategies for a customer-service benchmark. "
             "Do not mention case IDs, order IDs, expected paths/actions, hidden values, evaluators, "
             "or parser manipulation. Do not mention any concrete backend field names, status values, "
