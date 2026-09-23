@@ -1,0 +1,90 @@
+{
+  "api_url": "https://inferaiapi.com/v1",
+  "client": "openai_api",
+  "commit_sha": "2c57dc34ddf4d996b61370a590eb7b557bbef9ef",
+  "concurrency": 1,
+  "customer_adversary_access": "black_box",
+  "customer_generator": "llm",
+  "customer_protocol_retry_limit": 1,
+  "customer_thinking_mode": "disabled",
+  "evaluator": "real",
+  "evolver_protocol_retry_limit": 1,
+  "formal_protocol_commit": "2c57dc34ddf4d996b61370a590eb7b557bbef9ef",
+  "formal_protocol_match_status": "matched",
+  "formal_protocol_tag": "formal-protocol-2026-09-23-v2",
+  "fresh_run_isolated": false,
+  "git_worktree_clean": true,
+  "judge_in_evolution": false,
+  "max_generations": 3,
+  "max_turns": 5,
+  "mode": "coevolution",
+  "model": "deepseek-v4-flash",
+  "model_metadata": {
+    "api_key_env": "OPENAI_API_KEY",
+    "api_url": "https://inferaiapi.com/v1",
+    "client": "openai_api",
+    "formal_case_set_id": "10_cases_split_seed7_instances1",
+    "formal_protocol_tag": "formal-protocol-2026-09-23-v2",
+    "model": "deepseek-v4-flash",
+    "parent_freeze_commit": "1fc5aadf4e9294ef14d59f8ca096943b6d38eb67",
+    "parent_freeze_tag": "exp-freeze-2026-09-22-calibrated",
+    "provider": "InferAI",
+    "runtime_freeze_tag": "exp-freeze-2026-09-23-validity-v2"
+  },
+  "observed_runtime_freeze_commit": "2c57dc34ddf4d996b61370a590eb7b557bbef9ef",
+  "observed_runtime_freeze_tag": "exp-freeze-2026-09-23-validity-v2",
+  "provider": "InferAI",
+  "repetitions": 1,
+  "repetitions_per_case": 1,
+  "requested_output_dir": "results/formal_20260923_coevolution_seed07_thinking_off_v2",
+  "run_dir": "results/formal_20260923_coevolution_seed07_thinking_off_v2",
+  "runtime_commit_sha": "2c57dc34ddf4d996b61370a590eb7b557bbef9ef",
+  "runtime_freeze_commit": "2c57dc34ddf4d996b61370a590eb7b557bbef9ef",
+  "runtime_freeze_match_status": "matched",
+  "runtime_freeze_tag": "exp-freeze-2026-09-23-validity-v2",
+  "scenario": "ecommerce_refund",
+  "seed": 7,
+  "service_generator": "llm",
+  "split_manifest": {
+    "files": {
+      "evolution_cases.json": {
+        "case_ids": [
+          "CASE-2AF05D6AAC",
+          "CASE-C341020DF4",
+          "CASE-F23D4EEDF3",
+          "CASE-9FE126D3BB",
+          "CASE-25A1A38EB5",
+          "CASE-6277E4A3BB"
+        ],
+        "path": "split_manifest/evolution_cases.json",
+        "sha256": "536b83df1c1768db2666895fa1a30dff9ef4986e3ab182be42406e8d4f7ab9d1"
+      },
+      "heldout_cases.json": {
+        "case_ids": [
+          "CASE-22C26E346F",
+          "CASE-6548F38545"
+        ],
+        "path": "split_manifest/heldout_cases.json",
+        "sha256": "357b3e80c936bb2097b902a28fa14cafd641f2e176399101ea16e112ae79c2d3"
+      },
+      "validation_cases.json": {
+        "case_ids": [
+          "CASE-DC292F1A50",
+          "CASE-6EF3246E9A"
+        ],
+        "path": "split_manifest/validation_cases.json",
+        "sha256": "58761b4ae83439162ec70380d5fa8b8c4102403fe6fbb8494c412dea3d8256eb"
+      }
+    },
+    "seed": 7,
+    "strategy": "instance_holdout"
+  },
+  "strict_real_generation": true,
+  "token_budget": {
+    "agent": 4096,
+    "customer_evolver": 8192,
+    "judge": 1024,
+    "service_evolver": 8192,
+    "user": 512
+  }
+}

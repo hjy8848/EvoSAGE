@@ -1,0 +1,32 @@
+{
+  "status": "ABORTED_INCONCLUSIVE",
+  "reason": "service_generation_invalid:provider_error",
+  "aborted_at_utc": "2026-09-23T15:28:59Z",
+  "failed_phase": "service_generation",
+  "runtime_commit": "2c57dc34ddf4d996b61370a590eb7b557bbef9ef",
+  "runtime_freeze_tag": "exp-freeze-2026-09-23-validity-v2",
+  "formal_protocol_tag": "formal-protocol-2026-09-23-v2",
+  "seed": 7,
+  "mode": "coevolution",
+  "resume": false,
+  "generation_0_complete": false,
+  "provider_diagnostics": {
+    "llm_requests": 252,
+    "successful_requests": 198,
+    "failed_request_attempts": 54,
+    "timeouts": 6,
+    "client_retries": 9,
+    "terminal_service_generation_attempts": 2,
+    "terminal_error": "SSLError / TLS EOF after provider retries"
+  },
+  "evaluation_diagnostics": {
+    "valid_cached_evaluations": 9,
+    "unresolved_unique_protocol_invalid_evaluations": 19,
+    "invalid_attempt_records": 35,
+    "recovered_invalid_keys": 1,
+    "customer_candidate_case_evaluations": 24,
+    "customer_candidate_valid_cases": 9,
+    "customer_candidate_invalid_cases": 15
+  },
+  "handling": "Artifacts preserved; do not resume or merge into primary results. Retry only in a new fresh run directory after provider stability is restored."
+}

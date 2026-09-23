@@ -1,0 +1,89 @@
+{
+  "customer": {
+    "adversary_access": "black_box",
+    "allowed_strategy_tags": [
+      "truthful",
+      "cooperative",
+      "withholding",
+      "pressure",
+      "contradiction",
+      "delayed_disclosure",
+      "authority_challenge",
+      "delayed_contradiction",
+      "escalation",
+      "paraphrase"
+    ],
+    "candidate_count": 3,
+    "cases_per_candidate": 0,
+    "elite_count": 1,
+    "fitness_weights": {
+      "attack_success": 0.7,
+      "coverage": 0.15,
+      "novelty": 0.15
+    }
+  },
+  "evaluation": {
+    "api_timeout": 120,
+    "concurrency": 1,
+    "customer_thinking_mode": "disabled",
+    "judge_in_evolution": false,
+    "max_turns": 5,
+    "repetitions": 1,
+    "summary_limit": 5,
+    "token_budget": {
+      "agent": 4096,
+      "customer_evolver": 8192,
+      "judge": 1024,
+      "service_evolver": 8192,
+      "user": 512
+    }
+  },
+  "experiment_mode": "coevolution",
+  "fresh_adversary": {
+    "candidate_count": 1,
+    "enabled": false,
+    "rounds": 1
+  },
+  "max_generations": 3,
+  "model_metadata": {
+    "api_key_env": "OPENAI_API_KEY",
+    "api_url": "https://inferaiapi.com/v1",
+    "client": "openai_api",
+    "formal_case_set_id": "10_cases_split_seed7_instances1",
+    "formal_protocol_tag": "formal-protocol-2026-09-23-v2",
+    "model": "deepseek-v4-flash",
+    "parent_freeze_commit": "1fc5aadf4e9294ef14d59f8ca096943b6d38eb67",
+    "parent_freeze_tag": "exp-freeze-2026-09-22-calibrated",
+    "provider": "InferAI",
+    "runtime_freeze_tag": "exp-freeze-2026-09-23-validity-v2"
+  },
+  "persistence": {
+    "output_dir": "results/formal_20260923_coevolution_seed07_thinking_off_v2",
+    "resume": false
+  },
+  "scenario": "ecommerce_refund",
+  "seed": 7,
+  "service": {
+    "allowed_rule_categories": [
+      "VERIFICATION",
+      "ACTION_GROUNDING",
+      "RECOVERY",
+      "TOOL_USE",
+      "COMMUNICATION"
+    ],
+    "candidate_count": 3,
+    "min_delta": 0.01,
+    "normal_regression_tolerance": 0.03,
+    "replay_attack_count": 1
+  },
+  "splits": {
+    "evolution_ratio": 0.6,
+    "heldout_ratio": 0.2,
+    "holdout_paths": [],
+    "instances_per_path": 1,
+    "max_cases": 10,
+    "seed": 7,
+    "strategy": "instance_holdout",
+    "validation_ratio": 0.2
+  }
+}

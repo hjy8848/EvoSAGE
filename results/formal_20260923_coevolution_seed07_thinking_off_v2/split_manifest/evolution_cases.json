@@ -1,0 +1,1166 @@
+{
+  "seed": 7,
+  "strategy": "instance_holdout",
+  "cases": [
+    {
+      "case_id": "CASE-2AF05D6AAC",
+      "split": "evolution",
+      "path_id": 9,
+      "instance_index": 0,
+      "intent": "merchant_compensation_low_credit",
+      "path_config": {
+        "Classification_items": [
+          "ReturnOrRefund",
+          null,
+          "Merchant",
+          null,
+          null
+        ],
+        "system_variables": {
+          "ShippingStatus": "Signed",
+          "CreditLevel": "Medium"
+        },
+        "expected_path": [
+          "step1",
+          "step2",
+          "step3",
+          "step5",
+          "step4",
+          "step7"
+        ],
+        "final_output": {
+          "Action": "Comfort"
+        }
+      },
+      "case_spec": {
+        "case_id": "CASE-2AF05D6AAC",
+        "scenario": "ecommerce_refund",
+        "backend_record": {
+          "order": {
+            "order_id": "ORD-973857C937",
+            "product": {
+              "product_id": "SKU-001",
+              "name": "无线耳机",
+              "price": 299
+            },
+            "shipping_status": "Signed",
+            "payment_status": "Paid",
+            "paid_amount": 299,
+            "refund_status": "None",
+            "refund_eligible": false,
+            "return_window_open": true,
+            "responsibility": "Merchant",
+            "refund_reasonable": null,
+            "has_document": null
+          },
+          "customer": {
+            "customer_id": "CUS-973857C937",
+            "credit_level": "Medium"
+          }
+        },
+        "user_goal": {
+          "type": "merchant_compensation_low_credit",
+          "desired_action": "Comfort"
+        },
+        "user_knowledge": {
+          "order_id": "ORD-973857C937",
+          "customer_id": "CUS-973857C937",
+          "product_name": "无线耳机",
+          "knows_order_id": true,
+          "knows_customer_id": true,
+          "believes_shipping_status": "Signed"
+        },
+        "user_policy": {
+          "mode": "truthful",
+          "truthfulness": "truthful",
+          "reveal_order_id_on_request": true,
+          "reveal_customer_id_on_request": true,
+          "show_order_id_initially": true,
+          "reveal_hidden_account_fields": false
+        },
+        "initial_observation": {},
+        "expected_outcome": {
+          "order.last_action": "Comfort"
+        },
+        "metadata": {
+          "user_intent": "merchant_compensation_low_credit",
+          "path_config": {
+            "Classification_items": [
+              "ReturnOrRefund",
+              null,
+              "Merchant",
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Medium"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4",
+              "step7"
+            ],
+            "final_output": {
+              "Action": "Comfort"
+            }
+          },
+          "legacy_path_config": {
+            "Classification_items": [
+              "ReturnOrRefund",
+              null,
+              "Merchant",
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Medium"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4",
+              "step7"
+            ],
+            "final_output": {
+              "Action": "Comfort"
+            }
+          },
+          "legacy_gt": {
+            "classification": {
+              "CoreIntention": "ReturnOrRefund",
+              "ProvidedDocument": null,
+              "Responsibility": "Merchant",
+              "RefundReasonable": null,
+              "EmotionStatus": null
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4",
+              "step7"
+            ],
+            "finals": {
+              "Action": "Comfort"
+            }
+          },
+          "classification_dict": {
+            "CoreIntention": "ReturnOrRefund",
+            "ProvidedDocument": null,
+            "Responsibility": "Merchant",
+            "RefundReasonable": null,
+            "EmotionStatus": null
+          },
+          "expected_path": [
+            "step1",
+            "step2",
+            "step3",
+            "step5",
+            "step4",
+            "step7"
+          ],
+          "finals": {
+            "Action": "Comfort"
+          },
+          "classification": [
+            "ReturnOrRefund",
+            null,
+            "Merchant",
+            null,
+            null
+          ],
+          "required_backend_verifications": [
+            {
+              "backend_field": "ShippingStatus",
+              "tool": "query_order",
+              "argument": "order_id",
+              "result_field": "shipping_status",
+              "knowledge_key": "order_id"
+            },
+            {
+              "backend_field": "CreditLevel",
+              "tool": "query_customer_profile",
+              "argument": "customer_id",
+              "result_field": "credit_level",
+              "knowledge_key": "customer_id"
+            }
+          ],
+          "backend_system_variables": {
+            "ShippingStatus": "Signed",
+            "CreditLevel": "Medium"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "CASE-C341020DF4",
+      "split": "evolution",
+      "path_id": 15,
+      "instance_index": 0,
+      "intent": "unreasonable_refund",
+      "path_config": {
+        "Classification_items": [
+          "ReturnOrRefund",
+          null,
+          "User",
+          "Unreasonable",
+          null
+        ],
+        "system_variables": {
+          "ShippingStatus": "Signed",
+          "CreditLevel": "Low"
+        },
+        "expected_path": [
+          "step1",
+          "step2",
+          "step3",
+          "step5",
+          "step4",
+          "step6"
+        ],
+        "final_output": {
+          "Action": "Reject"
+        }
+      },
+      "case_spec": {
+        "case_id": "CASE-C341020DF4",
+        "scenario": "ecommerce_refund",
+        "backend_record": {
+          "order": {
+            "order_id": "ORD-68E39C05D6",
+            "product": {
+              "product_id": "SKU-001",
+              "name": "无线耳机",
+              "price": 299
+            },
+            "shipping_status": "Signed",
+            "payment_status": "Paid",
+            "paid_amount": 299,
+            "refund_status": "None",
+            "refund_eligible": false,
+            "return_window_open": true,
+            "responsibility": "User",
+            "refund_reasonable": "Unreasonable",
+            "has_document": null
+          },
+          "customer": {
+            "customer_id": "CUS-68E39C05D6",
+            "credit_level": "Low"
+          }
+        },
+        "user_goal": {
+          "type": "refund",
+          "desired_action": "Reject"
+        },
+        "user_knowledge": {
+          "order_id": "ORD-68E39C05D6",
+          "customer_id": "CUS-68E39C05D6",
+          "product_name": "无线耳机",
+          "knows_order_id": true,
+          "knows_customer_id": true,
+          "believes_shipping_status": "Signed"
+        },
+        "user_policy": {
+          "mode": "truthful",
+          "truthfulness": "truthful",
+          "reveal_order_id_on_request": true,
+          "reveal_customer_id_on_request": true,
+          "show_order_id_initially": true,
+          "reveal_hidden_account_fields": false
+        },
+        "initial_observation": {},
+        "expected_outcome": {
+          "order.last_action": "Reject",
+          "order.refund_status": "Rejected"
+        },
+        "metadata": {
+          "user_intent": "unreasonable_refund",
+          "path_config": {
+            "Classification_items": [
+              "ReturnOrRefund",
+              null,
+              "User",
+              "Unreasonable",
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Low"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4",
+              "step6"
+            ],
+            "final_output": {
+              "Action": "Reject"
+            }
+          },
+          "legacy_path_config": {
+            "Classification_items": [
+              "ReturnOrRefund",
+              null,
+              "User",
+              "Unreasonable",
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Low"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4",
+              "step6"
+            ],
+            "final_output": {
+              "Action": "Reject"
+            }
+          },
+          "legacy_gt": {
+            "classification": {
+              "CoreIntention": "ReturnOrRefund",
+              "ProvidedDocument": null,
+              "Responsibility": "User",
+              "RefundReasonable": "Unreasonable",
+              "EmotionStatus": null
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4",
+              "step6"
+            ],
+            "finals": {
+              "Action": "Reject"
+            }
+          },
+          "classification_dict": {
+            "CoreIntention": "ReturnOrRefund",
+            "ProvidedDocument": null,
+            "Responsibility": "User",
+            "RefundReasonable": "Unreasonable",
+            "EmotionStatus": null
+          },
+          "expected_path": [
+            "step1",
+            "step2",
+            "step3",
+            "step5",
+            "step4",
+            "step6"
+          ],
+          "finals": {
+            "Action": "Reject"
+          },
+          "classification": [
+            "ReturnOrRefund",
+            null,
+            "User",
+            "Unreasonable",
+            null
+          ],
+          "required_backend_verifications": [
+            {
+              "backend_field": "ShippingStatus",
+              "tool": "query_order",
+              "argument": "order_id",
+              "result_field": "shipping_status",
+              "knowledge_key": "order_id"
+            },
+            {
+              "backend_field": "CreditLevel",
+              "tool": "query_customer_profile",
+              "argument": "customer_id",
+              "result_field": "credit_level",
+              "knowledge_key": "customer_id"
+            }
+          ],
+          "backend_system_variables": {
+            "ShippingStatus": "Signed",
+            "CreditLevel": "Low"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "CASE-F23D4EEDF3",
+      "split": "evolution",
+      "path_id": 5,
+      "instance_index": 0,
+      "intent": "exchange_product",
+      "path_config": {
+        "Classification_items": [
+          "Exchange",
+          null,
+          null,
+          null,
+          null
+        ],
+        "system_variables": {
+          "ShippingStatus": "Signed",
+          "CreditLevel": "Low"
+        },
+        "expected_path": [
+          "step1",
+          "step2",
+          "step3",
+          "step4"
+        ],
+        "final_output": {
+          "Action": "PayFee"
+        }
+      },
+      "case_spec": {
+        "case_id": "CASE-F23D4EEDF3",
+        "scenario": "ecommerce_refund",
+        "backend_record": {
+          "order": {
+            "order_id": "ORD-FFE9E97FE0",
+            "product": {
+              "product_id": "SKU-001",
+              "name": "无线耳机",
+              "price": 299
+            },
+            "shipping_status": "Signed",
+            "payment_status": "Paid",
+            "paid_amount": 299,
+            "refund_status": "None",
+            "refund_eligible": false,
+            "return_window_open": true,
+            "responsibility": null,
+            "refund_reasonable": null,
+            "has_document": null
+          },
+          "customer": {
+            "customer_id": "CUS-FFE9E97FE0",
+            "credit_level": "Low"
+          }
+        },
+        "user_goal": {
+          "type": "exchange_product",
+          "desired_action": "PayFee"
+        },
+        "user_knowledge": {
+          "order_id": "ORD-FFE9E97FE0",
+          "customer_id": "CUS-FFE9E97FE0",
+          "product_name": "无线耳机",
+          "knows_order_id": true,
+          "knows_customer_id": true,
+          "believes_shipping_status": "Signed"
+        },
+        "user_policy": {
+          "mode": "truthful",
+          "truthfulness": "truthful",
+          "reveal_order_id_on_request": true,
+          "reveal_customer_id_on_request": true,
+          "show_order_id_initially": true,
+          "reveal_hidden_account_fields": false
+        },
+        "initial_observation": {},
+        "expected_outcome": {
+          "order.last_action": "PayFee"
+        },
+        "metadata": {
+          "user_intent": "exchange_product",
+          "path_config": {
+            "Classification_items": [
+              "Exchange",
+              null,
+              null,
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Low"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step4"
+            ],
+            "final_output": {
+              "Action": "PayFee"
+            }
+          },
+          "legacy_path_config": {
+            "Classification_items": [
+              "Exchange",
+              null,
+              null,
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Low"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step4"
+            ],
+            "final_output": {
+              "Action": "PayFee"
+            }
+          },
+          "legacy_gt": {
+            "classification": {
+              "CoreIntention": "Exchange",
+              "ProvidedDocument": null,
+              "Responsibility": null,
+              "RefundReasonable": null,
+              "EmotionStatus": null
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step4"
+            ],
+            "finals": {
+              "Action": "PayFee"
+            }
+          },
+          "classification_dict": {
+            "CoreIntention": "Exchange",
+            "ProvidedDocument": null,
+            "Responsibility": null,
+            "RefundReasonable": null,
+            "EmotionStatus": null
+          },
+          "expected_path": [
+            "step1",
+            "step2",
+            "step3",
+            "step4"
+          ],
+          "finals": {
+            "Action": "PayFee"
+          },
+          "classification": [
+            "Exchange",
+            null,
+            null,
+            null,
+            null
+          ],
+          "required_backend_verifications": [
+            {
+              "backend_field": "ShippingStatus",
+              "tool": "query_order",
+              "argument": "order_id",
+              "result_field": "shipping_status",
+              "knowledge_key": "order_id"
+            },
+            {
+              "backend_field": "CreditLevel",
+              "tool": "query_customer_profile",
+              "argument": "customer_id",
+              "result_field": "credit_level",
+              "knowledge_key": "customer_id"
+            }
+          ],
+          "backend_system_variables": {
+            "ShippingStatus": "Signed",
+            "CreditLevel": "Low"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "CASE-9FE126D3BB",
+      "split": "evolution",
+      "path_id": 8,
+      "instance_index": 0,
+      "intent": "merchant_compensation_high_credit",
+      "path_config": {
+        "Classification_items": [
+          "ReturnOrRefund",
+          null,
+          "Merchant",
+          null,
+          null
+        ],
+        "system_variables": {
+          "ShippingStatus": "Signed",
+          "CreditLevel": "High"
+        },
+        "expected_path": [
+          "step1",
+          "step2",
+          "step3",
+          "step5",
+          "step4"
+        ],
+        "final_output": {
+          "Action": "Comfort+Compensation"
+        }
+      },
+      "case_spec": {
+        "case_id": "CASE-9FE126D3BB",
+        "scenario": "ecommerce_refund",
+        "backend_record": {
+          "order": {
+            "order_id": "ORD-34840F8CAF",
+            "product": {
+              "product_id": "SKU-001",
+              "name": "无线耳机",
+              "price": 299
+            },
+            "shipping_status": "Signed",
+            "payment_status": "Paid",
+            "paid_amount": 299,
+            "refund_status": "None",
+            "refund_eligible": false,
+            "return_window_open": true,
+            "responsibility": "Merchant",
+            "refund_reasonable": null,
+            "has_document": null
+          },
+          "customer": {
+            "customer_id": "CUS-34840F8CAF",
+            "credit_level": "High"
+          }
+        },
+        "user_goal": {
+          "type": "merchant_compensation_high_credit",
+          "desired_action": "Comfort+Compensation"
+        },
+        "user_knowledge": {
+          "order_id": "ORD-34840F8CAF",
+          "customer_id": "CUS-34840F8CAF",
+          "product_name": "无线耳机",
+          "knows_order_id": true,
+          "knows_customer_id": true,
+          "believes_shipping_status": "Signed"
+        },
+        "user_policy": {
+          "mode": "truthful",
+          "truthfulness": "truthful",
+          "reveal_order_id_on_request": true,
+          "reveal_customer_id_on_request": true,
+          "show_order_id_initially": true,
+          "reveal_hidden_account_fields": false
+        },
+        "initial_observation": {},
+        "expected_outcome": {
+          "order.last_action": "Comfort+Compensation"
+        },
+        "metadata": {
+          "user_intent": "merchant_compensation_high_credit",
+          "path_config": {
+            "Classification_items": [
+              "ReturnOrRefund",
+              null,
+              "Merchant",
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "High"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4"
+            ],
+            "final_output": {
+              "Action": "Comfort+Compensation"
+            }
+          },
+          "legacy_path_config": {
+            "Classification_items": [
+              "ReturnOrRefund",
+              null,
+              "Merchant",
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "High"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4"
+            ],
+            "final_output": {
+              "Action": "Comfort+Compensation"
+            }
+          },
+          "legacy_gt": {
+            "classification": {
+              "CoreIntention": "ReturnOrRefund",
+              "ProvidedDocument": null,
+              "Responsibility": "Merchant",
+              "RefundReasonable": null,
+              "EmotionStatus": null
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4"
+            ],
+            "finals": {
+              "Action": "Comfort+Compensation"
+            }
+          },
+          "classification_dict": {
+            "CoreIntention": "ReturnOrRefund",
+            "ProvidedDocument": null,
+            "Responsibility": "Merchant",
+            "RefundReasonable": null,
+            "EmotionStatus": null
+          },
+          "expected_path": [
+            "step1",
+            "step2",
+            "step3",
+            "step5",
+            "step4"
+          ],
+          "finals": {
+            "Action": "Comfort+Compensation"
+          },
+          "classification": [
+            "ReturnOrRefund",
+            null,
+            "Merchant",
+            null,
+            null
+          ],
+          "required_backend_verifications": [
+            {
+              "backend_field": "ShippingStatus",
+              "tool": "query_order",
+              "argument": "order_id",
+              "result_field": "shipping_status",
+              "knowledge_key": "order_id"
+            },
+            {
+              "backend_field": "CreditLevel",
+              "tool": "query_customer_profile",
+              "argument": "customer_id",
+              "result_field": "credit_level",
+              "knowledge_key": "customer_id"
+            }
+          ],
+          "backend_system_variables": {
+            "ShippingStatus": "Signed",
+            "CreditLevel": "High"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "CASE-25A1A38EB5",
+      "split": "evolution",
+      "path_id": 12,
+      "instance_index": 0,
+      "intent": "user_return_low_credit_with_doc",
+      "path_config": {
+        "Classification_items": [
+          "ReturnOrRefund",
+          null,
+          "User",
+          null,
+          null
+        ],
+        "system_variables": {
+          "ShippingStatus": "Signed",
+          "CreditLevel": "Medium"
+        },
+        "expected_path": [
+          "step1",
+          "step2",
+          "step3",
+          "step5",
+          "step4"
+        ],
+        "final_output": {
+          "Action": "CollectionService"
+        }
+      },
+      "case_spec": {
+        "case_id": "CASE-25A1A38EB5",
+        "scenario": "ecommerce_refund",
+        "backend_record": {
+          "order": {
+            "order_id": "ORD-A005FBCB76",
+            "product": {
+              "product_id": "SKU-001",
+              "name": "无线耳机",
+              "price": 299
+            },
+            "shipping_status": "Signed",
+            "payment_status": "Paid",
+            "paid_amount": 299,
+            "refund_status": "None",
+            "refund_eligible": false,
+            "return_window_open": true,
+            "responsibility": "User",
+            "refund_reasonable": null,
+            "has_document": null
+          },
+          "customer": {
+            "customer_id": "CUS-A005FBCB76",
+            "credit_level": "Medium"
+          }
+        },
+        "user_goal": {
+          "type": "user_return_low_credit_with_doc",
+          "desired_action": "CollectionService"
+        },
+        "user_knowledge": {
+          "order_id": "ORD-A005FBCB76",
+          "customer_id": "CUS-A005FBCB76",
+          "product_name": "无线耳机",
+          "knows_order_id": true,
+          "knows_customer_id": true,
+          "believes_shipping_status": "Signed"
+        },
+        "user_policy": {
+          "mode": "truthful",
+          "truthfulness": "truthful",
+          "reveal_order_id_on_request": true,
+          "reveal_customer_id_on_request": true,
+          "show_order_id_initially": true,
+          "reveal_hidden_account_fields": false
+        },
+        "initial_observation": {},
+        "expected_outcome": {
+          "order.last_action": "CollectionService",
+          "order.return_status": "PickupScheduled"
+        },
+        "metadata": {
+          "user_intent": "user_return_low_credit_with_doc",
+          "path_config": {
+            "Classification_items": [
+              "ReturnOrRefund",
+              null,
+              "User",
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Medium"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4"
+            ],
+            "final_output": {
+              "Action": "CollectionService"
+            }
+          },
+          "legacy_path_config": {
+            "Classification_items": [
+              "ReturnOrRefund",
+              null,
+              "User",
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Medium"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4"
+            ],
+            "final_output": {
+              "Action": "CollectionService"
+            }
+          },
+          "legacy_gt": {
+            "classification": {
+              "CoreIntention": "ReturnOrRefund",
+              "ProvidedDocument": null,
+              "Responsibility": "User",
+              "RefundReasonable": null,
+              "EmotionStatus": null
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step5",
+              "step4"
+            ],
+            "finals": {
+              "Action": "CollectionService"
+            }
+          },
+          "classification_dict": {
+            "CoreIntention": "ReturnOrRefund",
+            "ProvidedDocument": null,
+            "Responsibility": "User",
+            "RefundReasonable": null,
+            "EmotionStatus": null
+          },
+          "expected_path": [
+            "step1",
+            "step2",
+            "step3",
+            "step5",
+            "step4"
+          ],
+          "finals": {
+            "Action": "CollectionService"
+          },
+          "classification": [
+            "ReturnOrRefund",
+            null,
+            "User",
+            null,
+            null
+          ],
+          "required_backend_verifications": [
+            {
+              "backend_field": "ShippingStatus",
+              "tool": "query_order",
+              "argument": "order_id",
+              "result_field": "shipping_status",
+              "knowledge_key": "order_id"
+            },
+            {
+              "backend_field": "CreditLevel",
+              "tool": "query_customer_profile",
+              "argument": "customer_id",
+              "result_field": "credit_level",
+              "knowledge_key": "customer_id"
+            }
+          ],
+          "backend_system_variables": {
+            "ShippingStatus": "Signed",
+            "CreditLevel": "Medium"
+          }
+        }
+      }
+    },
+    {
+      "case_id": "CASE-6277E4A3BB",
+      "split": "evolution",
+      "path_id": 4,
+      "instance_index": 0,
+      "intent": "exchange_product",
+      "path_config": {
+        "Classification_items": [
+          "Exchange",
+          null,
+          null,
+          null,
+          null
+        ],
+        "system_variables": {
+          "ShippingStatus": "Signed",
+          "CreditLevel": "Medium"
+        },
+        "expected_path": [
+          "step1",
+          "step2",
+          "step3",
+          "step4"
+        ],
+        "final_output": {
+          "Action": "Exchange"
+        }
+      },
+      "case_spec": {
+        "case_id": "CASE-6277E4A3BB",
+        "scenario": "ecommerce_refund",
+        "backend_record": {
+          "order": {
+            "order_id": "ORD-3311656132",
+            "product": {
+              "product_id": "SKU-001",
+              "name": "无线耳机",
+              "price": 299
+            },
+            "shipping_status": "Signed",
+            "payment_status": "Paid",
+            "paid_amount": 299,
+            "refund_status": "None",
+            "refund_eligible": false,
+            "return_window_open": true,
+            "responsibility": null,
+            "refund_reasonable": null,
+            "has_document": null
+          },
+          "customer": {
+            "customer_id": "CUS-3311656132",
+            "credit_level": "Medium"
+          }
+        },
+        "user_goal": {
+          "type": "exchange_product",
+          "desired_action": "Exchange"
+        },
+        "user_knowledge": {
+          "order_id": "ORD-3311656132",
+          "customer_id": "CUS-3311656132",
+          "product_name": "无线耳机",
+          "knows_order_id": true,
+          "knows_customer_id": true,
+          "believes_shipping_status": "Signed"
+        },
+        "user_policy": {
+          "mode": "truthful",
+          "truthfulness": "truthful",
+          "reveal_order_id_on_request": true,
+          "reveal_customer_id_on_request": true,
+          "show_order_id_initially": true,
+          "reveal_hidden_account_fields": false
+        },
+        "initial_observation": {},
+        "expected_outcome": {
+          "order.last_action": "Exchange"
+        },
+        "metadata": {
+          "user_intent": "exchange_product",
+          "path_config": {
+            "Classification_items": [
+              "Exchange",
+              null,
+              null,
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Medium"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step4"
+            ],
+            "final_output": {
+              "Action": "Exchange"
+            }
+          },
+          "legacy_path_config": {
+            "Classification_items": [
+              "Exchange",
+              null,
+              null,
+              null,
+              null
+            ],
+            "system_variables": {
+              "ShippingStatus": "Signed",
+              "CreditLevel": "Medium"
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step4"
+            ],
+            "final_output": {
+              "Action": "Exchange"
+            }
+          },
+          "legacy_gt": {
+            "classification": {
+              "CoreIntention": "Exchange",
+              "ProvidedDocument": null,
+              "Responsibility": null,
+              "RefundReasonable": null,
+              "EmotionStatus": null
+            },
+            "expected_path": [
+              "step1",
+              "step2",
+              "step3",
+              "step4"
+            ],
+            "finals": {
+              "Action": "Exchange"
+            }
+          },
+          "classification_dict": {
+            "CoreIntention": "Exchange",
+            "ProvidedDocument": null,
+            "Responsibility": null,
+            "RefundReasonable": null,
+            "EmotionStatus": null
+          },
+          "expected_path": [
+            "step1",
+            "step2",
+            "step3",
+            "step4"
+          ],
+          "finals": {
+            "Action": "Exchange"
+          },
+          "classification": [
+            "Exchange",
+            null,
+            null,
+            null,
+            null
+          ],
+          "required_backend_verifications": [
+            {
+              "backend_field": "ShippingStatus",
+              "tool": "query_order",
+              "argument": "order_id",
+              "result_field": "shipping_status",
+              "knowledge_key": "order_id"
+            },
+            {
+              "backend_field": "CreditLevel",
+              "tool": "query_customer_profile",
+              "argument": "customer_id",
+              "result_field": "credit_level",
+              "knowledge_key": "customer_id"
+            }
+          ],
+          "backend_system_variables": {
+            "ShippingStatus": "Signed",
+            "CreditLevel": "Medium"
+          }
+        }
+      }
+    }
+  ]
+}

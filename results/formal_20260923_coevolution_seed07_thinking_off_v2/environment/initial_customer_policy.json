@@ -1,0 +1,25 @@
+{
+  "claim_strategy": "state the customer's belief without changing the underlying case facts",
+  "contradiction_strategy": "ask for an explanation when a verified result conflicts with the claim",
+  "created_at": "2026-09-23T14:17:59.671966+00:00",
+  "description": "Truthful customer interaction baseline.",
+  "disclosure_strategy": "provide requested order information when asked",
+  "escalation_strategy": "escalate only after a failed or missing resolution",
+  "generation": 0,
+  "model_metadata": {},
+  "mutation_rationale": "baseline",
+  "name": "baseline",
+  "optional_target_failure_modes": [],
+  "optional_target_sop_node": null,
+  "parent_policy_ids": [],
+  "policy_id": "customer_policy_c0",
+  "pressure_strategy": "remain polite and pursue the original request",
+  "response_to_rejection": "ask for the reason and a legitimate next step",
+  "response_to_verification": "acknowledge authoritative results and continue the same goal",
+  "source_failure_ids": [],
+  "strategy_tags": [
+    "truthful",
+    "cooperative"
+  ],
+  "timing_strategy": "disclose information when the service workflow requires it"
+}

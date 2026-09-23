@@ -1,0 +1,46 @@
+{
+  "attempts": [
+    {
+      "attempt_index": 0,
+      "completion_tokens": null,
+      "finish_reason": null,
+      "input_tokens": null,
+      "latency_seconds": 0.2313343329997224,
+      "max_tokens": 8192,
+      "parse_error": null,
+      "parse_status": "NOT_RUN",
+      "provider_error": "SSLError: HTTPSConnectionPool(host='inferaiapi.com', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by SSLError(SSLEOFError(8, 'EOF occurred in violation of protocol (_ssl.c:1129)')))",
+      "raw_content": "",
+      "raw_provider_response": null,
+      "reasoning_content": "",
+      "reasoning_tokens": null,
+      "request_id": null,
+      "timeout": false
+    },
+    {
+      "attempt_index": 1,
+      "completion_tokens": null,
+      "finish_reason": null,
+      "input_tokens": null,
+      "latency_seconds": 0.23724887500020486,
+      "max_tokens": 8192,
+      "parse_error": null,
+      "parse_status": "NOT_RUN",
+      "provider_error": "SSLError: HTTPSConnectionPool(host='inferaiapi.com', port=443): Max retries exceeded with url: /v1/chat/completions (Caused by SSLError(SSLEOFError(8, 'EOF occurred in violation of protocol (_ssl.c:1129)')))",
+      "raw_content": "",
+      "raw_provider_response": null,
+      "reasoning_content": "",
+      "reasoning_tokens": null,
+      "request_id": null,
+      "timeout": false
+    }
+  ],
+  "generation": 0,
+  "max_tokens": 8192,
+  "prompt": "Analyze these abstract customer-service failure signatures and propose structured, general service rules. Do not mention case IDs, order IDs, expected paths/actions, hidden values, or evaluator manipulation. Return a JSON array only with objects containing category, text, rationale. Categories must be VERIFICATION, ACTION_GROUNDING, RECOVERY, TOOL_USE, or COMMUNICATION.\nFailure signatures: [{\"errors\": [\"missed_backend_verification\", \"wrong_tool_selection\"], \"node\": \"step4\", \"predicted_action\": \"Reject\", \"executed_action\": \"Reject\", \"termination\": \"goal_fulfilled\", \"verification\": 0.5, \"policy\": 0.0, \"action\": 1.0, \"goal\": 1.0, \"tools\": [\"query_order\", \"reject_request\"]}, {\"errors\": [\"missed_backend_verification\"], \"node\": \"step4\", \"predicted_action\": \"PayFee\", \"executed_action\": \"PayFee\", \"termination\": \"goal_fulfilled\", \"verification\": 1.0, \"policy\": 0.0, \"action\": 1.0, \"goal\": 1.0, \"tools\": [\"query_order\", \"request_document\", \"query_customer_profile\", \"charge_fee\"]}, {\"errors\": [\"missed_backend_verification\", \"wrong_tool_selection\"], \"node\": \"step4\", \"predicted_action\": \"CollectionService\", \"executed_action\": \"CollectionService\", \"termination\": \"goal_fulfilled\", \"verification\": 0.5, \"policy\": 0.0, \"action\": 1.0, \"goal\": 1.0, \"tools\": [\"query_order\", \"schedule_pickup\"]}, {\"errors\": [\"goal_not_fulfilled\", \"missed_backend_verification\", \"wrong_final_action\", \"wrong_tool_selection\"], \"node\": \"step4\", \"predicted_action\": \"Supplementary\", \"executed_action\": \"Supplementary\", \"termination\": \"max_turns\", \"verification\": 0.5, \"policy\": 0.0, \"action\": 0.0, \"goal\": 0.0, \"tools\": [\"query_order\", \"request_document\", \"request_document\", \"query_order\", \"request_document\"]}]\nExisting active rules: []\nDefense archive summary: []\nHistorical regression summary: []\nGenerate up to 3 distinct patches.",
+  "reason": "service_generation_invalid:provider_error",
+  "retry_count": 1,
+  "retry_limit": 1,
+  "role": "service",
+  "status": "inconclusive"
+}
