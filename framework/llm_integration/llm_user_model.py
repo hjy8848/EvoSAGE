@@ -83,6 +83,10 @@ class LLMUserModel(UserModel):
             facts=case_spec.user_knowledge if case_spec else {},
             known_facts=case_spec.user_knowledge if case_spec else {},
         )
+        if case_spec:
+            self.initialize_emotion_from_case(
+                (case_spec.user_policy or {}).get("initial_emotion")
+            )
         
         # 新增: 追踪问题是否已解决
         self.problem_status = "unsolved"  # unsolved, partially_solved, solved
@@ -90,6 +94,12 @@ class LLMUserModel(UserModel):
         
         if llm_client is None:
             logger.warning("No LLM client provided. User message generation may be limited.")
+
+    def _emotion_prompt_line(self) -> str:
+        """Render affect only when it is case-declared or changed in-dialogue."""
+        if self.initial_emotion_was_explicit or self.emotion_state.value != "calm":
+            return f"- 情感状态: {self.emotion_state.value}\n"
+        return ""
 
     def attach_case_spec(self, case_spec: CaseSpec) -> None:
         """Bind this customer simulator to one deterministic benchmark case."""
@@ -403,6 +413,7 @@ class LLMUserModel(UserModel):
         # 根据场景选择人物身份
         scenario_id = self.profile.scenario_id
         role_desc = self._get_role_description()
+        emotion_line = self._emotion_prompt_line()
         opening_contract = get_customer_opening_contract(self.case_spec)
         contract_text = ""
         if opening_contract:
@@ -423,8 +434,7 @@ class LLMUserModel(UserModel):
 【你的身份】
 - 意图: {self.profile.user_intent}
 - 对抗强度: {intensity_desc}
-- 情感状态: {self.emotion_state.value}
-- 场景: {scenario_id}
+{emotion_line}- 场景: {scenario_id}
 
 【你的背景和问题】
 {self.system_prompt}
@@ -494,14 +504,14 @@ class LLMUserModel(UserModel):
         # 根据场景选择人物身份
         scenario_id = self.profile.scenario_id
         role_desc = self._get_role_description()
+        emotion_line = self._emotion_prompt_line()
         
         prompt = f"""你正在扮演{role_desc},继续与客服的对话。
 
 【用户身份】
 - 意图: {self.profile.user_intent}
 - 对抗强度: {intensity_desc}
-- 情感状态: {self.emotion_state.value}
-- 满意度: {self.satisfaction_score:.1f}/1.0
+{emotion_line}- 满意度: {self.satisfaction_score:.1f}/1.0
 - 当前轮次: {turn_count}
 - 场景: {scenario_id}
 
@@ -702,6 +712,10 @@ class RuleUserModel(UserModel):
             facts=case_spec.user_knowledge if case_spec else {},
             known_facts=case_spec.user_knowledge if case_spec else {},
         )
+        if case_spec:
+            self.initialize_emotion_from_case(
+                (case_spec.user_policy or {}).get("initial_emotion")
+            )
         self.problem_status = "unsolved"
 
     def generate_initial_message(self) -> str:
