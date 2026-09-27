@@ -44,6 +44,7 @@ def main() -> int:
         raise SystemExit("choose --evaluator mock or --evaluator real")
     evaluator = MockEpisodeEvaluator()
     customer_evolver = None
+    fresh_strategy_generator = None
     if evaluator_mode == "real":
         if not args.model or not os.environ.get("OPENAI_API_KEY"):
             raise SystemExit("--real requires --model/EVOSAGE_MODEL and OPENAI_API_KEY")
@@ -67,6 +68,28 @@ def main() -> int:
             strategy_generator=LLMCustomerPolicyGenerator(evolution_client, config.customer.adversary_access),
             require_strategy_generator=True,
         )
+        if config.fresh_adversary.mode == "cross_generator":
+            from framework.llm_integration import get_llm_client
+            fresh_model = config.fresh_adversary.generator_model
+            # The configured API-compatible gateway routes the explicitly
+            # named fresh model/provider; the provider label is preserved in
+            # result provenance. No credential is written to config/artifacts.
+            fresh_client = get_llm_client(
+                str(config.model_metadata.get("client") or "openai_api"),
+                api_key=os.environ["OPENAI_API_KEY"],
+                base_url=args.api_url,
+                model_name=fresh_model,
+                timeout=config.evaluation.api_timeout,
+            )
+            fresh_strategy_generator = LLMCustomerPolicyGenerator(
+                fresh_client,
+                adversary_access=config.customer.adversary_access,
+                max_tokens=config.evaluation.token_budget.customer_evolver,
+                summary_limit=config.evaluation.summary_limit,
+                allowed_strategy_tags=config.customer.allowed_strategy_tags,
+            )
+    elif config.fresh_adversary.mode == "cross_generator":
+        raise SystemExit("cross_generator fresh adversary evaluation requires --real and a separate configured model")
     runner = EvolutionRunner(config, evaluator=evaluator, customer_evolver=customer_evolver)
     targets = [args.target] if args.target != "all" else ["initial", "final_coevolved"]
     if args.service_only_run_dir:
@@ -88,6 +111,8 @@ def main() -> int:
             candidate_count=config.fresh_adversary.candidate_count,
             target_service=service,
             target_label=target,
+            mode=config.fresh_adversary.mode,
+            fresh_strategy_generator=fresh_strategy_generator,
         )
         total += len(results)
     print(f"wrote {total} fresh-adversary episodes under {Path(args.run_dir) / 'analysis'}")

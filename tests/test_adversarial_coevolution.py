@@ -540,6 +540,10 @@ def test_fresh_adversary_updates_incumbent_without_training_archive(tmp_path):
     data = json.loads((tmp_path / "run" / "analysis" / "fresh_adversary_final.json").read_text())
     assert len(data["rounds"]) == 2
     assert data["training_archive_used"] is False
+    assert data["fresh_mode"] == "in_family"
+    assert data["rounds"][0]["known_signature_count_before"] == 0
+    assert data["rounds"][1]["known_signature_count_before"] == data["rounds"][0]["known_signature_count_after"]
+    assert data["heldout_used_for_adaptation_or_selection"] is False
     assert data["rounds"][0]["selected_policy"]["policy_id"] != data["rounds"][1]["selected_policy"]["policy_id"]
 
 

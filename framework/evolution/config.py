@@ -144,6 +144,23 @@ class FreshAdversaryConfig:
     enabled: bool = False
     rounds: int = 2
     candidate_count: int = 5
+    mode: str = "in_family"
+    generator_model: Optional[str] = None
+    generator_provider: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.rounds < 1:
+            raise ValueError("fresh_adversary.rounds must be at least 1")
+        if self.candidate_count < 1:
+            raise ValueError("fresh_adversary.candidate_count must be at least 1")
+        if self.mode not in {"in_family", "cross_generator"}:
+            raise ValueError("fresh_adversary.mode must be in_family or cross_generator")
+        if self.mode == "cross_generator" and (
+            not self.generator_model or not self.generator_provider
+        ):
+            raise ValueError(
+                "cross_generator mode requires generator_model and generator_provider"
+            )
 
 
 @dataclass

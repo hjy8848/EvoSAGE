@@ -610,10 +610,42 @@ class EvolutionRunner:
         return results
 
     def fresh_adversary_evaluation(self, rounds: int = 2, candidate_count: int = 5,
-                                   target_service=None, target_label: str = "final"):
-        """Evaluate newly proposed customer strategies without archive feedback."""
+                                   target_service=None, target_label: str = "final",
+                                   mode: str | None = None, fresh_strategy_generator=None):
+        """Adapt fresh customers on validation, then evaluate only on held-out.
+
+        In-family reuses the training generator class/model with a fresh seed.
+        Cross-generator requires an explicitly constructed, independently
+        configured generator; it never silently falls back to the training one.
+        """
         splits = SplitManager.load(self.store.run_dir / "split_manifest")
         service = target_service or self._load_policy("service_policy", ServicePolicy())
+        mode = mode or self.config.fresh_adversary.mode
+        if mode not in {"in_family", "cross_generator"}:
+            raise ValueError("fresh adversary mode must be in_family or cross_generator")
+        fresh_config = self.config.fresh_adversary
+        if mode == "cross_generator":
+            if fresh_strategy_generator is None:
+                raise ValueError("cross_generator mode requires a separate fresh_strategy_generator")
+            if not fresh_config.generator_model or not fresh_config.generator_provider:
+                raise ValueError("cross_generator mode requires generator model/provider provenance")
+            training_model = str(self.config.model_metadata.get("model") or "")
+            training_provider = str(self.config.model_metadata.get("provider") or "")
+            if (
+                fresh_config.generator_model == training_model
+                and fresh_config.generator_provider == training_provider
+            ):
+                raise ValueError("cross_generator must differ from the training model or provider")
+            strategy_generator = fresh_strategy_generator
+            require_generator = True
+        else:
+            strategy_generator = fresh_strategy_generator or getattr(
+                self.customer_evolver, "strategy_generator", None
+            )
+            require_generator = bool(
+                getattr(self.customer_evolver, "require_strategy_generator", False)
+            ) if fresh_strategy_generator is None else True
+
         incumbent = CustomerPolicy()
         results = []
         adaptation_results = []
@@ -622,9 +654,10 @@ class EvolutionRunner:
             seed=self.config.seed + 10_000,
             validator=getattr(self.customer_evolver, "validator", None),
             selector=selector,
-            strategy_generator=getattr(self.customer_evolver, "strategy_generator", None),
-            require_strategy_generator=getattr(self.customer_evolver, "require_strategy_generator", False),
+            strategy_generator=strategy_generator,
+            require_strategy_generator=require_generator,
         )
+        known_signatures: set[str] = set()
         round_records = []
         for generation in range(rounds):
             candidates = fresh_evolver.propose(incumbent, 10_000 + generation, candidate_count)
@@ -638,30 +671,97 @@ class EvolutionRunner:
                     episode.metadata = dict(episode.metadata, fresh_round=generation, target_service=target_label)
                 adaptation_results.extend(episodes)
                 evaluated.append((policy, episodes))
-            selected, scores = selector.select(evaluated, set())
+            known_before = set(known_signatures)
+            selected, scores = selector.select(evaluated, known_signatures)
             incumbent = selected or incumbent
+            selected_validation = next(
+                (episodes for policy, episodes in evaluated if selected is not None and policy.policy_id == selected.policy_id),
+                [],
+            )
+            selected_signature_ids = sorted({
+                signature.signature_id
+                for episode in selected_validation
+                if episode.is_attributable_service_failure()
+                for signature in [episode.vulnerability_signature_v2()]
+                if signature is not None
+            })
+            known_signatures.update(selected_signature_ids)
             heldout_episodes = self.evaluator.evaluate(incumbent, service, splits.heldout_test, "heldout_test", generation, "fresh_adversary_eval")
             for episode in heldout_episodes:
                 episode.metadata = dict(episode.metadata, fresh_round=generation, target_service=target_label, adaptation_split="validation")
             results.extend(heldout_episodes)
             selected_scores = next((score.to_dict() for score in scores if score.policy_id == incumbent.policy_id), {})
-            round_records.append({"round": generation, "target_service": target_label,
-                                  "selected_policy": incumbent.to_dict(), "fitness": selected_scores})
-        self.store.write_json(f"analysis/fresh_adversary_{target_label}.json", {
+            round_records.append({
+                "round": generation,
+                "target_service": target_label,
+                "selected_policy": incumbent.to_dict(),
+                "fitness": selected_scores,
+                "known_signature_count_before": len(known_before),
+                "selected_validation_signature_ids": selected_signature_ids,
+                "known_signature_count_after": len(known_signatures),
+                "novelty_reference": "prior selected fresh-round validation signatures",
+            })
+        training_model = self.config.model_metadata.get("model")
+        training_provider = self.config.model_metadata.get("provider")
+        generator_model = (
+            fresh_config.generator_model if mode == "cross_generator"
+            else training_model or getattr(getattr(strategy_generator, "llm_client", None), "model_name", None)
+        )
+        generator_provider = (
+            fresh_config.generator_provider if mode == "cross_generator" else training_provider
+        )
+        generator_class = type(strategy_generator).__name__ if strategy_generator is not None else "template"
+        heldout_metrics = aggregate_episode_metrics(results)
+        robustness_value = (
+            heldout_metrics["task_success"] if heldout_metrics["episodes"] > 0 else None
+        )
+        robustness_metric = (
+            "fresh_in_family_robustness" if mode == "in_family"
+            else "fresh_cross_generator_robustness"
+        )
+        output_name = f"fresh_adversary_{target_label}.json"
+        if mode == "cross_generator":
+            output_name = f"fresh_adversary_cross_generator_{target_label}.json"
+        payload = {
             "evaluator": "mock" if isinstance(self.base_evaluator, MockEpisodeEvaluator) else "real",
+            "fresh_mode": mode,
+            "robustness_metric": robustness_metric,
+            robustness_metric: robustness_value,
+            "heldout_metric_status": "valid" if robustness_value is not None else "inconclusive",
+            "heldout_valid_episode_count": int(heldout_metrics["episodes"]),
+            "heldout_invalid_episode_count": int(heldout_metrics["invalid_episodes"]),
             "target_service": target_label,
             "results": [item.to_dict() for item in results],
             "adaptation_results": [item.to_dict() for item in adaptation_results],
             "rounds": round_records,
             "training_archive_used": False,
+            "heldout_used_for_adaptation_or_selection": False,
             "customer_generator": "llm" if fresh_evolver.strategy_generator is not None else "template",
+            "customer_generator_class": generator_class,
+            "customer_generator_model": generator_model,
+            "customer_generator_provider": generator_provider,
+            "customer_generator_client": str(
+                self.config.model_metadata.get("client") or "unknown"
+            ),
+            "training_generator_model": training_model,
+            "training_generator_provider": training_provider,
+            "fresh_generator_seed": self.config.seed + 10_000,
             "strict_real_generation": bool(fresh_evolver.require_strategy_generator),
-        })
+        }
+        self.store.write_json(f"analysis/{output_name}", payload)
         # Keep a stable aggregate path for existing tooling.
         self.store.write_json("analysis/fresh_adversary_results.json", {
             "results": [item.to_dict() for item in results],
             "target_service": target_label,
             "evaluator": "mock" if isinstance(self.base_evaluator, MockEpisodeEvaluator) else "real",
+            "fresh_mode": mode,
+            "robustness_metric": payload["robustness_metric"],
+            robustness_metric: robustness_value,
+            "heldout_metric_status": payload["heldout_metric_status"],
+            "heldout_valid_episode_count": payload["heldout_valid_episode_count"],
+            "heldout_invalid_episode_count": payload["heldout_invalid_episode_count"],
+            "customer_generator_model": generator_model,
+            "customer_generator_provider": generator_provider,
             "customer_generator": "llm" if fresh_evolver.strategy_generator is not None else "template",
             "strict_real_generation": bool(fresh_evolver.require_strategy_generator),
         })
