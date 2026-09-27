@@ -34,6 +34,17 @@ def ecommerce_case():
     return build_case_spec("ecommerce_refund", "refund_before_shipping", generate_path_list()[5], "test-user")
 
 
+def _structured_service_rule(rule_id="r", category="VERIFICATION", trigger=None,
+                             obligations=None, prohibitions=None, ordering=None, recovery=None):
+    return ServiceRule(
+        rule_id, category, "", rule_schema_version=2,
+        trigger=trigger or {"type": "BEFORE_STATE_DEPENDENT_ACTION"},
+        obligations=obligations or [{"type": "VERIFY_WITH_TOOL"}],
+        prohibitions=prohibitions or [], ordering_constraints=ordering or [],
+        recovery=recovery or {},
+    )
+
+
 def test_role_token_budgets_load_as_nested_config():
     config = EvolutionConfig.from_dict({
         "evaluation": {
@@ -416,7 +427,9 @@ def test_unknown_customer_strategy_is_rejected():
 
 
 def test_service_sanitizer_rejects_case_specific_rules():
-    patch = ServicePatch("p1", "add", [ServiceRule("r1", "VERIFICATION", "For CASE-123 use expected_path")])
+    patch = ServicePatch("p1", "add", [ServiceRule(
+        "r1", "VERIFICATION", "For CASE-123 use expected_path", rule_schema_version=1,
+    )])
     with pytest.raises(PolicyValidationError):
         ServicePolicySanitizer().sanitize(patch)
 
@@ -744,7 +757,7 @@ def test_service_candidate_protocol_failure_is_not_a_substantive_gate_rejection(
         def generate(self, *args, **kwargs):
             return [ServicePatch(
                 "invalid-patch", "add",
-                [ServiceRule("invalid-rule", "VERIFICATION", "Verify the required identifier before acting.")],
+                [_structured_service_rule("invalid-rule")],
             )]
 
     class Evaluator:
@@ -818,7 +831,11 @@ def test_service_latest_filter_skips_replay_and_normal_for_rejected_patch():
         def generate(self, *args, **kwargs):
             return [ServicePatch(
                 "non-improving", "add",
-                [ServiceRule("polite", "COMMUNICATION", "Be polite to the customer.")],
+                [_structured_service_rule(
+                    "polite", "COMMUNICATION",
+                    trigger={"type": "BEFORE_COMPLETION_CLAIM"},
+                    obligations=[{"type": "GROUND_REPLY_IN_TOOL_RESULT"}],
+                )],
             )]
 
     split = SplitManager().build()
@@ -839,7 +856,10 @@ def test_service_latest_filter_skips_replay_and_normal_for_rejected_patch():
     # that we can distinguish an ineffective rule from a generation failure.
     rejected = evolver.last_candidate_records[0]
     assert rejected["patch"]["patch_id"] == "non-improving"
-    assert rejected["patch"]["rules"][0]["text"] == "Be polite to the customer."
+    rejected_rule = rejected["patch"]["rules"][0]
+    assert rejected_rule["rule_schema_version"] == 2
+    assert rejected_rule["trigger"] == {"type": "BEFORE_COMPLETION_CLAIM"}
+    assert rejected_rule["text"].startswith("Before claiming that a request is complete:")
     assert rejected["candidate_policy"]["policy_id"].endswith("_non-improving")
 
 
@@ -857,7 +877,12 @@ def test_llm_generators_return_valid_structured_candidates_without_api():
 
     customer = CustomerPolicy()
     generated = LLMCustomerPolicyGenerator(FakeClient('[{"name":"authority","description":"ask for an explanation","strategy_tags":["authority_challenge"],"disclosure_strategy":"answer necessary questions","pressure_strategy":"remain firm","contradiction_strategy":"ask for clarification","response_to_verification":"acknowledge the result","response_to_rejection":"request a reason"}]')).generate(customer, [], ServicePolicy(), 1, 1)
-    patch = LLMServicePatchGenerator(FakeClient('[{"category":"VERIFICATION","text":"Verify authoritative results before deciding.","rationale":"failure-driven"}]')).generate(ServicePolicy(), [], 1, 1)
+    patch = LLMServicePatchGenerator(FakeClient(
+        '[{"category":"VERIFICATION","trigger":{"type":"BEFORE_STATE_DEPENDENT_ACTION"},'
+        '"obligations":[{"type":"VERIFY_WITH_TOOL"}],"prohibitions":[],'
+        '"ordering_constraints":[{"type":"VERIFY_BEFORE_ACTION"}],"recovery":{},'
+        '"rationale":"failure-driven"}]'
+    )).generate(ServicePolicy(), [], 1, 1)
     assert generated[0].strategy_tags == ["authority_challenge"]
     assert patch[0].rules[0].category == "VERIFICATION"
 
@@ -993,7 +1018,12 @@ def test_customer_validator_rejection_does_not_trigger_protocol_retry():
 def test_service_generation_retries_protocol_truncation_and_keeps_raw_candidate():
     client = _SequenceClient([
         _provider_json_response("", finish_reason="length", completion_tokens=4096, reasoning_tokens=4096),
-        _provider_json_response('[{"category":"VERIFICATION","text":"Verify before acting.","rationale":"ground the action"}]'),
+        _provider_json_response(
+            '[{"category":"VERIFICATION","trigger":{"type":"BEFORE_STATE_DEPENDENT_ACTION"},'
+            '"obligations":[{"type":"VERIFY_WITH_TOOL"}],"prohibitions":[],'
+            '"ordering_constraints":[{"type":"VERIFY_BEFORE_ACTION"}],"recovery":{},'
+            '"rationale":"ground the action"}]'
+        ),
     ])
     generator = LLMServicePatchGenerator(client, max_tokens=8192)
     patches = generator.generate(ServicePolicy(), [], 0, 1)
@@ -1052,7 +1082,12 @@ def test_service_evaluates_all_candidates_and_replays_archived_attacker():
     class PatchGenerator:
         def generate(self, policy, failures, generation, count, *args):
             return [ServicePatch(
-                f"patch-{index}", "add", [ServiceRule(f"rule-{index}", "ACTION_GROUNDING", "Use the authoritative action tool before claiming success")]
+                f"patch-{index}", "add", [_structured_service_rule(
+                    f"rule-{index}", "ACTION_GROUNDING",
+                    trigger={"type": "BEFORE_COMPLETION_CLAIM"},
+                    obligations=[{"type": "GROUND_REPLY_IN_TOOL_RESULT"}],
+                    ordering=[{"type": "ACTION_SUCCESS_BEFORE_COMPLETION_CLAIM"}],
+                )]
             ) for index in range(count)]
 
     split = SplitManager().build()

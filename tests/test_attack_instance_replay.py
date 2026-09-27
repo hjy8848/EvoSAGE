@@ -190,10 +190,16 @@ class RecordingEvaluator:
 
 
 def _patch_generator(policy, failures, generation, count, *_args):
+    rule = ServiceRule(
+        "candidate-rule", "RECOVERY", "", rule_schema_version=2,
+        trigger={"type": "ACTION_FAILURE"},
+        obligations=[{"type": "EXPLAIN_FAILURE"}, {"type": "REQUEST_ONLY_MISSING_INFO"}],
+        recovery={"type": "EXPLAIN_FAILURE"},
+    )
     return [ServicePatch(
         patch_id="candidate-patch",
         patch_type="add",
-        rules=[ServiceRule("candidate-rule", "RECOVERY", "Explain the failed operation and retry only after valid input")],
+        rules=[rule],
     )]
 
 

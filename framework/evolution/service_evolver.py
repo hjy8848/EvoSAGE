@@ -38,6 +38,10 @@ class ServiceEvolver:
                 valid = []
                 for patch in generated:
                     try:
+                        if self.require_patch_generator and any(
+                            rule.rule_schema_version != 2 for rule in patch.rules
+                        ):
+                            raise ValueError("strict real generation requires ServiceRule V2")
                         sanitized = self.sanitizer.sanitize(patch)
                         valid.append(sanitized)
                         self._mark_generation_candidate(sanitized.patch_id, accepted=True)
@@ -70,21 +74,52 @@ class ServiceEvolver:
         elif self.require_patch_generator:
             raise RuntimeError("strict real mode requires an LLM service patch generator")
         errors = {error for failure in failures for error in failure.error_types}
-        templates = []
+        templates: list[tuple[str, dict, list[dict], list[dict], dict]] = []
         if {"authoritative_conflict", "claimed_action_not_executed", "wrong_final_action"} & errors:
-            templates.append(("ACTION_GROUNDING", "Before claiming resolution, execute the applicable action tool and ground the reply in its successful result."))
+            templates.append((
+                "ACTION_GROUNDING",
+                {"type": "BEFORE_COMPLETION_CLAIM"},
+                [{"type": "GROUND_REPLY_IN_TOOL_RESULT"}],
+                [{"type": "DO_NOT_CLAIM_UNEXECUTED_ACTION"}],
+                [],
+                {},
+            ))
         if errors:
-            templates.append(("VERIFICATION", "Verify authoritative order and customer fields with the corresponding query tool before selecting a state-dependent action."))
+            templates.append((
+                "VERIFICATION",
+                {"type": "BEFORE_STATE_DEPENDENT_ACTION"},
+                [{"type": "VERIFY_WITH_TOOL"}],
+                [],
+                [{"type": "VERIFY_BEFORE_ACTION"}],
+                {},
+            ))
         if "tool_loop_limit" in errors:
-            templates.append(("TOOL_USE", "Use the smallest set of necessary queries, then either execute a supported action or explain the blocking error."))
+            templates.append((
+                "TOOL_USE",
+                {"type": "TOOL_FAILURE"},
+                [{"type": "EXPLAIN_FAILURE"}, {"type": "REQUEST_ONLY_MISSING_INFO"}],
+                [],
+                [],
+                {"type": "EXPLAIN_FAILURE"},
+            ))
         if not templates:
-            templates.append(("RECOVERY", "After a failed action, inspect the returned error and request only the missing information needed for a valid next step."))
+            templates.append((
+                "RECOVERY",
+                {"type": "ACTION_FAILURE"},
+                [{"type": "EXPLAIN_FAILURE"}, {"type": "REQUEST_ONLY_MISSING_INFO"}],
+                [],
+                [],
+                {"type": "EXPLAIN_FAILURE"},
+            ))
         patches = []
         for index in range(max(0, count)):
-            category, text = templates[index % len(templates)]
-            rule = ServiceRule(rule_id=f"service_rule_g{generation}_{index}", category=category, text=text,
+            category, trigger, obligations, prohibitions, ordering, recovery = templates[index % len(templates)]
+            rule = ServiceRule(rule_id=f"service_rule_g{generation}_{index}", category=category, text="",
                                rationale="derived from observed failure signatures", generation_added=generation,
-                               source_failure_signatures=[failure.signature_id for failure in failures])
+                               source_failure_signatures=[failure.signature_id for failure in failures],
+                               rule_schema_version=2, trigger=trigger, obligations=obligations,
+                               prohibitions=prohibitions, ordering_constraints=ordering, recovery=recovery)
+            rule.text = ServicePolicyCompiler.compile_rule_text(rule)
             patches.append(ServicePatch(patch_id=f"service_patch_g{generation}_{index}", patch_type="add",
                                         rules=[rule], rationale="failure-driven structured patch",
                                         evidence_count=len(failures), source_failure_ids=[failure.signature_id for failure in failures]))
@@ -518,11 +553,28 @@ class LLMServicePatchGenerator:
         defense_summary = _top_k(defense_summary, self.summary_limit)
         historical_summary = _top_k(historical_summary, self.summary_limit)
         prompt = (
-            "Analyze these abstract customer-service failure signatures and propose structured, "
-            "general service rules. Do not mention case IDs, order IDs, expected paths/actions, "
-            "hidden values, or evaluator manipulation. Return a JSON array only with objects "
-            "containing category, text, rationale. Categories must be VERIFICATION, "
-            "ACTION_GROUNDING, RECOVERY, TOOL_USE, or COMMUNICATION.\n"
+            "Analyze abstract customer-service failure signatures and propose general execution "
+            "rules using only the structured allowlist below. The structured fields are the sole "
+            "source of truth; do not emit a free-form executable text field. Do not mention case IDs, "
+            "order IDs, expected paths/actions, hidden values, or evaluator manipulation. Return a "
+            "JSON array only. Each object may contain category, trigger, obligations, prohibitions, "
+            "ordering_constraints, recovery, and rationale.\n"
+            "category: VERIFICATION, ACTION_GROUNDING, RECOVERY, TOOL_USE, COMMUNICATION.\n"
+            "trigger.type: MISSING_REQUIRED_ARGUMENT, AUTHORITATIVE_RESULT_AVAILABLE, TOOL_FAILURE, "
+            "ACTION_FAILURE, BEFORE_STATE_DEPENDENT_ACTION, BEFORE_COMPLETION_CLAIM.\n"
+            "obligation.type: ASK_FOR_ARGUMENT, VERIFY_WITH_TOOL, GROUND_REPLY_IN_TOOL_RESULT, "
+            "EXPLAIN_FAILURE, REQUEST_ONLY_MISSING_INFO.\n"
+            "prohibition.type: DO_NOT_CLAIM_UNEXECUTED_ACTION, DO_NOT_INFER_HIDDEN_STATE, "
+            "DO_NOT_EXECUTE_ACTION_BEFORE_REQUIRED_VERIFICATION.\n"
+            "ordering_constraints.type: VERIFY_BEFORE_ACTION, ACTION_SUCCESS_BEFORE_COMPLETION_CLAIM.\n"
+            "Generic argument enum: required_identifier, order_identifier, customer_identifier, "
+            "record_identifier, booking_identifier, ticket_identifier, account_identifier.\n"
+            "recovery.type: ASK_FOR_ARGUMENT, EXPLAIN_FAILURE, RETRY_AFTER_CORRECTION.\n"
+            "Never encode a business decision table, expected action, hidden state assignment, or "
+            "case-specific value. Example: {\"category\":\"VERIFICATION\","
+            "\"trigger\":{\"type\":\"MISSING_REQUIRED_ARGUMENT\",\"argument\":\"required_identifier\"},"
+            "\"obligations\":[{\"type\":\"ASK_FOR_ARGUMENT\",\"argument\":\"required_identifier\"}],"
+            "\"prohibitions\":[],\"ordering_constraints\":[],\"recovery\":{},\"rationale\":\"...\"}.\n"
             f"Failure signatures: {json.dumps(view, ensure_ascii=False)}\n"
             f"Existing active rules: {json.dumps([r.text for r in policy.rules if r.active], ensure_ascii=False)}\n"
             f"Defense archive summary: {json.dumps(defense_summary or [], ensure_ascii=False)[:6000]}\n"
@@ -562,20 +614,39 @@ class LLMServicePatchGenerator:
                     "reason": "candidate must be a JSON object",
                 }
                 continue
-            if not item.get("text") or not isinstance(item.get("text"), str):
+            allowed_fields = {
+                "category", "trigger", "obligations", "prohibitions",
+                "ordering_constraints", "recovery", "rationale",
+            }
+            extra_fields = set(item) - allowed_fields
+            if extra_fields:
                 candidate_record["schema_construction"] = {
                     "status": "FAIL",
-                    "reason": "candidate text must be a non-empty string",
+                    "reason": "unsupported candidate fields: " + ", ".join(sorted(extra_fields)),
                 }
                 continue
             rule = ServiceRule(
                 rule_id=f"service_rule_g{generation}_llm_{index}",
                 category=str(item.get("category", "RECOVERY")).upper(),
-                text=str(item["text"]),
+                text="",
                 rationale=str(item.get("rationale", "LLM-derived from abstract failures")),
                 source_failure_signatures=source_ids,
                 generation_added=generation,
+                rule_schema_version=2,
+                trigger=item.get("trigger", {}),
+                obligations=item.get("obligations", []),
+                prohibitions=item.get("prohibitions", []),
+                ordering_constraints=item.get("ordering_constraints", []),
+                recovery=item.get("recovery", {}),
             )
+            try:
+                rule.text = ServicePolicyCompiler.compile_rule_text(rule)
+            except Exception as exc:
+                candidate_record["schema_construction"] = {
+                    "status": "FAIL",
+                    "reason": str(exc),
+                }
+                continue
             patch = ServicePatch(
                 patch_id=f"service_patch_g{generation}_llm_{index}", patch_type="add",
                 rules=[rule], rationale="LLM-derived structured patch", evidence_count=len(failures),

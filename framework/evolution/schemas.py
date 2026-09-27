@@ -150,13 +150,23 @@ class ServiceRule:
     source_failure_signatures: List[str] = field(default_factory=list)
     generation_added: int = 0
     active: bool = True
+    rule_schema_version: int = 2
+    trigger: Dict[str, Any] = field(default_factory=dict)
+    obligations: List[Dict[str, Any]] = field(default_factory=list)
+    prohibitions: List[Dict[str, Any]] = field(default_factory=list)
+    ordering_constraints: List[Dict[str, Any]] = field(default_factory=list)
+    recovery: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ServiceRule":
-        return cls(**{key: value for key, value in data.items() if key in cls.__dataclass_fields__})
+        value = {key: item for key, item in data.items() if key in cls.__dataclass_fields__}
+        # Missing version identifies a legacy free-text rule. It remains
+        # readable, but new formal LLM generations are required to use V2.
+        value.setdefault("rule_schema_version", 1)
+        return cls(**value)
 
 
 @dataclass
@@ -181,10 +191,8 @@ class ServicePolicy:
         return cls(**{key: value[key] for key in cls.__dataclass_fields__ if key in value})
 
     def overlay_prompt(self) -> str:
-        active = [rule.text for rule in self.rules if rule.active]
-        if not active:
-            return ""
-        return "\n【当前服务策略补丁】\n" + "\n".join(f"- {item}" for item in active)
+        from .service_policy import ServicePolicyCompiler
+        return ServicePolicyCompiler().compile_prompt(self)
 
     def clone_with(self, rules: Iterable[ServiceRule], generation: Optional[int] = None) -> "ServicePolicy":
         return ServicePolicy(
@@ -813,5 +821,11 @@ def reject_forbidden_service_text(text: str) -> Optional[str]:
     if "case_id" in lowered or "order_id" in lowered and "verify" not in lowered:
         return "contains sample-specific mapping language"
     if re.search(r"shippingstatus\s*[:=]|creditlevel\s*[:=]|refundeligibility\s*[:=]", lowered):
+        return "copies a hidden backend field assignment"
+    if re.search(
+        r"\b(?:shipping_status|credit_level|refund_eligibility|refund_eligible|"
+        r"package_status|fee_payment_status|has_insurance|member_level)\s*[:=]",
+        lowered,
+    ):
         return "copies a hidden backend field assignment"
     return None
