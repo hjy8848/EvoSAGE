@@ -1059,10 +1059,10 @@ def test_service_evaluates_all_candidates_and_replays_archived_attacker():
 
 
 def test_attack_archive_reconstructs_customer_policy(tmp_path):
-    from framework.evolution.schemas import FailureSignature, EpisodeResult
+    from framework.evolution.schemas import EpisodeResult, VulnerabilitySignature
     policy = CustomerPolicy(policy_id="archived", strategy_tags=["authority_challenge"])
     episode = EpisodeResult("e", "ecommerce_refund", "c", policy.policy_id, "s", "evolution", 0, False, 0.0, error_types=["authoritative_conflict"])
-    signature = FailureSignature.from_episode(episode)
+    signature = VulnerabilitySignature.from_episode(episode)
     archive = AttackArchive(tmp_path / "attacks.jsonl")
     archive.add(policy, [signature], [episode], 0)
     loaded = AttackArchive(tmp_path / "attacks.jsonl")

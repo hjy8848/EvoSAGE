@@ -73,7 +73,8 @@ class CustomerSelector:
             signature.signature_id
             for episode in valid_episodes
             if not episode.task_success
-            for signature in [FailureSignatureProxy.from_episode(episode)]
+            for signature in [episode.vulnerability_signature_v2()]
+            if signature is not None
         }
         novelty = len(signatures - known_signatures) / max(1, len(signatures))
         coverage = len({e.sop_node for e in valid_episodes if e.sop_node}) / max(1, total_nodes)
@@ -89,10 +90,3 @@ class CustomerSelector:
         order = sorted(eligible, key=lambda i: (-scores[i].fitness, -scores[i].attack_success, -scores[i].novelty, candidates[i][0].policy_id))
         index = order[0] if order else None
         return (candidates[index][0] if index is not None else None), scores
-
-
-class FailureSignatureProxy:
-    @staticmethod
-    def from_episode(episode):
-        from .schemas import FailureSignature
-        return FailureSignature.from_episode(episode)

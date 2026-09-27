@@ -9,10 +9,13 @@ from .schemas import (
     CustomerPolicy,
     DefenseRecord,
     EpisodeResult,
+    FailureOccurrence,
     FailureSignature,
     ServicePatch,
     ServicePolicy,
     ServiceRule,
+    VulnerabilitySignature,
+    signature_from_dict,
 )
 from .config import EvolutionConfig, load_config
 from .archives import AttackArchive, DefenseArchive
@@ -23,7 +26,7 @@ from .service_policy import ServicePolicyCompiler, ServicePolicySanitizer, Servi
 from .service_gate import GateDecision, ServiceGate
 from .evaluator_adapter import BudgetedEpisodeEvaluator, EvoSAGEEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
 from .weakness_frontier import WeaknessFrontier
-from .attribution import infer_failure_location
+from .attribution import FailureAttribution, infer_failure_attribution, infer_failure_location
 
 __all__ = [
     "AttackArchive",
@@ -32,12 +35,15 @@ __all__ = [
     "DefenseArchive",
     "DefenseRecord",
     "EpisodeResult",
+    "FailureAttribution",
+    "FailureOccurrence",
     "EvolutionConfig",
     "EvolutionRunner",
     "CustomerPolicyCompiler",
     "CustomerPolicyValidator",
     "PolicyCustomerModel",
     "FailureSignature",
+    "VulnerabilitySignature",
     "ServicePatch",
     "ServicePolicy",
     "ServiceRule",
@@ -53,5 +59,7 @@ __all__ = [
     "aggregate_episode_metrics",
     "WeaknessFrontier",
     "infer_failure_location",
+    "infer_failure_attribution",
+    "signature_from_dict",
     "load_config",
 ]

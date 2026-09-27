@@ -221,6 +221,12 @@ class ServicePatch:
 
 @dataclass
 class FailureSignature:
+    """Legacy V1 signature payload retained only for artifact compatibility.
+
+    New runtime code must use :class:`VulnerabilitySignature`; this V1 shape
+    includes occurrence details and must never be deduplicated with V2 IDs.
+    """
+
     signature_id: str
     scenario: str
     sop_node: Optional[str] = None
@@ -237,6 +243,11 @@ class FailureSignature:
     claimed_action_not_executed: bool = False
     user_claim_backend_conflict: bool = False
     termination_reason: str = ""
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("FailureSignature is the legacy V1 compatibility type")
 
     @classmethod
     def from_episode(cls, episode: "EpisodeResult") -> "FailureSignature":
@@ -272,7 +283,202 @@ class FailureSignature:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "FailureSignature":
-        return cls(**{key: value for key, value in data.items() if key in cls.__dataclass_fields__})
+        values = {key: value for key, value in data.items() if key in cls.__dataclass_fields__}
+        values.setdefault("schema_version", 1)
+        return cls(**values)
+
+
+@dataclass
+class VulnerabilitySignature:
+    """Stable V2 identity for a vulnerability class, excluding occurrences."""
+
+    scenario: str
+    failure_type: str
+    failure_stage: str
+    sop_node: Optional[str]
+    violated_invariant: str
+    trigger_class: str
+    service_decision_class: str
+    consequence_class: str
+    signature_id: str = ""
+    schema_version: int = 2
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 2:
+            raise ValueError("VulnerabilitySignature only represents schema version 2")
+        if not self.signature_id:
+            payload = self.canonical_payload()
+            digest = hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()[:16]
+            self.signature_id = f"vuln_v2_{digest}"
+
+    def canonical_payload(self) -> Dict[str, Any]:
+        # This is the entire identity contract. Episode/case IDs, scores,
+        # wording, exact tool sequence and termination are occurrence data.
+        return {
+            "schema_version": 2,
+            "scenario": self.scenario,
+            "failure_type": self.failure_type,
+            "failure_stage": self.failure_stage,
+            "sop_node": self.sop_node,
+            "violated_invariant": self.violated_invariant,
+            "trigger_class": self.trigger_class,
+            "service_decision_class": self.service_decision_class,
+            "consequence_class": self.consequence_class,
+        }
+
+    @classmethod
+    def from_episode(
+        cls, episode: "EpisodeResult", attribution: Any = None
+    ) -> "VulnerabilitySignature":
+        if episode.task_success or episode.is_evaluation_invalid():
+            raise ValueError("VulnerabilitySignature requires a valid failed episode")
+        if attribution is None:
+            from .attribution import infer_failure_attribution_for_episode
+
+            attribution = infer_failure_attribution_for_episode(episode)
+        return cls(
+            scenario=episode.scenario,
+            failure_type=attribution.primary_error or "unknown_failure",
+            failure_stage=attribution.failure_stage,
+            sop_node=attribution.sop_node or episode.sop_node,
+            violated_invariant=attribution.violated_invariant,
+            trigger_class=attribution.trigger_class,
+            service_decision_class=attribution.service_decision_class,
+            consequence_class=(
+                "GOAL_NOT_FULFILLED" if not episode.task_success
+                else "PROCESS_FAILURE_WITH_GOAL_MET"
+            ),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VulnerabilitySignature":
+        version = int(data.get("schema_version", 0) or 0)
+        if version != 2:
+            raise ValueError(
+                "V1/unspecified signatures must be loaded with signature_from_dict"
+            )
+        values = {
+            key: value for key, value in data.items()
+            if key in cls.__dataclass_fields__
+        }
+        return cls(**values)
+
+
+@dataclass
+class FailureOccurrence:
+    """V2 record of one observed episode that instantiated a vulnerability."""
+
+    occurrence_id: str
+    signature_id: str
+    episode_id: str
+    case_id: str
+    customer_policy_id: str
+    service_policy_id: str
+    generation: int
+    split: str
+    path_step_index: Optional[int]
+    error_types: List[str]
+    predicted_action: str
+    executed_action: str
+    tool_sequence_summary: List[str]
+    termination_reason: str
+    verification_score: float
+    policy_score: float
+    action_execution_score: float
+    goal_fulfillment_score: float
+    failure_type: str = "unknown_failure"
+    failure_stage: str = "UNKNOWN"
+    violated_invariant: str = "LEGACY_UNSPECIFIED"
+    trigger_class: str = "UNCLASSIFIED_TRIGGER"
+    service_decision_class: str = "UNCLASSIFIED_DECISION"
+    trace_ref: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    is_primary: bool = True
+    schema_version: int = 2
+
+    @classmethod
+    def from_episode(
+        cls, episode: "EpisodeResult", signature: VulnerabilitySignature
+    ) -> "FailureOccurrence":
+        if episode.task_success or episode.is_evaluation_invalid():
+            raise ValueError("FailureOccurrence requires a valid failed episode")
+        if signature.schema_version != 2:
+            raise ValueError("FailureOccurrence requires a V2 vulnerability signature")
+        from .attribution import infer_failure_attribution_for_episode
+
+        attribution = infer_failure_attribution_for_episode(episode)
+        identity = {
+            "schema_version": 2,
+            "signature_id": signature.signature_id,
+            "episode_id": episode.episode_id,
+            "case_id": episode.case_id,
+            "customer_policy_id": episode.customer_policy_id,
+            "service_policy_id": episode.service_policy_id,
+            "generation": episode.generation,
+            "split": episode.split,
+        }
+        digest = hashlib.sha256(_json(identity).encode("utf-8")).hexdigest()[:16]
+        return cls(
+            occurrence_id=f"occ_v2_{digest}",
+            signature_id=signature.signature_id,
+            episode_id=episode.episode_id,
+            case_id=episode.case_id,
+            customer_policy_id=episode.customer_policy_id,
+            service_policy_id=episode.service_policy_id,
+            generation=episode.generation,
+            split=episode.split,
+            path_step_index=episode.path_step_index,
+            error_types=sorted(set(episode.error_types or [])),
+            predicted_action=episode.predicted_action,
+            executed_action=episode.executed_action,
+            tool_sequence_summary=list(episode.tool_sequence_summary),
+            termination_reason=episode.termination_reason,
+            verification_score=float(episode.verification_score),
+            policy_score=float(episode.policy_score),
+            action_execution_score=float(episode.action_execution_score),
+            goal_fulfillment_score=float(episode.goal_fulfillment_score),
+            failure_type=signature.failure_type,
+            failure_stage=signature.failure_stage,
+            violated_invariant=signature.violated_invariant,
+            trigger_class=signature.trigger_class,
+            service_decision_class=signature.service_decision_class,
+            trace_ref=episode.trace_ref,
+            metadata={
+                **dict(episode.metadata or {}),
+                "attribution_reason": attribution.attribution_reason,
+                "attribution_confidence": attribution.confidence,
+            },
+        )
+
+    @property
+    def required_verification_score(self) -> float:
+        """Compatibility name consumed by existing service-patch prompts."""
+        return self.verification_score
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FailureOccurrence":
+        values = {key: value for key, value in data.items() if key in cls.__dataclass_fields__}
+        version = int(values.get("schema_version", 0) or 0)
+        if version != 2:
+            raise ValueError("FailureOccurrence only supports schema version 2")
+        return cls(**values)
+
+
+def signature_from_dict(data: Dict[str, Any]) -> VulnerabilitySignature | FailureSignature:
+    """Load legacy V1 artifacts without allowing them into V2 identity sets."""
+    raw_version = data.get("schema_version", 1)
+    version = int(1 if raw_version is None else raw_version)
+    if version == 1:
+        return FailureSignature.from_dict(data)
+    if version == 2:
+        return VulnerabilitySignature.from_dict(data)
+    raise ValueError(f"unsupported failure signature schema_version: {version}")
 
 
 @dataclass
@@ -306,6 +512,9 @@ class EpisodeResult:
     # as a substantive task failure by a policy gate.
     evaluation_status: str = "valid"
     invalid_reason: Optional[str] = None
+    _signature_artifact_version: Optional[int] = field(default=None, repr=False, compare=False)
+    _signature_artifact_payload: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
+    _occurrence_artifact_payload: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
 
     def is_evaluation_invalid(self) -> bool:
         return (
@@ -319,13 +528,93 @@ class EpisodeResult:
 
     def to_dict(self) -> Dict[str, Any]:
         value = asdict(self)
-        value["failure_signature"] = FailureSignature.from_episode(self).to_dict()
+        value.pop("_signature_artifact_version", None)
+        value.pop("_signature_artifact_payload", None)
+        value.pop("_occurrence_artifact_payload", None)
+        if self._signature_artifact_version == 0:
+            # Historical episodes with no signature fields remain unclassified
+            # until an explicitly versioned offline re-analysis is requested.
+            value["vulnerability_signature"] = None
+            value["failure_occurrence"] = None
+            value["failure_signature"] = None
+            return value
+        if self._signature_artifact_version == 1:
+            # A V1 episode loaded from historical results stays V1 when it is
+            # copied or reserialized; it is never silently reinterpreted.
+            value["vulnerability_signature"] = None
+            value["failure_occurrence"] = None
+            value["failure_signature"] = self._signature_artifact_payload
+            return value
+        if self._signature_artifact_version == 2:
+            value["vulnerability_signature"] = self._signature_artifact_payload
+            value["failure_occurrence"] = self._occurrence_artifact_payload
+            value["failure_signature"] = self._signature_artifact_payload
+            return value
+
+        signature = None
+        occurrence = None
+        if not self.task_success and not self.is_evaluation_invalid():
+            signature = VulnerabilitySignature.from_episode(self)
+            occurrence = FailureOccurrence.from_episode(self, signature)
+        signature_value = signature.to_dict() if signature else None
+        value["vulnerability_signature"] = signature_value
+        value["failure_occurrence"] = occurrence.to_dict() if occurrence else None
+        # Keep the historical key as a migration alias. Its schema_version
+        # makes V2 identity explicit; readers treat unversioned historical
+        # payloads as V1 and keep those counts separate.
+        value["failure_signature"] = signature_value
         return value
+
+    def vulnerability_signature_v2(self) -> Optional[VulnerabilitySignature]:
+        """Return only a V2 identity; legacy-loaded episodes are deliberately isolated."""
+        if self._signature_artifact_version in {0, 1} or self.task_success or self.is_evaluation_invalid():
+            return None
+        if self._signature_artifact_version == 2:
+            if not isinstance(self._signature_artifact_payload, dict):
+                return None
+            return VulnerabilitySignature.from_dict(self._signature_artifact_payload)
+        return VulnerabilitySignature.from_episode(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "EpisodeResult":
         value = {key: item for key, item in data.items() if key in cls.__dataclass_fields__}
-        return cls(**value)
+        value.pop("_signature_artifact_version", None)
+        value.pop("_signature_artifact_payload", None)
+        value.pop("_occurrence_artifact_payload", None)
+        episode = cls(**value)
+        signature = data.get("vulnerability_signature")
+        alias = data.get("failure_signature")
+        occurrence = data.get("failure_occurrence")
+        if signature is not None and not isinstance(signature, dict):
+            raise ValueError("vulnerability_signature must be an object or null")
+        if alias is not None and not isinstance(alias, dict):
+            raise ValueError("failure_signature must be an object or null")
+        if isinstance(signature, dict) and isinstance(alias, dict) and signature != alias:
+            raise ValueError("vulnerability_signature and failure_signature alias disagree")
+
+        payload = signature if isinstance(signature, dict) else alias
+        if isinstance(payload, dict):
+            raw_version = payload.get("schema_version", 1)
+            version = int(1 if raw_version is None else raw_version)
+        else:
+            version = 0
+        if version == 2:
+            # Validate the complete signature contract at the artifact boundary.
+            VulnerabilitySignature.from_dict(payload)
+            episode._signature_artifact_version = 2
+            episode._signature_artifact_payload = dict(payload)
+            episode._occurrence_artifact_payload = dict(occurrence) if isinstance(occurrence, dict) else None
+            if occurrence is not None:
+                FailureOccurrence.from_dict(occurrence)
+        elif version == 1:
+            # V1 artifacts predate schema_version; absence is explicitly V1.
+            episode._signature_artifact_version = 1
+            episode._signature_artifact_payload = dict(payload)
+        elif version == 0:
+            episode._signature_artifact_version = 0
+        else:
+            raise ValueError(f"unsupported episode signature schema_version: {version}")
+        return episode
 
 
 @dataclass

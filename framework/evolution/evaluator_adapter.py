@@ -17,8 +17,8 @@ from pathlib import Path
 import threading
 from typing import Any, Callable, Iterable, Protocol
 
-from .attribution import infer_failure_location
-from .schemas import CustomerPolicy, EpisodeResult, FailureSignature, ServicePolicy
+from .attribution import infer_failure_attribution, infer_failure_location
+from .schemas import CustomerPolicy, EpisodeResult, ServicePolicy
 
 
 class EpisodeEvaluator(Protocol):
@@ -707,6 +707,7 @@ class EvoSAGEEpisodeEvaluator:
             or bool(diagnostics.get("protocol_failure", False))
         )
         evaluation_status = "invalid" if protocol_failure else "valid"
+        attribution = infer_failure_attribution(report, simulation, path_config)
         location = infer_failure_location(report, simulation, path_config)
         return EpisodeResult(
             episode_id=simulation.simulation_id,
@@ -743,6 +744,7 @@ class EvoSAGEEpisodeEvaluator:
                 "invalid_reason": invalid_reasons[0] if invalid_reasons else None,
                 "invalid_reasons": invalid_reasons,
                 "failure_location": location,
+                "failure_attribution": attribution.to_dict(),
                 "customer_simulator_provenance": copy.deepcopy(
                     getattr(simulation, "customer_simulator_provenance", []) or []
                 ),

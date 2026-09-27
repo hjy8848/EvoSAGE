@@ -22,7 +22,12 @@ from .generation_protocol import GenerationProtocolError, PROTOCOL_RETRY_LIMIT
 from ..llm_integration.llm_user_model import CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT
 from .persistence import RunStore
 from .reporting import generate_report
-from .schemas import CustomerPolicy, DefenseRecord, FailureSignature, ServicePolicy
+from .schemas import (
+    CustomerPolicy,
+    DefenseRecord,
+    FailureOccurrence,
+    ServicePolicy,
+)
 from .service_evolver import ServiceEvolver
 from .service_policy import ServicePolicySanitizer
 from .service_gate import ServiceGate
@@ -399,11 +404,13 @@ class EvolutionRunner:
                 prior_customer_episodes = self.evaluator.evaluate(
                     customer, service, splits.evolution, "evolution", generation, "customer_failure_scan"
                 )
-                prior_failures = [
-                    FailureSignature.from_episode(item)
-                    for item in prior_customer_episodes
-                    if not item.task_success and not item.is_evaluation_invalid()
-                ]
+                prior_failures = []
+                for item in prior_customer_episodes:
+                    if item.task_success or item.is_evaluation_invalid():
+                        continue
+                    signature = item.vulnerability_signature_v2()
+                    if signature is not None:
+                        prior_failures.append(FailureOccurrence.from_episode(item, signature))
                 customer, candidate_records, scores = self.customer_evolver.evolve(
                     customer, service, splits.evolution, self.evaluator, self.attack_archive, generation,
                     self.config.customer.candidate_count,
@@ -454,20 +461,25 @@ class EvolutionRunner:
                     )
                 selected_episodes = self.evaluator.evaluate(customer, service, splits.evolution, "evolution", generation, "selected_customer")
                 signatures = [
-                    FailureSignature.from_episode(item)
+                    signature
                     for item in selected_episodes
                     if not item.task_success and not item.is_evaluation_invalid()
+                    for signature in [item.vulnerability_signature_v2()]
+                    if signature is not None
                 ]
                 self.attack_archive.add(customer, signatures, selected_episodes, generation)
                 self.frontier.add(selected_episodes)
             if self.config.experiment_mode in {"service_only", "coevolution"} and self.config.experiment_mode != "static":
-                failures = [
-                    FailureSignature.from_episode(item)
-                    for item in self.evaluator.evaluate(
-                        customer, service, splits.evolution, "evolution", generation, "service_failures"
-                    )
-                    if not item.task_success and not item.is_evaluation_invalid()
-                ]
+                service_failure_episodes = self.evaluator.evaluate(
+                    customer, service, splits.evolution, "evolution", generation, "service_failures"
+                )
+                failures = []
+                for item in service_failure_episodes:
+                    if item.task_success or item.is_evaluation_invalid():
+                        continue
+                    signature = item.vulnerability_signature_v2()
+                    if signature is not None:
+                        failures.append(FailureOccurrence.from_episode(item, signature))
                 service, decision, patch = self.service_evolver.evolve(
                     service, failures, splits.validation, splits.validation, self.evaluator, generation,
                     self.config.service.candidate_count,
