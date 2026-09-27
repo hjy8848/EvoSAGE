@@ -54,7 +54,11 @@ class EvolutionRunner:
             self.store = RunStore(resolved_run_dir)
         else:
             self.store = store
-        self.split_manager = split_manager or SplitManager(self.config.splits, self.store.run_dir / "split_manifest")
+        self.split_manager = split_manager or SplitManager(
+            self.config.splits,
+            self.store.run_dir / "split_manifest",
+            scenario=self.config.scenario,
+        )
         self.base_evaluator = evaluator or MockEpisodeEvaluator()
         self.evaluator = BudgetedEpisodeEvaluator(
             self.base_evaluator,

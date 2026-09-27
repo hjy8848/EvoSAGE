@@ -11,6 +11,7 @@ from typing import Any, Iterable, Optional
 
 from ..backend.factory import build_case_spec
 from .config import SplitConfig
+from .scenario_cases import get_case_provider
 
 
 @dataclass
@@ -83,29 +84,38 @@ def dataset_case_from_attack_instance(instance) -> DatasetCase:
 
 
 class SplitManager:
-    def __init__(self, config: Optional[SplitConfig] = None, manifest_dir: Optional[str | Path] = None):
+    def __init__(self, config: Optional[SplitConfig] = None,
+                 manifest_dir: Optional[str | Path] = None,
+                 scenario: str = "ecommerce_refund"):
         self.config = config or SplitConfig()
         self.manifest_dir = Path(manifest_dir) if manifest_dir else None
+        self.scenario = scenario
 
     def build(self) -> DatasetSplits:
         if self.config.strategy not in {"instance_holdout", "path_holdout"}:
             raise ValueError(f"unknown split strategy: {self.config.strategy}")
-        from ..sop import ecommerce_refund_PathList
-        paths = ecommerce_refund_PathList.generate_path_list()
-        mapping = ecommerce_refund_PathList.get_intent_path_mapping()
+        provider = get_case_provider(self.scenario)
+        paths = provider.generate_paths()
+        mapping = provider.intent_path_mapping()
         path_to_intent = {}
         for intent, item in mapping.items():
             for path_id in item.get("possible_paths", []):
                 path_to_intent.setdefault(path_id, intent)
+        uncovered_path_ids = sorted(set(range(1, len(paths) + 1)) - set(path_to_intent))
+        if uncovered_path_ids:
+            raise ValueError(
+                f"scenario {self.scenario!r} PathList has paths without an intent mapping: "
+                f"{uncovered_path_ids}"
+            )
         cases: list[DatasetCase] = []
         for path_id, path_config in enumerate(paths, start=1):
-            intent = path_to_intent.get(path_id, "refund_before_shipping")
+            intent = path_to_intent[path_id]
             for instance_index in range(max(1, self.config.instances_per_path)):
                 for variant in self.config.customer_disclosure_variants:
                     suffix = "" if variant == "opening" else f"_{variant}"
                     user_id = f"evolution_case_{path_id}_{instance_index}{suffix}"
                     case_spec = build_case_spec(
-                        "ecommerce_refund", intent, copy.deepcopy(path_config),
+                        self.scenario, intent, copy.deepcopy(path_config),
                         user_id=user_id, disclosure_variant=variant,
                     )
                     cases.append(DatasetCase(
