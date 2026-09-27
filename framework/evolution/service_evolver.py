@@ -8,6 +8,7 @@ import copy
 
 from .evaluator_adapter import aggregate_episode_metrics
 from .generation_protocol import GenerationProtocolError, request_json_with_retry
+from .paired_stats import PairingSetMismatch, compare_paired_episodes
 from .schemas import AttackInstance, CustomerPolicy, ServicePatch, ServicePolicy, ServiceRule
 from .service_gate import ServiceGate
 from .service_policy import ServicePolicyCompiler, ServicePolicySanitizer
@@ -221,30 +222,6 @@ class ServiceEvolver:
                 )
             return summary
 
-        def paired_outcomes(baseline, candidate):
-            def indexed(rows):
-                return {
-                    (
-                        item.case_id,
-                        item.customer_policy_id,
-                        int((item.metadata or {}).get("repetition", 0) or 0),
-                    ): item
-                    for item in rows if not item.is_evaluation_invalid()
-                }
-            left, right = indexed(baseline), indexed(candidate)
-            common = set(left) & set(right)
-            wins = sum(not left[key].task_success and right[key].task_success for key in common)
-            losses = sum(left[key].task_success and not right[key].task_success for key in common)
-            ties = len(common) - wins - losses
-            return {
-                "wins": wins,
-                "losses": losses,
-                "ties": ties,
-                "matched_pairs": len(common),
-                "unmatched_baseline": len(set(left) - set(right)),
-                "unmatched_candidate": len(set(right) - set(left)),
-            }
-
         def regression_case_ids(baseline, candidate):
             def indexed(rows):
                 return {
@@ -362,7 +339,13 @@ class ServiceEvolver:
                         "normal_regression_cases": [],
                     })
                     continue
-                latest_decision = self.gate.evaluate(latest_baseline_metrics, candidate_latest_metrics)
+                latest_pairs = compare_paired_episodes(baseline_latest, candidate_latest)
+                candidate_latest_metrics["latest_paired"] = latest_pairs.to_dict()
+                latest_decision = self.gate.evaluate(
+                    latest_baseline_metrics,
+                    candidate_latest_metrics,
+                    paired_latest=latest_pairs,
+                )
                 if not latest_decision.accepted:
                     self.last_candidate_records.append({
                         "patch_id": patch.patch_id,
@@ -415,22 +398,27 @@ class ServiceEvolver:
                     })
                     continue
                 candidate_metrics = summarize(candidate_latest, candidate_exact, candidate_transfer, candidate_normal)
-                latest_pairs = paired_outcomes(baseline_latest, candidate_latest)
-                exact_pairs = paired_outcomes(baseline_exact, candidate_exact)
-                transfer_pairs = paired_outcomes(baseline_transfer, candidate_transfer)
+                exact_pairs = compare_paired_episodes(baseline_exact, candidate_exact)
+                transfer_pairs = compare_paired_episodes(baseline_transfer, candidate_transfer)
+                normal_pairs = compare_paired_episodes(baseline_normal, candidate_normal)
                 exact_regressions = _exact_replay_regressions(
                     exact_replay_instances, baseline_exact, candidate_exact
                 )
                 candidate_metrics.update({
-                    "latest_paired": latest_pairs,
-                    "exact_replay_paired": exact_pairs,
-                    "transfer_replay_paired": transfer_pairs,
+                    "latest_paired": latest_pairs.to_dict(),
+                    "exact_replay_paired": exact_pairs.to_dict(),
+                    "transfer_replay_paired": transfer_pairs.to_dict(),
+                    "normal_paired": normal_pairs.to_dict(),
                     "exact_replay_regressions": exact_regressions,
                 })
                 decision = self.gate.evaluate(
                     baseline_metrics, candidate_metrics,
                     aggregate_episode_metrics(baseline_normal),
                     aggregate_episode_metrics(candidate_normal),
+                    paired_latest=latest_pairs,
+                    paired_exact=exact_pairs,
+                    paired_transfer=transfer_pairs,
+                    paired_normal=normal_pairs,
                 )
                 decision.metrics = dict(candidate_metrics, normal_delta=decision.metrics.get("normal_delta", 0.0))
                 regression_cases = regression_case_ids(baseline_normal, candidate_normal)
@@ -455,6 +443,11 @@ class ServiceEvolver:
                     self.last_selected_metrics = candidate_metrics
                     accepted.append((decision, candidate, patch, candidate_metrics))
             except Exception as exc:
+                if isinstance(exc, PairingSetMismatch):
+                    # Asymmetric valid sample coverage is a data-integrity
+                    # failure. Do not relabel it as a provider error or allow
+                    # a candidate to pass on the surviving intersection.
+                    raise
                 # Keep the generated proposal available even if applying or
                 # evaluating it fails.  The error is part of the candidate's
                 # audit trail, not a reason to discard the candidate itself.
@@ -477,11 +470,11 @@ class ServiceEvolver:
                 invalid_candidate_reasons.append("candidate_evaluation_invalid:provider_error")
                 continue
         if accepted:
-            # Evaluate every candidate before selecting the largest robust
-            # improvement; policy id is a deterministic final tie-breaker.
+            # Prefer paired latest-attack robustness, then exact-replay
+            # safety, aggregate robustness, execution quality, and stable id.
             decision, candidate, patch, metrics = sorted(
                 accepted,
-                key=lambda item: (-item[0].delta, -metrics_value(item[3], "execution_score"), item[2].patch_id),
+                key=lambda item: candidate_selection_key(item[3], item[2].patch_id),
             )[0]
             return candidate, decision, patch
         rejected = self.gate.evaluate(baseline_metrics, baseline_metrics)
@@ -500,7 +493,18 @@ class ServiceEvolver:
 
 
 def metrics_value(metrics, key):
-    return float(metrics.get(key, 0.0))
+    return float(metrics.get(key, 0.0) or 0.0)
+
+
+def candidate_selection_key(metrics, patch_id):
+    """Stable candidate ordering after all candidates pass the gate."""
+    return (
+        -int((metrics.get("latest_paired") or {}).get("net_wins", 0)),
+        int((metrics.get("exact_replay_paired") or {}).get("losses", 0)),
+        -metrics_value(metrics, "robust_task_success"),
+        -metrics_value(metrics, "execution_score"),
+        str(patch_id),
+    )
 
 
 def _exact_replay_regressions(instances, baseline, candidate):

@@ -69,7 +69,12 @@ class EvolutionRunner:
         self.service_evolver = service_evolver or ServiceEvolver(
             self.config.seed,
             sanitizer=ServicePolicySanitizer(self.config.service.allowed_rule_categories),
-            gate=ServiceGate(self.config.service.min_delta, self.config.service.normal_regression_tolerance),
+            gate=ServiceGate(
+                self.config.service.min_delta,
+                self.config.service.normal_regression_tolerance,
+                self.config.service.gate_min_paired_wins,
+                self.config.service.max_normal_paired_losses,
+            ),
         )
         self.attack_archive = AttackArchive(self.store.run_dir / "archives" / "attacks.jsonl")
         self.defense_archive = DefenseArchive(self.store.run_dir / "archives" / "defenses.jsonl")

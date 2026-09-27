@@ -102,7 +102,12 @@ def main() -> int:
         service_evolver = ServiceEvolver(
             config.seed,
             sanitizer=ServicePolicySanitizer(config.service.allowed_rule_categories),
-            gate=ServiceGate(config.service.min_delta, config.service.normal_regression_tolerance),
+            gate=ServiceGate(
+                config.service.min_delta,
+                config.service.normal_regression_tolerance,
+                config.service.gate_min_paired_wins,
+                config.service.max_normal_paired_losses,
+            ),
             patch_generator=LLMServicePatchGenerator(
                 evolution_client,
                 max_tokens=config.evaluation.token_budget.service_evolver,

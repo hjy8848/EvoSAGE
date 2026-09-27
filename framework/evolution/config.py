@@ -46,6 +46,8 @@ class ServiceEvolutionConfig:
     candidate_count: int = 5
     min_delta: float = 0.01
     normal_regression_tolerance: float = 0.03
+    gate_min_paired_wins: int = 1
+    max_normal_paired_losses: int = 0
     replay_attack_count: int = 5
     exact_replay_instance_count: int = 5
     transfer_replay_policy_count: Optional[int] = None
@@ -54,6 +56,10 @@ class ServiceEvolutionConfig:
     ])
 
     def __post_init__(self) -> None:
+        if self.gate_min_paired_wins < 1:
+            raise ValueError("gate_min_paired_wins must be at least 1")
+        if self.max_normal_paired_losses < 0:
+            raise ValueError("max_normal_paired_losses cannot be negative")
         if self.transfer_replay_policy_count is None:
             self.transfer_replay_policy_count = int(self.replay_attack_count)
 

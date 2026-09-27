@@ -209,6 +209,9 @@ class BudgetedEpisodeEvaluator:
             for item in repetition_outputs:
                 item.metadata = dict(item.metadata)
                 item.metadata["repetition"] = repetition
+                item.metadata["pair_key"] = (
+                    f"{item.case_id}|customer={item.customer_policy_id}|rep={repetition}"
+                )
             outputs.extend(repetition_outputs)
         return outputs
 
