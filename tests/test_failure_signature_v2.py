@@ -35,6 +35,7 @@ def _episode(**overrides):
         "sop_node": "step3",
         "path_step_index": 2,
         "trace_ref": "real_traces/episode-a.json",
+        "service_failure_attributable": True,
     }
     values.update(overrides)
     return EpisodeResult(**values)

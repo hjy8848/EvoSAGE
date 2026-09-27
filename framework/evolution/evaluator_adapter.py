@@ -18,6 +18,7 @@ import threading
 from typing import Any, Callable, Iterable, Protocol
 
 from .attribution import infer_failure_attribution, infer_failure_location
+from .customer_behavior_validity import assess_customer_behavior
 from .schemas import CustomerPolicy, EpisodeResult, ServicePolicy
 
 
@@ -32,15 +33,16 @@ def _mean(items: list[EpisodeResult], field: str) -> float:
 
 def aggregate_episode_metrics(episodes: Iterable[EpisodeResult]) -> dict[str, float]:
     values = list(episodes)
-    # Invalid transport/protocol evaluations are diagnostic records, not
-    # zero-valued business outcomes.  Excluding them from the denominator
-    # prevents a truncated candidate response from looking like a failed
-    # service policy.
-    valid_values = [item for item in values if not item.is_evaluation_invalid()]
-    legitimate_failures = sum(
-        not item.task_success
-        for item in valid_values
-    )
+    # Provider/protocol errors, invalid Customer behavior, and broken
+    # environments remain inspectable diagnostics, but cannot enter the
+    # substantive service-policy denominator.
+    evaluable_values = [
+        item for item in values
+        if not item.is_evaluation_invalid() and item.protocol_valid and item.environment_valid
+    ]
+    valid_values = [item for item in evaluable_values if item.customer_behavior_valid]
+    attributable_failures = sum(item.is_attributable_service_failure() for item in valid_values)
+    evaluable_failures = sum(not item.task_success for item in evaluable_values)
     transfer_count = sum(
         item.executed_action.lower() in {"transfer_human", "transhuman", "transfer"}
         for item in valid_values
@@ -60,14 +62,22 @@ def aggregate_episode_metrics(episodes: Iterable[EpisodeResult]) -> dict[str, fl
         "recovery_success_rate": sum(bool(item.recovery_success) for item in valid_values) / len(valid_values) if valid_values else 0.0,
         "recovery_count": sum(int(item.recovery_count or 0) for item in valid_values),
         "mean_recovery_count": _mean(valid_values, "recovery_count"),
-        "legitimate_attack_success": legitimate_failures / len(valid_values) if valid_values else 0.0,
+        # Deprecated compatibility alias. New analyses should use the explicit
+        # attribution metrics below.
+        "legitimate_attack_success": attributable_failures / len(valid_values) if valid_values else 0.0,
+        "attributable_service_failure_rate": attributable_failures / len(valid_values) if valid_values else 0.0,
+        "evaluable_service_failure_rate": evaluable_failures / len(evaluable_values) if evaluable_values else 0.0,
         "execution_score": _mean(valid_values, "execution_score"),
         "verification": _mean(valid_values, "verification_score"),
         "policy": _mean(valid_values, "policy_score"),
         "action": _mean(valid_values, "action_execution_score"),
         "goal": _mean(valid_values, "goal_fulfillment_score"),
         "episodes": float(len(valid_values)),
-        "invalid_episodes": float(len(values) - len(valid_values)),
+        "invalid_episodes": float(len(values) - len(evaluable_values)),
+        "protocol_invalid_episodes": float(sum(item.is_evaluation_invalid() or not item.protocol_valid for item in values)),
+        "environment_invalid_episodes": float(sum(not item.environment_valid for item in values)),
+        "customer_behavior_invalid_episodes": float(sum(not item.customer_behavior_valid for item in evaluable_values)),
+        "evaluable_episodes": float(len(evaluable_values)),
         "tool_calls": sum(len(item.tool_sequence_summary) for item in valid_values) / len(valid_values) if valid_values else 0.0,
         "transfer_rate": transfer_count / len(valid_values) if valid_values else 0.0,
         "reject_rate": reject_count / len(valid_values) if valid_values else 0.0,
@@ -247,6 +257,7 @@ class MockEpisodeEvaluator:
                 sop_node=f"path_{path_id}" if path_id is not None else None,
                 path_step_index=0,
                 metadata={"mock": True, "phase": phase},
+                service_failure_attributable=not success,
             ))
         return results
 
@@ -727,6 +738,30 @@ class EvoSAGEEpisodeEvaluator:
             or bool(diagnostics.get("protocol_failure", False))
         )
         evaluation_status = "invalid" if protocol_failure else "valid"
+        customer_assessment = assess_customer_behavior(simulation, customer_policy)
+        environment_valid = True
+        environment_reasons: list[str] = []
+        report_diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        if report_diagnostics.get("environment_valid") is False:
+            environment_valid = False
+            environment_reasons.append(str(report_diagnostics.get("environment_invalid_reason") or "environment_invalid"))
+        for event in getattr(simulation, "backend_events", []) or []:
+            result = event.get("result", {}) if isinstance(event, dict) else {}
+            if result.get("error_code") == "backend_exception":
+                environment_valid = False
+                environment_reasons.append("backend_exception")
+        protocol_valid = not protocol_failure
+        service_failure_attributable = (
+            not bool(report.task_success)
+            and protocol_valid
+            and customer_assessment.valid
+            and environment_valid
+        )
+        validity_reasons = list(dict.fromkeys([
+            *invalid_reasons,
+            *customer_assessment.reasons,
+            *environment_reasons,
+        ]))
         attribution = infer_failure_attribution(report, simulation, path_config)
         location = infer_failure_location(report, simulation, path_config)
         return EpisodeResult(
@@ -768,6 +803,9 @@ class EvoSAGEEpisodeEvaluator:
                 "customer_simulator_provenance": copy.deepcopy(
                     getattr(simulation, "customer_simulator_provenance", []) or []
                 ),
+                "customer_behavior_assessment": customer_assessment.to_dict(),
+                "environment_valid": environment_valid,
+                "environment_invalid_reasons": environment_reasons,
             },
             evaluation_status=evaluation_status,
             invalid_reason=invalid_reasons[0] if invalid_reasons else None,
@@ -777,4 +815,9 @@ class EvoSAGEEpisodeEvaluator:
             recovery_success=bool(getattr(report, "recovery_success", False)),
             recovery_count=int(getattr(report, "recovery_count", 0) or 0),
             first_failure_stage=str(getattr(report, "first_failure_stage", "") or ""),
+            protocol_valid=protocol_valid,
+            customer_behavior_valid=customer_assessment.valid,
+            environment_valid=environment_valid,
+            service_failure_attributable=service_failure_attributable,
+            validity_reasons=validity_reasons,
         )

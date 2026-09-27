@@ -54,6 +54,7 @@ def _failed_episode(case, policy, episode_id, error="wrong_tool_arguments", repe
         sop_node="step3",
         path_step_index=2,
         metadata={"repetition": repetition},
+        service_failure_attributable=True,
     )
 
 

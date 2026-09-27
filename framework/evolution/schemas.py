@@ -626,6 +626,14 @@ class EpisodeResult:
     recovery_success: bool = False
     recovery_count: int = 0
     first_failure_stage: str = ""
+    # Validity layers are kept separate from the historical business score.
+    # Legacy artifacts load as behavior/environment-valid, but are not
+    # retroactively attributed unless their provenance explicitly says so.
+    protocol_valid: bool = True
+    customer_behavior_valid: bool = True
+    environment_valid: bool = True
+    service_failure_attributable: bool = False
+    validity_reasons: List[str] = field(default_factory=list)
     _signature_artifact_version: Optional[int] = field(default=None, repr=False, compare=False)
     _signature_artifact_payload: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
     _occurrence_artifact_payload: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
@@ -638,6 +646,26 @@ class EpisodeResult:
             or bool((self.metadata or {}).get("protocol_failure", False))
             or "protocol_failure" in (self.error_types or [])
             or "json_parse_failed" in (self.error_types or [])
+        )
+
+    def is_substantively_evaluable(self) -> bool:
+        """Whether this episode can be used in service-policy comparisons."""
+        return (
+            not self.is_evaluation_invalid()
+            and self.protocol_valid
+            and self.customer_behavior_valid
+            and self.environment_valid
+        )
+
+    def is_attributable_service_failure(self) -> bool:
+        """A business failure caused by Service under valid protocol/env/customer."""
+        return (
+            not self.task_success
+            and not self.is_evaluation_invalid()
+            and self.protocol_valid
+            and self.customer_behavior_valid
+            and self.environment_valid
+            and self.service_failure_attributable
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -696,6 +724,20 @@ class EpisodeResult:
         value.pop("_signature_artifact_payload", None)
         value.pop("_occurrence_artifact_payload", None)
         episode = cls(**value)
+        validity_fields = {
+            "protocol_valid", "customer_behavior_valid", "environment_valid",
+            "service_failure_attributable",
+        }
+        if not validity_fields.intersection(data):
+            # Historical rows predate explicit Customer/environment
+            # attribution. Keep them loadable for trace inspection, but do not
+            # silently treat their failures as attributable evolution signal.
+            episode.customer_behavior_valid = False
+            episode.service_failure_attributable = False
+            episode.validity_reasons = list(dict.fromkeys([
+                *(episode.validity_reasons or []),
+                "customer_behavior_validity_unavailable",
+            ]))
         signature = data.get("vulnerability_signature")
         alias = data.get("failure_signature")
         occurrence = data.get("failure_occurrence")

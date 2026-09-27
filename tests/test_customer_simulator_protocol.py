@@ -576,6 +576,7 @@ def test_customer_score_uses_only_valid_episodes_when_invalids_are_mixed():
         execution_score=0.0,
         error_types=["order_not_found"],
         sop_node="shipping_status",
+        service_failure_attributable=True,
     )
     invalid = EpisodeResult(
         episode_id="invalid-customer-generation",

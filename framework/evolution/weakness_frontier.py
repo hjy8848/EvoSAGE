@@ -18,7 +18,7 @@ class WeaknessFrontier:
     def add(self, episodes: Iterable[EpisodeResult]) -> None:
         grouped = defaultdict(list)
         for episode in episodes:
-            if episode.is_evaluation_invalid():
+            if not episode.is_substantively_evaluable():
                 continue
             if episode.task_success:
                 node = episode.sop_node or (
@@ -30,6 +30,11 @@ class WeaknessFrontier:
                 )
                 continue
 
+            if not episode.is_attributable_service_failure():
+                # A business-looking failure with invalid Customer behavior
+                # remains available in the episode diagnostics but cannot
+                # define the adversarial weakness frontier.
+                continue
             signature = episode.vulnerability_signature_v2()
             if signature is None:
                 # V1 or unclassified historical rows must not silently acquire

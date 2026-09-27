@@ -348,10 +348,11 @@ def test_weakness_frontier_falls_back_to_path_step_then_unknown():
     path_episode = EpisodeResult(
         "path", "ecommerce_refund", "case-path", "c", "s", "validation", 0, False, 0.0,
         error_types=["wrong_final_action"], path_step_index=3,
+        service_failure_attributable=True,
     )
     unknown_episode = EpisodeResult(
         "unknown", "ecommerce_refund", "case-unknown", "c", "s", "validation", 0, False, 0.0,
-        error_types=["action_failure"],
+        error_types=["action_failure"], service_failure_attributable=True,
     )
     frontier = WeaknessFrontier()
     frontier.add([path_episode, unknown_episode])
@@ -367,7 +368,7 @@ def test_customer_fitness_uses_legitimate_failures_only():
     )
     legitimate = EpisodeResult(
         "legitimate", "ecommerce_refund", "case-legitimate", "c", "s", "validation", 0, False, 0.0,
-        error_types=["wrong_final_action"],
+        error_types=["wrong_final_action"], service_failure_attributable=True,
     )
     selector = CustomerSelector()
     protocol_score = selector.score(CustomerPolicy(), [protocol], set())
@@ -674,6 +675,8 @@ def test_consecutive_invalid_candidate_evaluations_are_inconclusive(tmp_path):
         "recovery_count": 0,
         "mean_recovery_count": 0.0,
         "legitimate_attack_success": 0.0,
+        "attributable_service_failure_rate": 0.0,
+        "evaluable_service_failure_rate": 0.0,
         "execution_score": 0.0,
         "verification": 0.0,
         "policy": 0.0,
@@ -681,6 +684,10 @@ def test_consecutive_invalid_candidate_evaluations_are_inconclusive(tmp_path):
         "goal": 0.0,
         "episodes": 0.0,
         "invalid_episodes": 1.0,
+        "protocol_invalid_episodes": 1.0,
+        "environment_invalid_episodes": 0.0,
+        "customer_behavior_invalid_episodes": 0.0,
+        "evaluable_episodes": 0.0,
         "tool_calls": 0.0,
         "transfer_rate": 0.0,
         "reject_rate": 0.0,
@@ -1067,7 +1074,10 @@ def test_service_evaluates_all_candidates_and_replays_archived_attacker():
 def test_attack_archive_reconstructs_customer_policy(tmp_path):
     from framework.evolution.schemas import EpisodeResult, VulnerabilitySignature
     policy = CustomerPolicy(policy_id="archived", strategy_tags=["authority_challenge"])
-    episode = EpisodeResult("e", "ecommerce_refund", "c", policy.policy_id, "s", "evolution", 0, False, 0.0, error_types=["authoritative_conflict"])
+    episode = EpisodeResult(
+        "e", "ecommerce_refund", "c", policy.policy_id, "s", "evolution", 0, False, 0.0,
+        error_types=["authoritative_conflict"], service_failure_attributable=True,
+    )
     signature = VulnerabilitySignature.from_episode(episode)
     archive = AttackArchive(tmp_path / "attacks.jsonl")
     archive.add(policy, [signature], [episode], 0)

@@ -10,12 +10,9 @@ from .evaluator_adapter import aggregate_episode_metrics
 from .schemas import CustomerPolicy, EpisodeResult
 
 
-def _is_protocol_failure(episode: EpisodeResult) -> bool:
-    return episode.is_evaluation_invalid() or (
-        "json_parse_failed" in (episode.error_types or [])
-        or "protocol_failure" in (episode.error_types or [])
-        or bool(episode.metadata.get("protocol_failure", False))
-    )
+def _is_fitness_eligible(episode: EpisodeResult) -> bool:
+    """Only protocol-, environment-, and Customer-valid evidence may score."""
+    return episode.is_substantively_evaluable()
 
 
 @dataclass
@@ -46,12 +43,12 @@ class CustomerSelector:
         episodes = list(episodes)
         if not allow_heldout and any(item.split == "heldout_test" for item in episodes):
             raise AssertionError("CustomerSelector cannot score heldout episodes")
-        valid_episodes = [item for item in episodes if not _is_protocol_failure(item)]
-        invalid_episodes = [item for item in episodes if _is_protocol_failure(item)]
+        valid_episodes = [item for item in episodes if _is_fitness_eligible(item)]
+        invalid_episodes = [item for item in episodes if not _is_fitness_eligible(item)]
         invalid_reasons = sorted({
-            str(item.invalid_reason)
+            str(reason)
             for item in invalid_episodes
-            if item.invalid_reason
+            for reason in ([item.invalid_reason] if item.invalid_reason else []) + list(item.validity_reasons or [])
         })
         if not valid_episodes:
             return CandidateScore(
@@ -65,14 +62,13 @@ class CustomerSelector:
                 invalid_episode_count=len(invalid_episodes),
                 invalid_reasons=invalid_reasons or (["no_valid_episode_evidence"] if not episodes else []),
             )
-        # Only legitimate business-process failures are useful adversarial
-        # signal.  Simulator/provider protocol-invalid episodes are excluded
-        # from every fitness component, including SOP coverage.
-        attack_success = aggregate_episode_metrics(valid_episodes)["legitimate_attack_success"]
+        # Customer behavior that violates the fixed CaseSpec is diagnostic,
+        # not attack fitness. Only attributable service failures contribute.
+        attack_success = aggregate_episode_metrics(valid_episodes)["attributable_service_failure_rate"]
         signatures = {
             signature.signature_id
             for episode in valid_episodes
-            if not episode.task_success
+            if episode.is_attributable_service_failure()
             for signature in [episode.vulnerability_signature_v2()]
             if signature is not None
         }

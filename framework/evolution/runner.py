@@ -406,7 +406,7 @@ class EvolutionRunner:
                 )
                 prior_failures = []
                 for item in prior_customer_episodes:
-                    if item.task_success or item.is_evaluation_invalid():
+                    if not item.is_attributable_service_failure():
                         continue
                     signature = item.vulnerability_signature_v2()
                     if signature is not None:
@@ -430,11 +430,11 @@ class EvolutionRunner:
                     "selected_policy": customer.to_dict(), "scores": [score.to_dict() for score in scores],
                     "candidate_episode_counts": [len(items) for _, items in candidate_records],
                     "candidate_valid_episode_counts": [
-                        sum(not item.is_evaluation_invalid() for item in items)
+                        sum(item.is_substantively_evaluable() for item in items)
                         for _, items in candidate_records
                     ],
                     "candidate_invalid_episode_counts": [
-                        sum(item.is_evaluation_invalid() for item in items)
+                        sum(not item.is_substantively_evaluable() for item in items)
                         for _, items in candidate_records
                     ],
                     "rejections": list(getattr(self.customer_evolver, "last_rejections", [])),
@@ -463,15 +463,14 @@ class EvolutionRunner:
                 signatures = [
                     signature
                     for item in selected_episodes
-                    if not item.task_success and not item.is_evaluation_invalid()
+                    if item.is_attributable_service_failure()
                     for signature in [item.vulnerability_signature_v2()]
                     if signature is not None
                 ]
                 occurrence_values = [
                     FailureOccurrence.from_episode(item, item.vulnerability_signature_v2())
                     for item in selected_episodes
-                    if not item.task_success
-                    and not item.is_evaluation_invalid()
+                    if item.is_attributable_service_failure()
                     and item.vulnerability_signature_v2() is not None
                 ]
                 case_specs_by_id = {
@@ -493,7 +492,7 @@ class EvolutionRunner:
                 )
                 failures = []
                 for item in service_failure_episodes:
-                    if item.task_success or item.is_evaluation_invalid():
+                    if not item.is_attributable_service_failure():
                         continue
                     signature = item.vulnerability_signature_v2()
                     if signature is not None:
@@ -556,7 +555,7 @@ class EvolutionRunner:
             self.store.append_jsonl(f"generations/gen_{generation:03d}/episodes.jsonl", [item.to_dict() for item in episodes])
             self.store.write_json(f"generations/gen_{generation:03d}/customer_policy.json", customer.to_dict())
             self.store.write_json(f"generations/gen_{generation:03d}/service_policy.json", service.to_dict())
-            if not episodes or all(item.is_evaluation_invalid() for item in episodes):
+            if not episodes or not any(item.is_substantively_evaluable() for item in episodes):
                 raise GenerationEvaluationInconclusive(
                     "generation_summary_invalid:no_valid_episode_evidence"
                 )

@@ -72,7 +72,7 @@ class AttackArchive:
         episodes = list(episodes)
         if any(episode.split == "heldout_test" for episode in episodes):
             raise AssertionError("AttackArchive cannot ingest heldout episodes")
-        valid_episodes = [episode for episode in episodes if not episode.is_evaluation_invalid()]
+        valid_episodes = [episode for episode in episodes if episode.is_substantively_evaluable()]
         signatures_by_id = {
             item.signature_id: item for item in failure_signatures
             if isinstance(item, VulnerabilitySignature) and item.schema_version == 2
@@ -80,9 +80,9 @@ class AttackArchive:
         occurrences_by_episode = {item.episode_id: item for item in (occurrences or [])}
         added = 0
         changed = False
-        cohort_failure_count = sum(not episode.task_success for episode in valid_episodes)
+        cohort_failure_count = sum(episode.is_attributable_service_failure() for episode in valid_episodes)
         for episode in valid_episodes:
-            if episode.task_success:
+            if not episode.is_attributable_service_failure():
                 continue
             signature = episode.vulnerability_signature_v2()
             if signature is None or signature.signature_id not in signatures_by_id:
@@ -123,7 +123,7 @@ class AttackArchive:
             # This is incidence within the evaluated policy cohort, not the
             # probability that the policy fails for any reason.
             signature_episode_count = sum(
-                not item.task_success
+                item.is_attributable_service_failure()
                 and (item.vulnerability_signature_v2() is not None)
                 and item.vulnerability_signature_v2().signature_id == signature.signature_id
                 for item in valid_episodes
