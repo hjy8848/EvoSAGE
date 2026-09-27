@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..backend.tool_contract import ToolContractConfig
 from .evaluator_adapter import EvoSAGEEpisodeEvaluator
 
 
@@ -11,8 +12,9 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
                         max_turns: int = 10, user_simulator_mode: str = "llm", api_timeout: int = 300,
                         client_type: str = "openai_api", judge_in_evolution: bool = False,
                         resume: bool = False, token_budget=None,
-                        customer_thinking_mode=None):
+                        customer_thinking_mode=None, tool_contract_config=None):
     from run_evaluation_with_llm import LLMEvaluationPipeline
+    tool_contract_config = ToolContractConfig.from_value(tool_contract_config)
 
     def budget(name: str, default: int) -> int:
         if token_budget is None:
@@ -45,6 +47,7 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
             agent_max_tokens=budget("agent", 1536),
             judge_max_tokens=budget("judge", 1024),
             customer_thinking_mode=customer_thinking_mode,
+            tool_contract_config=tool_contract_config,
         )
 
     return EvoSAGEEpisodeEvaluator(
@@ -53,6 +56,8 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
         cache_namespace=(
             f"{client_type}|{model}|{api_url}|turns={max_turns}|timeout={api_timeout}"
             f"|customer-thinking={customer_thinking_mode or 'default'}"
+            f"|tool-contract={tool_contract_config.provider_schema_strict}:"
+            f"{tool_contract_config.runtime_schema_validation}"
         ),
         cache_path=Path(output_dir) / "environment" / "episode_cache.jsonl",
         reset_cache=not resume,

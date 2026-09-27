@@ -181,10 +181,10 @@ def _safe_name(value: str) -> str:
 class ScenarioBackend(BackendEnvironment):
     """Scenario-specific public projections over a hidden deterministic state."""
 
-    def __init__(self, case_spec: CaseSpec):
+    def __init__(self, case_spec: CaseSpec, tool_contract_config=None):
         self._query_tools = SCENARIO_QUERY_TOOLS.get(case_spec.scenario, [])
         self._action_tools = SCENARIO_ACTION_TOOLS.get(case_spec.scenario, {})
-        super().__init__(case_spec)
+        super().__init__(case_spec, tool_contract_config)
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         definitions = []

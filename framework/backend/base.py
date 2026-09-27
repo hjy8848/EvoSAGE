@@ -5,6 +5,7 @@ import copy
 import json
 
 from .types import ActionResult, BackendEvent, CaseSpec, ToolResult
+from .tool_contract import ToolContractConfig
 
 
 class BackendEnvironment:
@@ -17,11 +18,12 @@ class BackendEnvironment:
 
     scenario_id = "generic"
 
-    def __init__(self, case_spec: Optional[CaseSpec] = None):
+    def __init__(self, case_spec: Optional[CaseSpec] = None, tool_contract_config=None):
         self.case_spec: Optional[CaseSpec] = None
         self.state: Dict[str, Any] = {}
         self.event_log: List[BackendEvent] = []
         self.selected_records: Dict[str, Any] = {}
+        self.tool_contract_config = ToolContractConfig.from_value(tool_contract_config)
         if case_spec is not None:
             self.reset(case_spec)
 
@@ -33,6 +35,20 @@ class BackendEnvironment:
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         return []
+
+    def record_tool_contract_rejection(self, tool_name: str, arguments: Dict[str, Any],
+                                       result: ToolResult, turn_index: Optional[int] = None) -> None:
+        """Record an attempted call rejected before domain backend execution."""
+        snapshot = self.get_state_snapshot()
+        self.event_log.append(BackendEvent(
+            event_type="tool_call",
+            name=tool_name,
+            arguments=copy.deepcopy(arguments or {}),
+            result=result.to_dict(),
+            state_before=snapshot,
+            state_after=snapshot,
+            turn_index=turn_index,
+        ))
 
     def get_action_tool_map(self) -> Dict[str, str]:
         """Return formal-tool-name -> canonical SOP action name."""

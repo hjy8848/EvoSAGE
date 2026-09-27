@@ -261,6 +261,7 @@ class LLMEvaluationPipeline:
         agent_max_tokens: int = 1536,
         judge_max_tokens: int = 1024,
         customer_thinking_mode: Optional[str] = None,
+        tool_contract_config=None,
     ):
         """
         初始化LLM评测管道
@@ -307,6 +308,8 @@ class LLMEvaluationPipeline:
         if customer_thinking_mode not in {None, "enabled", "disabled"}:
             raise ValueError("customer_thinking_mode must be None, 'enabled', or 'disabled'")
         self.customer_thinking_mode = customer_thinking_mode
+        from framework.backend.tool_contract import ToolContractConfig
+        self.tool_contract_config = ToolContractConfig.from_value(tool_contract_config)
         
         # 创建输出目录
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -561,7 +564,7 @@ class LLMEvaluationPipeline:
         # All supported benchmark scenarios use the authoritative backend
         # contract.  The Agent sees only initial public observations and
         # formal tool results; complete CaseSpec/backend truth stays hidden.
-        backend_environment = create_backend(case_spec)
+        backend_environment = create_backend(case_spec, self.tool_contract_config)
         if backend_environment is not None:
             backend_environment.reset(case_spec)
 
@@ -632,6 +635,7 @@ class LLMEvaluationPipeline:
             llm_client=self.agent_llm_client,  # 传入agent LLM客户端
             use_llm_for_full_output=True,  # 使用LLM生成完整JSON输出(classification+path+finals+chat)
             max_tokens=self.agent_max_tokens,
+            tool_contract_config=self.tool_contract_config,
         )
         agent_model.scenario_id = self.scenario_id
         

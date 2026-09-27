@@ -45,6 +45,9 @@ def main() -> int:
         evaluator = make_real_evaluator(
             args.model, args.api_url, os.environ["OPENAI_API_KEY"], args.run_dir,
             max_turns=config.evaluation.max_turns, api_timeout=config.evaluation.api_timeout,
+            token_budget=config.evaluation.token_budget,
+            customer_thinking_mode=config.evaluation.customer_thinking_mode,
+            tool_contract_config=config.evaluation.tool_contract,
         )
     matrix = EvolutionRunner(config, evaluator=evaluator).cross_generation_evaluation()
     print(f"wrote {len(matrix)} matrix cells to {Path(args.run_dir) / 'analysis/cross_generation_matrix.json'}")

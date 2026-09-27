@@ -9,13 +9,19 @@ from .types import ActionResult, CaseSpec, ToolResult
 class EcommerceBackend(BackendEnvironment):
     scenario_id = "ecommerce_refund"
 
+    def __init__(self, case_spec=None, tool_contract_config=None):
+        super().__init__(case_spec, tool_contract_config)
+
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
+        order_id_schema = {"type": "string", "description": "订单号"}
+        if self.tool_contract_config.provider_schema_strict:
+            order_id_schema["minLength"] = 1
         definitions = [
             tool_definition(
                 "query_order",
                 "查询订单的物流、支付和售后状态。需要用户提供准确订单号。",
                 {
-                    "order_id": {"type": "string", "description": "订单号"},
+                    "order_id": dict(order_id_schema),
                 },
                 ["order_id"],
             ),
@@ -31,7 +37,7 @@ class EcommerceBackend(BackendEnvironment):
                 "query_payment",
                 "查询订单支付状态。",
                 {
-                    "order_id": {"type": "string", "description": "订单号"},
+                    "order_id": dict(order_id_schema),
                 },
                 ["order_id"],
             ),

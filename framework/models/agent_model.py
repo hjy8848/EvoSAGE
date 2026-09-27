@@ -17,6 +17,9 @@ from enum import Enum
 import json
 from datetime import datetime
 
+from ..backend.tool_contract import ToolContractConfig, validate_tool_arguments
+from ..backend.types import ToolResult
+
 
 _TRACE_SECRET_KEYS = {"api_key", "authorization", "x-api-key", "access_token", "token"}
 
@@ -338,7 +341,8 @@ class AgentModel:
     
     def __init__(self, scenario_id: str, sop_graph, system_prompt: str = "", 
                  use_llm_for_classification: bool = False, llm_client=None,
-                 use_llm_for_full_output: bool = True, max_tokens: int = 1536):
+                 use_llm_for_full_output: bool = True, max_tokens: int = 1536,
+                 tool_contract_config=None):
         """
         初始化客服模型
         
@@ -357,6 +361,7 @@ class AgentModel:
         self.use_llm_for_full_output = use_llm_for_full_output
         self.llm_client = llm_client
         self.max_tokens = max_tokens
+        self.tool_contract_config = ToolContractConfig.from_value(tool_contract_config)
         
         # 状态管理
         self.current_step = sop_graph.start_node_id
@@ -1194,12 +1199,48 @@ class AgentModel:
                             "name": call.name,
                             "error": getattr(call, "argument_error", None),
                         })
-                    tool_result = backend_environment.execute_tool(
-                        call.name,
-                        call.arguments,
-                        turn_index=turn_output.turn_id,
-                        call_id=call.call_id,
-                    )
+                    if self.tool_contract_config.runtime_schema_validation:
+                        tool_definitions = backend_environment.get_tool_definitions()
+                        definition = next((
+                            item for item in tool_definitions
+                            if item.get("function", {}).get("name") == call.name
+                        ), None)
+                        contract_errors = (
+                            [getattr(call, "argument_error", None) or "tool arguments failed parsing"]
+                            if not getattr(call, "arguments_valid", True)
+                            else ["unknown tool"] if definition is None
+                            else validate_tool_arguments(definition, call.arguments)
+                        )
+                        if contract_errors:
+                            tool_result = ToolResult(
+                                success=False,
+                                tool_name=call.name,
+                                error_code="tool_argument_schema_invalid",
+                                error_message="; ".join(contract_errors),
+                                call_id=call.call_id,
+                            )
+                            backend_environment.record_tool_contract_rejection(
+                                call.name, call.arguments, tool_result, turn_output.turn_id
+                            )
+                            turn_output.metadata.setdefault("tool_contract_violations", []).append({
+                                "name": call.name,
+                                "arguments": _trace_safe(call.arguments),
+                                "errors": contract_errors,
+                            })
+                        else:
+                            tool_result = backend_environment.execute_tool(
+                                call.name,
+                                call.arguments,
+                                turn_index=turn_output.turn_id,
+                                call_id=call.call_id,
+                            )
+                    else:
+                        tool_result = backend_environment.execute_tool(
+                            call.name,
+                            call.arguments,
+                            turn_index=turn_output.turn_id,
+                            call_id=call.call_id,
+                        )
                     turn_output.tool_calls.append(call.to_dict())
                     turn_output.tool_results.append(tool_result.to_dict())
                     attempt_trace["tool_results"].append(_trace_safe(tool_result.to_dict()))

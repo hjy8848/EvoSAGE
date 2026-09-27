@@ -108,6 +108,10 @@ def test_run_provenance_records_model_budget_git_and_exact_split_manifest(tmp_pa
         "splits": {"seed": 7, "max_cases": 10},
         "evaluation": {
             "customer_thinking_mode": "disabled",
+            "tool_contract": {
+                "provider_schema_strict": True,
+                "runtime_schema_validation": True,
+            },
             "token_budget": {"user": 512, "agent": 4096, "judge": 1024,
                               "customer_evolver": 8192, "service_evolver": 8192},
         },
@@ -118,6 +122,10 @@ def test_run_provenance_records_model_budget_git_and_exact_split_manifest(tmp_pa
 
     provenance = json.loads((runner.store.run_dir / "environment/provenance.json").read_text())
     assert provenance["provider"] == "InferAI"
+    assert provenance["tool_contract"] == {
+        "provider_schema_strict": True,
+        "runtime_schema_validation": True,
+    }
     assert provenance["model"] == "deepseek-v4-flash"
     assert provenance["customer_thinking_mode"] == "disabled"
     assert provenance["token_budget"] == config.evaluation.token_budget.__dict__

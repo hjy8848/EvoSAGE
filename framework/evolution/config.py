@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import warnings
 
+from ..backend.tool_contract import ToolContractConfig
+
 
 @dataclass
 class CustomerEvolutionConfig:
@@ -113,6 +115,7 @@ class EvaluationConfig:
     # None preserves provider defaults; explicit values currently target the
     # Customer simulator only, leaving Agent/Evolver/Judge requests unchanged.
     customer_thinking_mode: Optional[str] = None
+    tool_contract: ToolContractConfig = field(default_factory=ToolContractConfig)
 
     def __post_init__(self) -> None:
         if self.customer_thinking_mode not in {None, "enabled", "disabled"}:
@@ -124,6 +127,9 @@ class EvaluationConfig:
         token_budget = value.get("token_budget")
         if isinstance(token_budget, dict):
             value["token_budget"] = TokenBudgetConfig(**token_budget)
+        tool_contract = value.get("tool_contract")
+        if tool_contract is not None:
+            value["tool_contract"] = ToolContractConfig.from_value(tool_contract)
         return cls(**{key: item for key, item in value.items() if key in cls.__dataclass_fields__})
 
 

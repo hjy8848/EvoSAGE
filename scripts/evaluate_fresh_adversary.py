@@ -52,6 +52,9 @@ def main() -> int:
         evaluator = make_real_evaluator(
             args.model, args.api_url, os.environ["OPENAI_API_KEY"], args.run_dir,
             max_turns=config.evaluation.max_turns, api_timeout=config.evaluation.api_timeout,
+            token_budget=config.evaluation.token_budget,
+            customer_thinking_mode=config.evaluation.customer_thinking_mode,
+            tool_contract_config=config.evaluation.tool_contract,
         )
         evolution_client = get_llm_client(
             "openai_api", api_key=os.environ["OPENAI_API_KEY"], base_url=args.api_url, model_name=args.model,

@@ -370,9 +370,9 @@ def build_case_spec(
     )
 
 
-def create_backend(case_spec: CaseSpec) -> BackendEnvironment:
+def create_backend(case_spec: CaseSpec, tool_contract_config=None) -> BackendEnvironment:
     if case_spec.scenario == "ecommerce_refund":
-        return EcommerceBackend(case_spec)
+        return EcommerceBackend(case_spec, tool_contract_config)
     if case_spec.scenario in {
         "telecom_package",
         "property_service",
@@ -380,5 +380,5 @@ def create_backend(case_spec: CaseSpec) -> BackendEnvironment:
         "airline_refund",
         "online_education",
     }:
-        return ScenarioBackend(case_spec)
+        return ScenarioBackend(case_spec, tool_contract_config)
     raise ValueError(f"No authoritative backend registered for scenario: {case_spec.scenario}")

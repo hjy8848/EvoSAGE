@@ -78,7 +78,8 @@ def main() -> int:
                                         judge_in_evolution=config.evaluation.judge_in_evolution,
                                         resume=config.persistence.resume,
                                         token_budget=config.evaluation.token_budget,
-                                        customer_thinking_mode=config.evaluation.customer_thinking_mode)
+                                        customer_thinking_mode=config.evaluation.customer_thinking_mode,
+                                        tool_contract_config=config.evaluation.tool_contract)
         evolution_client = get_llm_client(
             args.client, api_key=api_key, base_url=args.api_url, model_name=args.model,
             timeout=config.evaluation.api_timeout,

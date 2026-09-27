@@ -4,6 +4,7 @@ from .types import ActionResult, BackendEvent, CaseSpec, ToolCall, ToolResult, U
 from .base import BackendEnvironment
 from .ecommerce import EcommerceBackend
 from .scenario import ScenarioBackend
+from .tool_contract import ToolContractConfig, validate_tool_arguments
 from .factory import build_case_spec, create_backend
 from .errors import (
     BACKEND_ERROR_POLICIES,
@@ -24,6 +25,8 @@ __all__ = [
     "BackendEnvironment",
     "EcommerceBackend",
     "ScenarioBackend",
+    "ToolContractConfig",
+    "validate_tool_arguments",
     "build_case_spec",
     "create_backend",
     "BACKEND_ERROR_POLICIES",

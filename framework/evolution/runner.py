@@ -378,6 +378,7 @@ class EvolutionRunner:
             ),
             "customer_adversary_access": self.config.customer.adversary_access,
             "customer_thinking_mode": self.config.evaluation.customer_thinking_mode or "default",
+            "tool_contract": asdict(self.config.evaluation.tool_contract),
             "token_budget": asdict(self.config.evaluation.token_budget),
             "customer_protocol_retry_limit": CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT,
             "evolver_protocol_retry_limit": PROTOCOL_RETRY_LIMIT,
