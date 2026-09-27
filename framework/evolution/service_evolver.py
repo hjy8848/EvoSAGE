@@ -8,9 +8,10 @@ import copy
 
 from .evaluator_adapter import aggregate_episode_metrics
 from .generation_protocol import GenerationProtocolError, request_json_with_retry
-from .schemas import ServicePatch, ServicePolicy, ServiceRule
+from .schemas import AttackInstance, CustomerPolicy, ServicePatch, ServicePolicy, ServiceRule
 from .service_gate import ServiceGate
 from .service_policy import ServicePolicyCompiler, ServicePolicySanitizer
+from .split_manager import dataset_case_from_attack_instance
 
 
 class ServiceEvolver:
@@ -103,40 +104,125 @@ class ServiceEvolver:
                 return
 
     def evolve(self, incumbent, failures, normal_cases, adversarial_cases, evaluator, generation, count=5,
-               customer_policy=None, replay_policies=None, replay_attack_count=0, defense_summary=None, historical_summary=None):
+               customer_policy=None, replay_policies=None, replay_attack_count=0,
+               exact_replay_instances=None, transfer_replay_policies=None,
+               defense_summary=None, historical_summary=None):
         normal_cases = list(normal_cases)
         adversarial_cases = list(adversarial_cases)
         if any(getattr(case, "split", "") == "heldout_test" for case in normal_cases + adversarial_cases):
             raise AssertionError("ServiceEvolver cannot consume heldout cases")
         self.last_candidate_records = []
         customer_policy = customer_policy or self._baseline_customer()
-        replay_policies = list(replay_policies or [])
-        replay_policies = replay_policies[:replay_attack_count] if replay_attack_count > 0 else []
-        def evaluate_latest(service_policy):
-            return evaluator.evaluate(
-                customer_policy, service_policy, adversarial_cases,
-                "validation", generation, "service_candidate_latest"
+        if transfer_replay_policies is None:
+            transfer_replay_policies = list(replay_policies or [])
+            transfer_replay_policies = (
+                transfer_replay_policies[:replay_attack_count]
+                if replay_attack_count > 0 else []
             )
+        else:
+            transfer_replay_policies = list(transfer_replay_policies)
+        exact_replay_instances = list(exact_replay_instances or [])
+        if any(
+            instance.source_split == "heldout_test"
+            for instance in exact_replay_instances
+        ):
+            raise AssertionError("ServiceEvolver cannot replay heldout attack instances")
 
-        def evaluate_suite(service_policy, phase):
-            latest = evaluator.evaluate(
+        def evaluate_latest(service_policy, phase):
+            return evaluator.evaluate(
                 customer_policy, service_policy, adversarial_cases,
                 "validation", generation, phase + "_latest"
             )
-            replay = []
-            for policy in replay_policies:
-                replay.extend(evaluator.evaluate(policy, service_policy, adversarial_cases, "validation", generation, phase + "_replay"))
-            return latest, replay
 
-        def summarize(latest, replay, normal=None):
-            adversarial = list(latest) + list(replay)
-            robust = aggregate_episode_metrics(adversarial)
-            robust["latest_task_success"] = aggregate_episode_metrics(latest)["task_success"]
-            robust["replay_task_success"] = aggregate_episode_metrics(replay)["task_success"] if replay else robust["latest_task_success"]
-            robust["robust_task_success"] = robust["task_success"]
+        def evaluate_exact(service_policy, phase):
+            results = []
+            for instance in exact_replay_instances:
+                case = dataset_case_from_attack_instance(instance)
+                customer = CustomerPolicy.from_dict(instance.customer_policy)
+                results.extend(evaluator.evaluate(
+                    customer,
+                    service_policy,
+                    [case],
+                    instance.source_split,
+                    generation,
+                    phase + "_exact_replay",
+                ))
+            return results
+
+        def evaluate_transfer(service_policy, phase):
+            results = []
+            for policy in transfer_replay_policies:
+                results.extend(evaluator.evaluate(
+                    policy, service_policy, adversarial_cases,
+                    "validation", generation, phase + "_transfer_replay",
+                ))
+            return results
+
+        def summarize(latest, exact, transfer, normal=None):
+            all_adversarial = list(latest) + list(exact) + list(transfer)
+            summary = aggregate_episode_metrics(all_adversarial)
+            latest_metrics = aggregate_episode_metrics(latest)
+            summary["latest_task_success"] = latest_metrics["task_success"] if latest else None
+            summary["exact_replay_task_success"] = (
+                aggregate_episode_metrics(exact)["task_success"] if exact else None
+            )
+            summary["transfer_replay_task_success"] = (
+                aggregate_episode_metrics(transfer)["task_success"] if transfer else None
+            )
+            # Retained as an explicit compatibility alias; all new consumers
+            # should use the separately named exact/transfer metrics above.
+            summary["replay_task_success"] = summary["transfer_replay_task_success"]
+            suite_values = [latest_metrics["task_success"]] if latest else []
+            if exact:
+                suite_values.append(summary["exact_replay_task_success"])
+            if transfer:
+                suite_values.append(summary["transfer_replay_task_success"])
+            summary["robust_task_success"] = min(suite_values) if suite_values else None
+            summary["exact_replay_episode_count"] = len(exact)
+            summary["transfer_replay_episode_count"] = len(transfer)
             if normal is not None:
-                robust["normal_task_success"] = aggregate_episode_metrics(normal)["task_success"]
-            return robust
+                summary["normal_task_success"] = (
+                    aggregate_episode_metrics(normal)["task_success"] if normal else None
+                )
+            return summary
+
+        def paired_outcomes(baseline, candidate):
+            def indexed(rows):
+                return {
+                    (
+                        item.case_id,
+                        item.customer_policy_id,
+                        int((item.metadata or {}).get("repetition", 0) or 0),
+                    ): item
+                    for item in rows if not item.is_evaluation_invalid()
+                }
+            left, right = indexed(baseline), indexed(candidate)
+            common = set(left) & set(right)
+            wins = sum(not left[key].task_success and right[key].task_success for key in common)
+            losses = sum(left[key].task_success and not right[key].task_success for key in common)
+            ties = len(common) - wins - losses
+            return {
+                "wins": wins,
+                "losses": losses,
+                "ties": ties,
+                "matched_pairs": len(common),
+                "unmatched_baseline": len(set(left) - set(right)),
+                "unmatched_candidate": len(set(right) - set(left)),
+            }
+
+        def regression_case_ids(baseline, candidate):
+            def indexed(rows):
+                return {
+                    (item.case_id, int((item.metadata or {}).get("repetition", 0) or 0)): item
+                    for item in rows if not item.is_evaluation_invalid()
+                }
+            left, right = indexed(baseline), indexed(candidate)
+            return sorted(
+                f"{case_id}#rep{repetition}"
+                for (case_id, repetition) in set(left) & set(right)
+                if left[(case_id, repetition)].task_success
+                and not right[(case_id, repetition)].task_success
+            )
 
         def invalid_reasons(episodes):
             reasons = []
@@ -165,14 +251,16 @@ class ServiceEvolver:
                 or [0]
             )
 
-        baseline_latest, baseline_replay = evaluate_suite(incumbent, "service_baseline")
+        baseline_latest = evaluate_latest(incumbent, "service_baseline")
+        baseline_exact = evaluate_exact(incumbent, "service_baseline")
+        baseline_transfer = evaluate_transfer(incumbent, "service_baseline")
         baseline_normal = evaluator.evaluate(self._baseline_customer(), incumbent, normal_cases, "validation", generation, "service_normal_baseline")
-        baseline_metrics = summarize(baseline_latest, baseline_replay, baseline_normal)
+        baseline_metrics = summarize(baseline_latest, baseline_exact, baseline_transfer, baseline_normal)
         self.last_baseline_metrics = baseline_metrics
-        baseline_invalid = invalid_reasons(baseline_latest + baseline_replay + baseline_normal)
+        baseline_invalid = invalid_reasons(baseline_latest + baseline_exact + baseline_transfer + baseline_normal)
         baseline_has_invalid = any(
             episode.is_evaluation_invalid()
-            for episode in baseline_latest + baseline_replay + baseline_normal
+            for episode in baseline_latest + baseline_exact + baseline_transfer + baseline_normal
         )
         accepted = []
         invalid_candidate_reasons = []
@@ -202,7 +290,7 @@ class ServiceEvolver:
                         "reason": reason,
                         "delta": None,
                         "metrics": None,
-                        "attempt_count": attempt_count(baseline_latest, baseline_replay, baseline_normal),
+                        "attempt_count": attempt_count(baseline_latest, baseline_exact, baseline_transfer, baseline_normal),
                         "normal_regression_cases": [],
                     })
                     continue
@@ -210,12 +298,12 @@ class ServiceEvolver:
                 # adversarial customer.  Historical replay and normal-user
                 # regression are paid only for candidates that first improve
                 # the attack currently driving the evolution.
-                candidate_latest = evaluate_latest(candidate)
+                candidate_latest = evaluate_latest(candidate, "service_candidate")
                 # Stage 1: reject patches that do not improve the latest
                 # adversarial attack before spending API calls on normal-user
                 # regression and historical replay evaluation.
-                candidate_latest_metrics = summarize(candidate_latest, [])
-                latest_baseline_metrics = summarize(baseline_latest, [])
+                candidate_latest_metrics = summarize(candidate_latest, [], [])
+                latest_baseline_metrics = summarize(baseline_latest, [], [])
                 latest_invalid = invalid_reasons(candidate_latest)
                 if any(item.is_evaluation_invalid() for item in candidate_latest):
                     reason = f"candidate_evaluation_invalid:{latest_invalid[0]}"
@@ -264,15 +352,12 @@ class ServiceEvolver:
                         "normal_regression_cases": [],
                     })
                     continue
-                candidate_replay = []
-                for policy in replay_policies:
-                    candidate_replay.extend(evaluator.evaluate(
-                        policy, candidate, adversarial_cases, "validation", generation,
-                        "service_candidate_replay"
-                    ))
+                candidate_exact = evaluate_exact(candidate, "service_candidate")
+                candidate_transfer = evaluate_transfer(candidate, "service_candidate")
                 candidate_normal = evaluator.evaluate(self._baseline_customer(), candidate, normal_cases, "validation", generation, "service_normal_candidate")
-                suite_invalid = invalid_reasons(candidate_replay + candidate_normal)
-                if any(item.is_evaluation_invalid() for item in candidate_replay + candidate_normal):
+                candidate_other_suites = candidate_exact + candidate_transfer + candidate_normal
+                suite_invalid = invalid_reasons(candidate_other_suites)
+                if any(item.is_evaluation_invalid() for item in candidate_other_suites):
                     reason = f"candidate_evaluation_invalid:{suite_invalid[0]}"
                     invalid_candidate_reasons.append(reason)
                     self.last_candidate_records.append({
@@ -288,22 +373,32 @@ class ServiceEvolver:
                         "reason": reason,
                         "delta": None,
                         "metrics": None,
-                        "raw_metrics": summarize(candidate_latest, candidate_replay, candidate_normal),
-                        "attempt_count": attempt_count(candidate_latest, candidate_replay, candidate_normal),
-                        "stages": {"replay_or_normal": {"evaluation_status": "invalid", "invalid_reasons": suite_invalid}},
+                        "raw_metrics": summarize(candidate_latest, candidate_exact, candidate_transfer, candidate_normal),
+                        "attempt_count": attempt_count(candidate_latest, candidate_exact, candidate_transfer, candidate_normal),
+                        "stages": {"exact_replay_transfer_or_normal": {"evaluation_status": "invalid", "invalid_reasons": suite_invalid}},
                         "normal_regression_cases": [],
                     })
                     continue
-                candidate_metrics = summarize(candidate_latest, candidate_replay, candidate_normal)
+                candidate_metrics = summarize(candidate_latest, candidate_exact, candidate_transfer, candidate_normal)
+                latest_pairs = paired_outcomes(baseline_latest, candidate_latest)
+                exact_pairs = paired_outcomes(baseline_exact, candidate_exact)
+                transfer_pairs = paired_outcomes(baseline_transfer, candidate_transfer)
+                exact_regressions = _exact_replay_regressions(
+                    exact_replay_instances, baseline_exact, candidate_exact
+                )
+                candidate_metrics.update({
+                    "latest_paired": latest_pairs,
+                    "exact_replay_paired": exact_pairs,
+                    "transfer_replay_paired": transfer_pairs,
+                    "exact_replay_regressions": exact_regressions,
+                })
                 decision = self.gate.evaluate(
                     baseline_metrics, candidate_metrics,
                     aggregate_episode_metrics(baseline_normal),
                     aggregate_episode_metrics(candidate_normal),
                 )
                 decision.metrics = dict(candidate_metrics, normal_delta=decision.metrics.get("normal_delta", 0.0))
-                regression_cases = [
-                    item.case_id for item in candidate_normal if not item.task_success
-                ]
+                regression_cases = regression_case_ids(baseline_normal, candidate_normal)
                 record = {
                     "patch_id": patch.patch_id,
                     "service_policy_id": candidate.policy_id,
@@ -316,7 +411,7 @@ class ServiceEvolver:
                     "reason": decision.reason,
                     "delta": decision.delta,
                     "metrics": candidate_metrics,
-                    "attempt_count": attempt_count(candidate_latest, candidate_replay, candidate_normal),
+                    "attempt_count": attempt_count(candidate_latest, candidate_exact, candidate_transfer, candidate_normal),
                     "normal_regression_cases": regression_cases,
                 }
                 self.last_candidate_records.append(record)
@@ -371,6 +466,31 @@ class ServiceEvolver:
 
 def metrics_value(metrics, key):
     return float(metrics.get(key, 0.0))
+
+
+def _exact_replay_regressions(instances, baseline, candidate):
+    """Return only paired, same-repetition regressions for archived attacks."""
+    def indexed(rows):
+        return {
+            (
+                item.case_id,
+                item.customer_policy_id,
+                int((item.metadata or {}).get("repetition", 0) or 0),
+            ): item
+            for item in rows
+            if not item.is_evaluation_invalid()
+        }
+
+    left, right = indexed(baseline), indexed(candidate)
+    regressions = []
+    for instance in instances:
+        key = (instance.case_id, instance.customer_policy_id, int(instance.repetition))
+        before, after = left.get(key), right.get(key)
+        if before is not None and after is not None and before.task_success and not after.task_success:
+            regressions.append(
+                f"{instance.attack_instance_id}:{instance.case_id}#rep{instance.repetition}"
+            )
+    return sorted(regressions)
 
 
 def _top_k(items, limit: int = 5):

@@ -314,7 +314,7 @@ class EvoSAGEEpisodeEvaluator:
 
     def _cache_key(self, customer_policy, service_policy, case, split, generation, judge_enabled):
         payload = {
-            "version": "episode-cache-v2",
+            "version": "episode-cache-v3-exact-case",
             "namespace": self.cache_namespace,
             "customer_policy_id": customer_policy.policy_id,
             "service_policy_id": service_policy.policy_id,
@@ -325,6 +325,7 @@ class EvoSAGEEpisodeEvaluator:
             # Do not persist path_config itself: it can contain hidden
             # backend truth.  The digest still prevents cross-case reuse.
             "path_config_digest": self._fingerprint(getattr(case, "path_config", None)),
+            "case_spec_digest": self._fingerprint(getattr(case, "case_spec", None)),
             "split": split,
             "generation": generation,
             "judge_enabled": judge_enabled,
@@ -478,6 +479,12 @@ class EvoSAGEEpisodeEvaluator:
                 # during compatibility fallback.
                 run_kwargs = dict(run_kwargs)
                 run_kwargs.pop("phase", None)
+            if accepts_kwargs and "case_spec_override" not in parameters:
+                # Opaque legacy wrappers may forward arbitrary kwargs to an
+                # older concrete pipeline. Do not probe this argument by
+                # making a speculative call, which could duplicate requests.
+                run_kwargs = dict(run_kwargs)
+                run_kwargs.pop("case_spec_override", None)
             if not accepts_kwargs:
                 run_kwargs = {
                     key: value for key, value in run_kwargs.items()
@@ -493,6 +500,7 @@ class EvoSAGEEpisodeEvaluator:
             dict(run_kwargs),
             {key: value for key, value in run_kwargs.items() if key != "phase"},
             {key: value for key, value in run_kwargs.items() if key not in {"phase", "judge_enabled"}},
+            {key: value for key, value in run_kwargs.items() if key not in {"phase", "judge_enabled", "case_spec_override"}},
         ]
         last_error = None
         for kwargs in candidates:
@@ -504,7 +512,7 @@ class EvoSAGEEpisodeEvaluator:
                 # Only retry signature compatibility errors.  A TypeError
                 # raised inside the provider/pipeline is a real invalid
                 # evaluation and must reach the protocol classifier.
-                optional = [name for name in ("phase", "judge_enabled") if name in kwargs]
+                optional = [name for name in ("phase", "judge_enabled", "case_spec_override") if name in kwargs]
                 if not optional or not any(
                     marker in text for marker in ("unexpected keyword", "got an unexpected keyword", "positional")
                 ):
@@ -553,6 +561,9 @@ class EvoSAGEEpisodeEvaluator:
                 "judge_enabled": judge_enabled,
                 "phase": phase,
             }
+            archived_case_spec = getattr(case, "case_spec", None)
+            if isinstance(archived_case_spec, dict):
+                run_kwargs["case_spec_override"] = archived_case_spec
             max_attempts = 1 + self.invalid_evaluation_retries
             invalid_attempts = []
             episode = None

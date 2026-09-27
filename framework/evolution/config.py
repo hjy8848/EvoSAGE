@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
+import warnings
 
 
 @dataclass
@@ -35,9 +36,15 @@ class ServiceEvolutionConfig:
     min_delta: float = 0.01
     normal_regression_tolerance: float = 0.03
     replay_attack_count: int = 5
+    exact_replay_instance_count: int = 5
+    transfer_replay_policy_count: Optional[int] = None
     allowed_rule_categories: list[str] = field(default_factory=lambda: [
         "VERIFICATION", "ACTION_GROUNDING", "RECOVERY", "TOOL_USE", "COMMUNICATION",
     ])
+
+    def __post_init__(self) -> None:
+        if self.transfer_replay_policy_count is None:
+            self.transfer_replay_policy_count = int(self.replay_attack_count)
 
 
 @dataclass
@@ -139,6 +146,17 @@ class EvolutionConfig:
         for key, constructor in nested.items():
             if key == "evaluation" and isinstance(value.get(key), dict):
                 value[key] = EvaluationConfig.from_dict(value[key])
+            elif key == "service" and isinstance(value.get(key), dict):
+                service_value = dict(value[key])
+                if "replay_attack_count" in service_value and "transfer_replay_policy_count" not in service_value:
+                    service_value["transfer_replay_policy_count"] = service_value["replay_attack_count"]
+                    warnings.warn(
+                        "service.replay_attack_count is deprecated; interpreted as "
+                        "transfer_replay_policy_count",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+                value[key] = constructor(**service_value)
             elif isinstance(value.get(key), dict):
                 value[key] = constructor(**value[key])
         return cls(**{key: item for key, item in value.items() if key in cls.__dataclass_fields__})

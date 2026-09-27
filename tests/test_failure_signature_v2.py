@@ -136,7 +136,7 @@ def test_v1_signature_loads_as_legacy_and_is_not_admitted_to_v2_archive(tmp_path
     v2 = VulnerabilitySignature.from_episode(episode, _attribution())
     archive = AttackArchive(tmp_path / "attacks.jsonl")
     assert archive.add(CustomerPolicy(), [legacy, v2], [episode]) == 1
-    assert [item["signature_id"] for item in archive.signatures()] == [v2.signature_id]
+    assert [item.signature_id for item in archive.signatures()] == [v2.signature_id]
 
 
 def test_loading_legacy_archive_keeps_v1_records_out_of_v2_signature_set(tmp_path):

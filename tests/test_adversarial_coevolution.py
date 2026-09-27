@@ -1055,7 +1055,7 @@ def test_service_evaluates_all_candidates_and_replays_archived_attacker():
     assert len(evolver.last_candidate_records) == 3
     assert len({item["service_policy_id"] for item in evolver.last_candidate_records}) == 3
     assert all(item["service_policy_id"].startswith("service_policy_s1_") for item in evolver.last_candidate_records)
-    assert any(call["phase"] == "service_candidate_replay" for call in mock.calls)
+    assert any(call["phase"] == "service_candidate_transfer_replay" for call in mock.calls)
 
 
 def test_attack_archive_reconstructs_customer_policy(tmp_path):

@@ -470,6 +470,114 @@ class FailureOccurrence:
         return cls(**values)
 
 
+@dataclass
+class AttackInstance:
+    """One replayable historical attack occurrence with evaluator-only case truth."""
+
+    attack_instance_id: str
+    vulnerability_signature_id: str
+    occurrence_id: str
+    customer_policy_id: str
+    customer_policy: Dict[str, Any]
+    case_id: str
+    case_spec: Dict[str, Any]
+    generation_discovered: int
+    source_split: str
+    reproduction_seed: int
+    repetition: int
+    trace_ref: Optional[str]
+    service_policy_id_when_discovered: str
+    primary_error: str
+    failure_stage: str
+    strategy_tags: List[str] = field(default_factory=list)
+    dataset_case: Optional[Dict[str, Any]] = None
+    active: bool = True
+    schema_version: int = 2
+
+    @classmethod
+    def from_episode(
+        cls,
+        episode: "EpisodeResult",
+        signature: VulnerabilitySignature,
+        occurrence: FailureOccurrence,
+        policy: CustomerPolicy,
+        case_spec: Dict[str, Any],
+        reproduction_seed: int,
+        dataset_case: Optional[Dict[str, Any]] = None,
+        generation: Optional[int] = None,
+    ) -> "AttackInstance":
+        if episode.is_evaluation_invalid() or episode.task_success:
+            raise ValueError("AttackInstance requires a valid failed episode")
+        if episode.split == "heldout_test":
+            raise AssertionError("heldout episodes cannot be archived as attacks")
+        identity = {
+            "schema_version": 2,
+            "vulnerability_signature_id": signature.signature_id,
+            "customer_policy_id": policy.policy_id,
+            "case_id": episode.case_id,
+            "reproduction_seed": int(reproduction_seed),
+            "repetition": int((episode.metadata or {}).get("repetition", 0) or 0),
+        }
+        digest = hashlib.sha256(_json(identity).encode("utf-8")).hexdigest()[:20]
+        return cls(
+            attack_instance_id=f"attack_instance_v2_{digest}",
+            vulnerability_signature_id=signature.signature_id,
+            occurrence_id=occurrence.occurrence_id,
+            customer_policy_id=policy.policy_id,
+            customer_policy=policy.to_dict(),
+            case_id=episode.case_id,
+            case_spec=dict(case_spec),
+            generation_discovered=episode.generation if generation is None else generation,
+            source_split=episode.split,
+            reproduction_seed=int(reproduction_seed),
+            repetition=identity["repetition"],
+            trace_ref=episode.trace_ref,
+            service_policy_id_when_discovered=episode.service_policy_id,
+            primary_error=signature.failure_type,
+            failure_stage=signature.failure_stage,
+            strategy_tags=list(policy.strategy_tags),
+            dataset_case=dict(dataset_case) if dataset_case is not None else None,
+        )
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 2:
+            raise ValueError("AttackInstance only supports schema_version 2")
+        if self.source_split == "heldout_test":
+            raise ValueError("heldout cases cannot be persisted as replayable attacks")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AttackInstance":
+        values = {key: value for key, value in data.items() if key in cls.__dataclass_fields__}
+        return cls(**values)
+
+
+@dataclass
+class VulnerabilityArchiveEntry:
+    """Aggregate index for V2 vulnerability identities and their instances."""
+
+    signature: Dict[str, Any]
+    instance_ids: List[str] = field(default_factory=list)
+    distinct_case_count: int = 0
+    distinct_customer_policy_count: int = 0
+    signature_incidence_rate: Optional[float] = None
+    schema_version: int = 2
+
+    @property
+    def signature_id(self) -> str:
+        return str(self.signature.get("signature_id", ""))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VulnerabilityArchiveEntry":
+        values = {key: value for key, value in data.items() if key in cls.__dataclass_fields__}
+        return cls(**values)
+
+
 def signature_from_dict(data: Dict[str, Any]) -> VulnerabilitySignature | FailureSignature:
     """Load legacy V1 artifacts without allowing them into V2 identity sets."""
     raw_version = data.get("schema_version", 1)
@@ -628,6 +736,9 @@ class DefenseRecord:
     normal_user_delta: Dict[str, float]
     adversarial_delta: Dict[str, float]
     latest_adversary_delta: Dict[str, float] = field(default_factory=dict)
+    exact_replay_delta: Dict[str, float] = field(default_factory=dict)
+    transfer_replay_delta: Dict[str, float] = field(default_factory=dict)
+    exact_replay_regressions: List[str] = field(default_factory=list)
     replay_delta: Dict[str, float] = field(default_factory=dict)
     robust_delta: Dict[str, float] = field(default_factory=dict)
     regression_cases: List[str] = field(default_factory=list)
@@ -638,7 +749,10 @@ class DefenseRecord:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DefenseRecord":
-        return cls(**{key: value for key, value in data.items() if key in cls.__dataclass_fields__})
+        value = {key: item for key, item in data.items() if key in cls.__dataclass_fields__}
+        if "transfer_replay_delta" not in value and value.get("replay_delta"):
+            value["transfer_replay_delta"] = dict(value["replay_delta"])
+        return cls(**value)
 
 
 def reject_forbidden_service_text(text: str) -> Optional[str]:

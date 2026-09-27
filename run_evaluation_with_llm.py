@@ -69,6 +69,7 @@ from framework import (
     AdversarialIntensity,
 )
 from framework.backend import build_case_spec, create_backend
+from framework.backend.types import CaseSpec
 
 from framework.llm_integration import (
     get_llm_client,
@@ -480,6 +481,7 @@ class LLMEvaluationPipeline:
         user_id: str = None,
         path_config: Dict[str, Any] = None,
         phase: str = "",
+        case_spec_override: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """
         运行单次模拟
@@ -538,13 +540,24 @@ class LLMEvaluationPipeline:
         )
         
         # CaseSpec 是唯一的案例真值来源；Agent 只接收公开观察和工具结果。
-        case_spec = build_case_spec(
-            scenario_id=self.scenario_id,
-            user_intent=user_intent,
-            path_config=path_config or {},
-            user_id=user_id,
-            user_policy_mode=self.user_policy_mode,
-        )
+        if case_spec_override is None:
+            case_spec = build_case_spec(
+                scenario_id=self.scenario_id,
+                user_intent=user_intent,
+                path_config=path_config or {},
+                user_id=user_id,
+                user_policy_mode=self.user_policy_mode,
+            )
+        else:
+            case_spec = (
+                case_spec_override
+                if isinstance(case_spec_override, CaseSpec)
+                else CaseSpec(**case_spec_override)
+            )
+            if case_spec.scenario != self.scenario_id:
+                raise ValueError(
+                    "case_spec_override scenario does not match the pipeline scenario"
+                )
         # All supported benchmark scenarios use the authoritative backend
         # contract.  The Agent sees only initial public observations and
         # formal tool results; complete CaseSpec/backend truth stays hidden.

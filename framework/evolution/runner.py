@@ -467,7 +467,25 @@ class EvolutionRunner:
                     for signature in [item.vulnerability_signature_v2()]
                     if signature is not None
                 ]
-                self.attack_archive.add(customer, signatures, selected_episodes, generation)
+                occurrence_values = [
+                    FailureOccurrence.from_episode(item, item.vulnerability_signature_v2())
+                    for item in selected_episodes
+                    if not item.task_success
+                    and not item.is_evaluation_invalid()
+                    and item.vulnerability_signature_v2() is not None
+                ]
+                case_specs_by_id = {
+                    case.case_id: case for case in splits.evolution + splits.validation
+                }
+                self.attack_archive.add(
+                    customer,
+                    signatures,
+                    selected_episodes,
+                    generation,
+                    case_specs_by_id=case_specs_by_id,
+                    occurrences=occurrence_values,
+                    reproduction_seed=self.config.seed,
+                )
                 self.frontier.add(selected_episodes)
             if self.config.experiment_mode in {"service_only", "coevolution"} and self.config.experiment_mode != "static":
                 service_failure_episodes = self.evaluator.evaluate(
@@ -484,8 +502,13 @@ class EvolutionRunner:
                     service, failures, splits.validation, splits.validation, self.evaluator, generation,
                     self.config.service.candidate_count,
                     customer_policy=customer,
-                    replay_policies=self._replay_policies(self.config.service.replay_attack_count),
-                    replay_attack_count=self.config.service.replay_attack_count,
+                    exact_replay_instances=self.attack_archive.exact_instances(
+                        self.config.service.exact_replay_instance_count
+                    ),
+                    transfer_replay_policies=self._replay_policies(
+                        self.config.service.transfer_replay_policy_count or 0
+                    ),
+                    replay_attack_count=self.config.service.transfer_replay_policy_count or 0,
                     defense_summary=self.defense_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
                     historical_summary=self.service_evolver.last_candidate_records[-max(1, self.config.evaluation.summary_limit):],
                 )
@@ -517,6 +540,15 @@ class EvolutionRunner:
                         adversarial_delta={"task_success": decision.metrics.get("task_success", 0.0) - before.get("task_success", 0.0)},
                         latest_adversary_delta={"task_success": decision.metrics.get("latest_task_success", 0.0) - before.get("latest_task_success", 0.0)},
                         replay_delta={"task_success": decision.metrics.get("replay_task_success", 0.0) - before.get("replay_task_success", 0.0)},
+                        exact_replay_delta={
+                            "task_success": (decision.metrics.get("exact_replay_task_success") or 0.0)
+                            - (before.get("exact_replay_task_success") or 0.0)
+                        },
+                        transfer_replay_delta={
+                            "task_success": (decision.metrics.get("transfer_replay_task_success") or 0.0)
+                            - (before.get("transfer_replay_task_success") or 0.0)
+                        },
+                        exact_replay_regressions=list(decision.metrics.get("exact_replay_regressions", [])),
                         robust_delta={"task_success": decision.metrics.get("robust_task_success", 0.0) - before.get("robust_task_success", 0.0)},
                         regression_cases=[case for item in getattr(self.service_evolver, "last_candidate_records", []) if item.get("accepted") and item.get("patch_id") == patch.patch_id for case in item.get("normal_regression_cases", [])],
                     ))
@@ -673,18 +705,4 @@ class EvolutionRunner:
 
     def _replay_policies(self, count: int):
         """Prefer recent, strategy/error-diverse archived attackers."""
-        records = sorted(self.attack_archive.to_dicts(), key=lambda item: item.get("generation_discovered", item.get("generation", 0)), reverse=True)
-        selected = []
-        seen = set()
-        for record in records:
-            policy_data = record.get("customer_policy")
-            if not policy_data:
-                continue
-            signature = (tuple(sorted(record.get("strategy_tags", []))), tuple(sorted(record.get("induced_error_types", []))))
-            if signature in seen and len(selected) < count:
-                continue
-            seen.add(signature)
-            selected.append(CustomerPolicy.from_dict(policy_data))
-            if len(selected) >= count:
-                break
-        return selected
+        return self.attack_archive.policies(limit=count, diverse=True)

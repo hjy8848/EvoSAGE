@@ -6,6 +6,7 @@ does not redefine CaseSpec, BackendEnvironment or evaluator semantics.
 """
 
 from .schemas import (
+    AttackInstance,
     CustomerPolicy,
     DefenseRecord,
     EpisodeResult,
@@ -15,6 +16,7 @@ from .schemas import (
     ServicePolicy,
     ServiceRule,
     VulnerabilitySignature,
+    VulnerabilityArchiveEntry,
     signature_from_dict,
 )
 from .config import EvolutionConfig, load_config
@@ -30,6 +32,7 @@ from .attribution import FailureAttribution, infer_failure_attribution, infer_fa
 
 __all__ = [
     "AttackArchive",
+    "AttackInstance",
     "CustomerPolicy",
     "DatasetSplits",
     "DefenseArchive",
@@ -44,6 +47,7 @@ __all__ = [
     "PolicyCustomerModel",
     "FailureSignature",
     "VulnerabilitySignature",
+    "VulnerabilityArchiveEntry",
     "ServicePatch",
     "ServicePolicy",
     "ServiceRule",

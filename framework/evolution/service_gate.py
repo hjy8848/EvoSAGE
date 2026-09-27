@@ -33,6 +33,23 @@ class ServiceGate:
             normal_delta = normal_candidate.get("task_success", 0.0) - normal_baseline.get("task_success", 0.0)
             if normal_delta < -self.normal_regression_tolerance:
                 return GateDecision(False, "normal_user_regression", delta, {"normal_delta": normal_delta})
+        exact_before = baseline.get("exact_replay_task_success")
+        exact_after = candidate.get("exact_replay_task_success")
+        if exact_before is not None and exact_after is not None and exact_after < exact_before:
+            return GateDecision(False, "exact_replay_regression", delta, {
+                "exact_replay_delta": exact_after - exact_before,
+                "exact_replay_regressions": candidate.get("exact_replay_regressions", []),
+            })
+        transfer_before = baseline.get("transfer_replay_task_success")
+        transfer_after = candidate.get("transfer_replay_task_success")
+        if transfer_before is not None and transfer_after is not None and transfer_after < transfer_before:
+            return GateDecision(False, "transfer_replay_regression", delta, {
+                "transfer_replay_delta": transfer_after - transfer_before,
+            })
+        if candidate.get("exact_replay_regressions"):
+            return GateDecision(False, "exact_replay_regression", delta, {
+                "exact_replay_regressions": candidate["exact_replay_regressions"],
+            })
         if delta < self.min_delta:
             return GateDecision(False, "insufficient_adversarial_improvement", delta, {"normal_delta": normal_delta})
         if candidate.get("tool_calls", 0) > max(20.0, baseline.get("tool_calls", 0) * 3 + 1):

@@ -183,7 +183,11 @@ class CustomerEvolver:
         evaluated = [(candidate, evaluator.evaluate(candidate, service_policy, candidate_cases, "evolution", generation, "customer_candidate")) for candidate in candidates]
         if elite_count:
             evaluated.insert(0, (incumbent, evaluator.evaluate(incumbent, service_policy, candidate_cases, "evolution", generation, "customer_elite")))
-        selected, scores = self.selector.select(evaluated, {s.get("signature_id") for s in archive.signatures()}, total_nodes=max(1, len(cases)))
+        selected, scores = self.selector.select(
+            evaluated,
+            {signature.signature_id for signature in archive.signatures()},
+            total_nodes=max(1, len(cases)),
+        )
         return selected or incumbent, evaluated, scores
 
 
