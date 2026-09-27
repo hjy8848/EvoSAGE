@@ -1,0 +1,33 @@
+name: Research invariants
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-tests-and-dashboard-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: requirements-api.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Install Python test dependencies
+        run: python -m pip install -r requirements-api.txt pytest pyyaml
+      - name: Run tests
+        run: PYTHONPATH=. pytest -q
+      - name: Compile Python sources
+        run: python -m compileall -q framework scripts run_evaluation_with_llm.py
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build

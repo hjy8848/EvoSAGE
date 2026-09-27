@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from framework.evolution.reporting import summarize_episode_reporting
+
 
 INVALID_TERMS = {
     "json_parse_failed",
@@ -326,7 +328,35 @@ def sanitize_case_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
 def normalize_episode(row: Dict[str, Any], traces: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     episode_id = str(first_value(row.get("episode_id"), row.get("id"), default="episode-unknown"))
     reason = invalid_reason(row)
-    status = "INVALID EVALUATION" if reason else ("VALID SUCCESS" if row.get("task_success") else "LEGITIMATE FAILURE")
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    protocol_valid = row.get("protocol_valid") if isinstance(row.get("protocol_valid"), bool) else (
+        False if reason or metadata.get("protocol_failure") else None
+    )
+    environment_valid = row.get("environment_valid")
+    if not isinstance(environment_valid, bool):
+        environment_valid = metadata.get("environment_valid") if isinstance(metadata.get("environment_valid"), bool) else None
+    customer_behavior_valid = row.get("customer_behavior_valid")
+    if not isinstance(customer_behavior_valid, bool):
+        assessment = metadata.get("customer_behavior_assessment")
+        customer_behavior_valid = assessment.get("valid") if isinstance(assessment, dict) and isinstance(assessment.get("valid"), bool) else None
+    attributable = row.get("service_failure_attributable")
+    if not isinstance(attributable, bool):
+        attributable = None
+    effective_invalid_reason = reason or (
+        "protocol_invalid" if protocol_valid is False else
+        "environment_invalid" if environment_valid is False else None
+    )
+    task_success = row.get("task_success") if effective_invalid_reason is None else None
+    if effective_invalid_reason:
+        status = "INVALID EVALUATION"
+    elif task_success is True:
+        status = "VALID SUCCESS"
+    elif attributable is True:
+        status = "LEGITIMATE FAILURE"
+    elif attributable is False or customer_behavior_valid is False:
+        status = "NON-ATTRIBUTABLE FAILURE"
+    else:
+        status = "UNATTRIBUTED LEGACY FAILURE"
     trace = first_value(traces.get(episode_id), traces.get(str(row.get("case_id"))))
     trace = trace or {}
     tool_sequence = row.get("tool_sequence_summary") or []
@@ -341,9 +371,24 @@ def normalize_episode(row: Dict[str, Any], traces: Dict[str, Dict[str, Any]]) ->
         "customer_policy_id": row.get("customer_policy_id"),
         "service_policy_id": row.get("service_policy_id"),
         "status": status,
-        "evaluation_status": row.get("evaluation_status") or ("invalid" if reason else "valid"),
-        "invalid_reason": reason,
-        "task_success": bool(row.get("task_success")) if reason is None else None,
+        "evaluation_status": "invalid" if effective_invalid_reason else row.get("evaluation_status") or "valid",
+        "validity_status": "invalid" if effective_invalid_reason else (
+            "customer_behavior_invalid" if customer_behavior_valid is False else "evaluable"
+        ),
+        "attribution_status": (
+            "attributable" if attributable is True else
+            "not_attributable" if attributable is False else
+            "legacy_unavailable"
+        ),
+        "protocol_valid": protocol_valid,
+        "environment_valid": environment_valid,
+        "customer_behavior_valid": customer_behavior_valid,
+        "service_failure_attributable": attributable,
+        "invalid_reason": effective_invalid_reason,
+        "task_success": bool(task_success) if task_success is not None else None,
+        "strict_process_success": row.get("strict_process_success"),
+        "eventual_goal_success": safe_float(row.get("eventual_goal_success")),
+        "recovery_success": row.get("recovery_success"),
         "expected_action": first_value(row.get("expected_action"), (row.get("finals") or {}).get("Action")),
         "predicted_action": row.get("predicted_action"),
         "executed_action": row.get("executed_action"),
@@ -361,6 +406,12 @@ def normalize_episode(row: Dict[str, Any], traces: Dict[str, Dict[str, Any]]) ->
             "goal_fulfillment": safe_float(row.get("goal_fulfillment_score")),
         },
         "failure_signature": row.get("failure_signature") or {},
+        "vulnerability_signature": row.get("vulnerability_signature"),
+        "failure_occurrence": row.get("failure_occurrence"),
+        "v2_signature_schema_available": (
+            "vulnerability_signature" in row or "failure_occurrence" in row
+        ),
+        "attribution_schema_available": "service_failure_attributable" in row,
         "case_metadata": sanitize_case_metadata(row),
         "latency_seconds": safe_float(
             first_value(
@@ -390,20 +441,25 @@ def group_generation_metrics(episodes: List[Dict[str, Any]]) -> List[Dict[str, A
     for generation in sorted(grouped):
         rows = grouped[generation]
         valid = [row for row in rows if row.get("evaluation_status") == "valid"]
-        failures = [row for row in valid if not row.get("task_success")]
+        outcome_rows = [row for row in valid if row.get("customer_behavior_valid") is not False]
+        failures = [row for row in outcome_rows if row.get("service_failure_attributable") is True]
         signatures = {
-            (row.get("failure_signature") or {}).get("signature_id")
+            (row.get("vulnerability_signature") or {}).get("signature_id")
             for row in failures
-            if (row.get("failure_signature") or {}).get("signature_id")
+            if (row.get("vulnerability_signature") or {}).get("schema_version") == 2
+            and (row.get("vulnerability_signature") or {}).get("signature_id")
         }
+        legacy_failures = [row for row in outcome_rows if not row.get("task_success") and row.get("service_failure_attributable") is None]
         result.append({
             "generation": generation,
             "episodes": len(rows),
             "valid_rate": len(valid) / len(rows) if rows else None,
-            "task_success": sum(bool(row.get("task_success")) for row in valid) / len(valid) if valid else None,
-            "action_execution": _mean_score(valid, "action_execution"),
-            "goal_fulfillment": _mean_score(valid, "goal_fulfillment"),
-            "unique_failure_signatures": len(signatures),
+            "task_success": sum(bool(row.get("task_success")) for row in outcome_rows) / len(outcome_rows) if outcome_rows else None,
+            "action_execution": _mean_score(outcome_rows, "action_execution"),
+            "goal_fulfillment": _mean_score(outcome_rows, "goal_fulfillment"),
+            "legitimate_failures": len(failures) if any(row.get("service_failure_attributable") is not None for row in rows) else None,
+            "unattributed_legacy_failures": len(legacy_failures),
+            "unique_failure_signatures": len(signatures) if any(row.get("v2_signature_schema_available") for row in rows) and any(row.get("attribution_schema_available") for row in rows) else None,
             "legitimate_failures": len(failures),
         })
     return result
@@ -420,27 +476,39 @@ def _metric_mean(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
     return sum(float(value) for value in values) / len(values) if values else None
 
 
-def summarize_metrics(episodes: List[Dict[str, Any]], metrics: Dict[str, Any]) -> Dict[str, Any]:
+def summarize_metrics(
+    episodes: List[Dict[str, Any]], metrics: Dict[str, Any], *,
+    raw_episodes: Optional[List[Dict[str, Any]]] = None,
+    attack_instance_count: Optional[int] = None,
+    service_candidates: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     valid = [row for row in episodes if row.get("evaluation_status") == "valid"]
+    outcome_rows = [row for row in valid if row.get("customer_behavior_valid") is not False]
     invalid = [row for row in episodes if row.get("evaluation_status") != "valid"]
-    failures = [row for row in valid if not row.get("task_success")]
+    failures = [row for row in outcome_rows if row.get("service_failure_attributable") is True]
     signatures = {
-        (row.get("failure_signature") or {}).get("signature_id")
+        (row.get("vulnerability_signature") or {}).get("signature_id")
         for row in failures
-        if (row.get("failure_signature") or {}).get("signature_id")
+        if (row.get("vulnerability_signature") or {}).get("schema_version") == 2
+        and (row.get("vulnerability_signature") or {}).get("signature_id")
     }
+    source_rows = raw_episodes if raw_episodes is not None else episodes
+    validity = summarize_episode_reporting(source_rows, attack_instance_count=attack_instance_count)
+    selected_service_metrics = _selected_service_metrics(service_candidates or [])
     return {
+        **validity,
         "episodes": len(episodes),
         "valid_episodes": len(valid),
         "invalid_episodes": len(invalid),
         "valid_episode_rate": len(valid) / len(episodes) if episodes else None,
         "invalid_rate": len(invalid) / len(episodes) if episodes else None,
-        "task_success": _metric_mean(valid, "task_success"),
-        "action_execution": _mean_score(valid, "action_execution"),
-        "goal_fulfillment": _mean_score(valid, "goal_fulfillment"),
-        "legitimate_failures": len(failures),
-        "legitimate_failure_rate": len(failures) / len(valid) if valid else None,
-        "unique_failure_signatures": len(signatures),
+        "task_success": validity["task_success"],
+        "action_execution": _mean_score(outcome_rows, "action_execution"),
+        "goal_fulfillment": _mean_score(outcome_rows, "goal_fulfillment"),
+        "legitimate_failures": validity["attributable_service_failure_count"],
+        "legitimate_failure_rate": validity["attributable_service_failure_rate"],
+        "unique_failure_signatures": validity["unique_vulnerability_signatures_v2"],
+        **selected_service_metrics,
         "requests": first_value(metrics.get("llm_requests"), metrics.get("pipeline_requests")),
         "input_tokens": metrics.get("input_tokens"),
         "output_tokens": metrics.get("output_tokens"),
@@ -460,6 +528,55 @@ def summarize_metrics(episodes: List[Dict[str, Any]], metrics: Dict[str, Any]) -
             if safe_float(metrics.get("total_attempt_latency")) is not None and safe_float(metrics.get("attempts"), 0) else None
         ),
         "max_attempt_latency": metrics.get("max_attempt_latency"),
+    }
+
+
+def _selected_service_metrics(service: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Expose final accepted patch evidence, not the best rejected proposal."""
+    if not service:
+        return {
+            "service_evidence_status": "not_applicable",
+            "latest_task_success": None,
+            "exact_replay_task_success": None,
+            "transfer_replay_task_success": None,
+            "normal_task_success": None,
+            "paired_outcomes": None,
+        }
+    final = max(service, key=lambda item: int(item.get("generation", -1)))
+    selected_id = final.get("selected_policy_id")
+    candidates = final.get("candidates") or []
+    selected = next((item for item in candidates if item.get("accepted") is True and (
+        item.get("selected") is True or item.get("service_policy_id") == selected_id
+    )), None)
+    if selected is None:
+        selected = next((item for item in candidates if item.get("accepted") is True), None)
+    if selected is None:
+        return {
+            "service_evidence_status": "no_accepted_candidate" if candidates else "not_applicable",
+            "latest_task_success": None,
+            "exact_replay_task_success": None,
+            "transfer_replay_task_success": None,
+            "normal_task_success": None,
+            "paired_outcomes": None,
+        }
+    values = (selected or {}).get("metrics") or {}
+    paired = {
+        scope: values.get(key)
+        for scope, key in (
+            ("latest", "latest_paired"),
+            ("exact_replay", "exact_replay_paired"),
+            ("transfer_replay", "transfer_replay_paired"),
+            ("normal", "normal_paired"),
+        )
+        if isinstance(values.get(key), dict)
+    }
+    return {
+        "service_evidence_status": "accepted_candidate",
+        "latest_task_success": safe_float(values.get("latest_task_success")),
+        "exact_replay_task_success": safe_float(values.get("exact_replay_task_success")),
+        "transfer_replay_task_success": safe_float(values.get("transfer_replay_task_success")),
+        "normal_task_success": safe_float(values.get("normal_task_success")),
+        "paired_outcomes": paired or None,
     }
 
 
@@ -555,6 +672,14 @@ def candidate_data(run_dir: Path, generations: List[int], config: Dict[str, Any]
             candidate["selected"] = patch_id == service_generation.get("selected_policy_id")
             candidate["latest_filter_rejected"] = str(candidate.get("reason") or "").startswith("latest_attack_filter:")
             candidate["evaluation_scope"] = "latest_only" if candidate["latest_filter_rejected"] else "latest_replay_normal"
+            candidate_metrics = candidate.get("metrics")
+            candidate["metrics_schema_status"] = (
+                "available" if isinstance(candidate_metrics, dict) and any(
+                    key in candidate_metrics for key in (
+                        "latest_paired", "exact_replay_paired", "transfer_replay_paired", "normal_paired",
+                    )
+                ) else "legacy" if isinstance(candidate_metrics, dict) else "not_evaluated"
+            )
             normalized_candidates.append(candidate)
         candidates = normalized_candidates
         if not candidates and any(key in gate for key in ("accepted", "reason", "patch")):
@@ -591,11 +716,15 @@ def candidate_data(run_dir: Path, generations: List[int], config: Dict[str, Any]
 def failure_analysis(episodes: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Any]] = {}
     generation_signatures: Dict[int, set] = defaultdict(set)
+    unversioned_attributed_failures = 0
     for episode in episodes:
         if episode.get("status") != "LEGITIMATE FAILURE":
             continue
-        signature = episode.get("failure_signature") or {}
-        signature_id = signature.get("signature_id") or "unlabelled_failure"
+        signature = episode.get("vulnerability_signature") or {}
+        if signature.get("schema_version") != 2 or not signature.get("signature_id"):
+            unversioned_attributed_failures += 1
+            continue
+        signature_id = signature["signature_id"]
         generation = int(episode.get("generation", 0))
         generation_signatures[generation].add(signature_id)
         record = grouped.setdefault(signature_id, {
@@ -611,7 +740,7 @@ def failure_analysis(episodes: List[Dict[str, Any]]) -> Dict[str, Any]:
         })
         record["count"] += 1
         record["generations"].add(generation)
-        record["error_types"].update(episode.get("error_types") or signature.get("error_types") or [])
+        record["error_types"].update(episode.get("error_types") or [])
         if episode.get("sop_node"):
             record["sop_nodes"].add(episode["sop_node"])
         record["tools"].update(episode.get("tool_sequence") or [])
@@ -655,8 +784,10 @@ def failure_analysis(episodes: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "signatures": failures,
         "trajectory": trajectory,
-        "unique_count": len(failures),
-        "legitimate_failure_count": sum(item["count"] for item in failures),
+        "unique_count": len(failures) if any(item.get("v2_signature_schema_available") for item in episodes) and any(item.get("attribution_schema_available") for item in episodes) else None,
+        "legitimate_failure_count": sum(item.get("status") == "LEGITIMATE FAILURE" for item in episodes),
+        "unversioned_attributed_failure_count": unversioned_attributed_failures,
+        "legacy_unattributed_failure_count": sum(item.get("status") == "UNATTRIBUTED LEGACY FAILURE" for item in episodes),
     }
 
 
@@ -918,6 +1049,15 @@ def export_run(label: str, run_dir: Path, model_override: Optional[str] = None,
         "formal_protocol_id": first_value(model_metadata.get("formal_case_set_id"), (config.get("splits") or {}).get("strategy")),
         "generations": first_value(config.get("max_generations"), len(generations), default=0),
         "run_dir": str(run_dir),
+        "validity_schema_status": (
+            "available" if any(
+                any(key in row for key in (
+                    "protocol_valid", "customer_behavior_valid", "environment_valid",
+                    "service_failure_attributable", "vulnerability_signature", "failure_occurrence",
+                ))
+                for row in raw_episodes
+            ) else "legacy"
+        ),
         "scenario": config.get("scenario") or provenance.get("scenario"),
         "split_strategy": (config.get("splits") or {}).get("strategy"),
         "max_cases": (config.get("splits") or {}).get("max_cases"),
@@ -932,19 +1072,29 @@ def export_run(label: str, run_dir: Path, model_override: Optional[str] = None,
         },
     }
     all_signatures = {
-        (ep.get("failure_signature") or {}).get("signature_id")
+        (ep.get("vulnerability_signature") or {}).get("signature_id")
         for ep in episodes
-        if (ep.get("failure_signature") or {}).get("signature_id")
+        if (ep.get("vulnerability_signature") or {}).get("schema_version") == 2
+        and ep.get("service_failure_attributable") is True
+        and (ep.get("vulnerability_signature") or {}).get("signature_id")
     }
     if not all_signatures:
         for item in read_jsonl(run_dir / "archives" / "attacks.jsonl"):
-            signature = item.get("failure_signature") or {}
+            signature = item.get("vulnerability_signature") or {}
+            if signature.get("schema_version") != 2:
+                continue
             if signature.get("signature_id"):
                 all_signatures.add(signature["signature_id"])
+    attack_instances_path = run_dir / "archives" / "attack_instances.jsonl"
+    attack_instance_count = len(read_jsonl(attack_instances_path)) if attack_instances_path.exists() else None
     return {
         "id": label or run_dir.name,
         "metadata": metadata,
-        "metrics": summarize_metrics(episodes, metrics),
+        "metrics": summarize_metrics(
+            episodes, metrics, raw_episodes=raw_episodes,
+            attack_instance_count=attack_instance_count,
+            service_candidates=service,
+        ),
         "generation_metrics": group_generation_metrics(episodes),
         "episodes": episodes,
         "customer_candidates": customer,

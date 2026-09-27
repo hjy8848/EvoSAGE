@@ -27,6 +27,24 @@ function fmtPercent(value) {
   return value == null || Number.isNaN(Number(value)) ? '—' : `${(Number(value) * 100).toFixed(1)}%`
 }
 
+function missingSchemaLabel(status) {
+  return status === 'legacy' ? 'N/A (legacy schema)' : 'Not recorded'
+}
+
+function fmtSchemaPercent(value, schemaStatus) {
+  return value == null || Number.isNaN(Number(value)) ? missingSchemaLabel(schemaStatus) : fmtPercent(value)
+}
+
+function fmtSchemaCount(value, schemaStatus) {
+  return value == null || Number.isNaN(Number(value)) ? missingSchemaLabel(schemaStatus) : fmtNumber(value)
+}
+
+function fmtOutcomePercent(value, outcomeStatus) {
+  if (outcomeStatus === 'legacy') return 'N/A (legacy schema)'
+  if (outcomeStatus === 'not_evaluated') return 'Not evaluated'
+  return value == null || Number.isNaN(Number(value)) ? 'Not recorded' : fmtPercent(value)
+}
+
 function fmtNumber(value) {
   return value == null || Number.isNaN(Number(value)) ? '—' : Number(value).toLocaleString()
 }
@@ -46,7 +64,7 @@ function sourceTone(source) {
 function statusTone(status) {
   if (status === 'VALID SUCCESS' || status === 'accepted' || status === 'matched') return 'success'
   if (status === 'LEGITIMATE FAILURE' || status === 'rejected' || status === 'mismatch') return 'failure'
-  if (status === 'INVALID EVALUATION' || status === 'invalid' || status === 'inconclusive') return 'invalid'
+  if (status === 'INVALID EVALUATION' || status === 'invalid' || status === 'inconclusive' || status === 'INVALID') return 'invalid'
   return 'neutral'
 }
 
@@ -100,6 +118,21 @@ function MetricGrid({ run }) {
     <MetricCard label="Requests" value={fmtNumber(metrics.requests)} />
     <MetricCard label="Tokens" value={fmtNumber(metrics.tokens)} detail={`${fmtLatency(metrics.latency_seconds)} total`} />
   </div>
+}
+
+function ValidityMetrics({ run }) {
+  const metrics = run?.metrics || {}
+  const schemaStatus = run?.metadata?.validity_schema_status
+  return <div className="panel lower"><SectionHeader eyebrow="Research validity" title="Validity, attribution & outcomes" action={<span className="muted">Legacy fields are not inferred</span>} /><div className="metric-grid diagnostics-grid">
+    <MetricCard label="Protocol invalid rate" value={fmtSchemaPercent(metrics.protocol_invalid_rate, schemaStatus)} tone="invalid" />
+    <MetricCard label="Customer behavior invalid" value={fmtSchemaPercent(metrics.customer_behavior_invalid_rate, schemaStatus)} />
+    <MetricCard label="Attributable Service failures" value={fmtSchemaPercent(metrics.attributable_service_failure_rate, schemaStatus)} tone="red" />
+    <MetricCard label="Strict process success" value={fmtOutcomePercent(metrics.strict_process_success, metrics.outcome_metrics_status)} />
+    <MetricCard label="Eventual goal success" value={fmtOutcomePercent(metrics.eventual_goal_success, metrics.outcome_metrics_status)} />
+    <MetricCard label="Recovery success" value={fmtOutcomePercent(metrics.recovery_success_rate, metrics.outcome_metrics_status)} />
+    <MetricCard label="Unique V2 vulnerabilities" value={fmtSchemaCount(metrics.unique_vulnerability_signatures_v2, schemaStatus)} tone="red" />
+    <MetricCard label="Attack instances" value={fmtSchemaCount(metrics.attack_instance_count, schemaStatus)} />
+  </div></div>
 }
 
 function SummaryCard({ label, children, tone = 'neutral' }) {
@@ -157,7 +190,7 @@ function FeaturedCase({ run, onSelect }) {
 function FailureList({ episodes, onSelect }) {
   const failures = episodes.filter((item) => item.status !== 'VALID SUCCESS')
   if (!failures.length) return <div className="empty-state">No failure episodes in this run.</div>
-  return <div className="failure-list">{failures.slice(0, 7).map((episode) => { const invalid = episode.status === 'INVALID EVALUATION'; return <button className="failure-row" key={episode.episode_id} onClick={() => onSelect(episode)}><div className={`failure-mark ${invalid ? 'orange' : 'red'}`} /><div className="failure-row-main"><div className="failure-row-title">{invalid ? episode.invalid_reason : episode.failure_signature?.signature_id || episode.error_types?.[0] || 'legitimate failure'}</div><div className="muted">{episode.case_id} · G{episode.generation} · {episode.sop_node || 'SOP node unknown'}</div></div><StatusBadge kind={invalid ? 'invalid' : 'failure'}>{invalid ? 'INVALID' : 'LEGITIMATE'}</StatusBadge></button> })}</div>
+  return <div className="failure-list">{failures.slice(0, 7).map((episode) => { const invalid = episode.status === 'INVALID EVALUATION'; const legitimate = episode.status === 'LEGITIMATE FAILURE'; const tone = invalid ? 'invalid' : legitimate ? 'failure' : 'neutral'; const label = invalid ? 'INVALID' : legitimate ? 'LEGITIMATE' : 'UNATTRIBUTED'; return <button className="failure-row" key={episode.episode_id} onClick={() => onSelect(episode)}><div className={`failure-mark ${invalid ? 'orange' : legitimate ? 'red' : 'neutral'}`} /><div className="failure-row-main"><div className="failure-row-title">{invalid ? episode.invalid_reason : episode.vulnerability_signature?.signature_id || episode.failure_signature?.signature_id || episode.error_types?.[0] || episode.status.toLowerCase()}</div><div className="muted">{episode.case_id} · G{episode.generation} · {episode.sop_node || 'SOP node unknown'}</div></div><StatusBadge kind={tone}>{label}</StatusBadge></button> })}</div>
 }
 
 function IntegrityChecklist({ run, compact = false }) {
@@ -170,7 +203,7 @@ function IntegrityChecklist({ run, compact = false }) {
 }
 
 function Overview({ run, runs, onNavigate, onSelectEpisode }) {
-  return <><SectionHeader eyebrow="Project overview" title="Evaluation health" action={<span className="muted">Read-only artifact view</span>} /><MetricGrid run={run} /><RobustnessSummary run={run} /><div className="two-column overview-grid"><ComparisonChart runs={runs} /><div className="panel"><SectionHeader eyebrow="Featured case" title="Failure → repair" /><FeaturedCase run={run} onSelect={onSelectEpisode} /></div></div><div className="two-column overview-grid lower"><div className="panel"><SectionHeader eyebrow="Recent" title="Failures" action={<button className="text-button" onClick={() => onNavigate('failures')}>View analysis →</button>} /><FailureList episodes={run.episodes || []} onSelect={onSelectEpisode} /></div><div className="panel"><SectionHeader eyebrow="Integrity" title="Run completeness" action={<button className="text-button" onClick={() => onNavigate('diagnostics')}>Inspect →</button>} /><IntegrityChecklist run={run} compact /></div></div></>
+  return <><SectionHeader eyebrow="Project overview" title="Evaluation health" action={<span className="muted">Read-only artifact view</span>} /><MetricGrid run={run} /><ValidityMetrics run={run} /><RobustnessSummary run={run} /><div className="two-column overview-grid"><ComparisonChart runs={runs} /><div className="panel"><SectionHeader eyebrow="Featured case" title="Failure → repair" /><FeaturedCase run={run} onSelect={onSelectEpisode} /></div></div><div className="two-column overview-grid lower"><div className="panel"><SectionHeader eyebrow="Recent" title="Failures" action={<button className="text-button" onClick={() => onNavigate('failures')}>View analysis →</button>} /><FailureList episodes={run.episodes || []} onSelect={onSelectEpisode} /></div><div className="panel"><SectionHeader eyebrow="Integrity" title="Run completeness" action={<button className="text-button" onClick={() => onNavigate('diagnostics')}>Inspect →</button>} /><IntegrityChecklist run={run} compact /></div></div></>
 }
 
 function Experiments({ runs }) {
@@ -201,7 +234,19 @@ function ServiceCandidateCard({ candidate }) {
   const ruleText = rules.map((rule) => `${rule.category || rule.rule_category || 'RULE'}: ${rule.text || rule.rule_text || 'text not recorded'}`).join('\n') || patch.text || patch.rule_text || 'Repair text not recorded'
   const candidateStatus = candidate.evaluation_status || (candidate.accepted ? 'accepted' : 'rejected')
   const gateStatus = candidateStatus === 'invalid' || candidateStatus === 'inconclusive' ? candidateStatus : candidate.accepted ? 'accepted' : 'rejected'
-  return <div className="candidate-card"><div className="candidate-card-header"><strong>{display(candidate.patch_id || patch.patch_id, 'patch id not recorded')}</strong><StatusBadge kind={statusTone(gateStatus)}>{gateStatus.toUpperCase()}</StatusBadge></div><pre className="patch-preview">{ruleText}</pre><div className="candidate-meta"><span>category {display(rules[0]?.category || rules[0]?.rule_category || patch.category || patch.rule_category)}</span><span>delta {candidate.delta == null ? '—' : Number(candidate.delta).toFixed(3)}</span><span>{candidate.latest_filter_rejected ? 'latest-only evaluation' : candidate.evaluation_scope || 'evaluation scope not recorded'}</span></div><div className="candidate-meta"><span>source failures {fmtNumber((candidate.source_failure_ids || patch.source_failure_ids || []).length)}</span><span>{display(candidate.reason, 'gate reason not recorded')}</span></div>{candidate.latest_filter_rejected && <div className="small-note">Rejected before replay/normal evaluation.</div>}</div>
+  const metrics = candidate.metrics || {}
+  const serviceMetric = (key) => {
+    if (candidate.evaluation_status === 'invalid' || candidate.evaluation_status === 'inconclusive') return 'Not evaluated'
+    if (candidate.evaluation_scope === 'latest_only' && key !== 'latest_task_success') return 'Not evaluated'
+    return Object.prototype.hasOwnProperty.call(metrics, key) ? fmtPercent(metrics[key]) : candidate.metrics_schema_status === 'legacy' ? 'N/A (legacy schema)' : 'Not evaluated'
+  }
+  const pairSummary = (key) => {
+    if (candidate.evaluation_status === 'invalid' || candidate.evaluation_status === 'inconclusive') return 'Not evaluated'
+    if (candidate.evaluation_scope === 'latest_only' && key !== 'latest_paired') return 'Not evaluated'
+    const pair = metrics[key]
+    return pair ? `${pair.wins ?? '—'}/${pair.losses ?? '—'}/${pair.ties ?? '—'}` : candidate.metrics_schema_status === 'legacy' ? 'N/A (legacy schema)' : 'Not evaluated'
+  }
+  return <div className="candidate-card"><div className="candidate-card-header"><strong>{display(candidate.patch_id || patch.patch_id, 'patch id not recorded')}</strong><StatusBadge kind={statusTone(gateStatus)}>{gateStatus.toUpperCase()}</StatusBadge></div><pre className="patch-preview">{ruleText}</pre><div className="candidate-meta"><span>category {display(rules[0]?.category || rules[0]?.rule_category || patch.category || patch.rule_category)}</span><span>delta {candidate.delta == null ? '—' : Number(candidate.delta).toFixed(3)}</span><span>{candidate.latest_filter_rejected ? 'latest-only evaluation' : candidate.evaluation_scope || 'evaluation scope not recorded'}</span></div><div className="candidate-meta"><span>source failures {fmtNumber((candidate.source_failure_ids || patch.source_failure_ids || []).length)}</span><span>{display(candidate.reason, 'gate reason not recorded')}</span></div>{candidate.latest_filter_rejected && <div className="small-note">Rejected before replay/normal evaluation.</div>}<div className="candidate-meta"><span>success latest / exact / transfer / normal: {serviceMetric('latest_task_success')} · {serviceMetric('exact_replay_task_success')} · {serviceMetric('transfer_replay_task_success')} · {serviceMetric('normal_task_success')}</span></div><div className="candidate-meta"><span>paired W/L/T latest / exact / transfer / normal: {pairSummary('latest_paired')} · {pairSummary('exact_replay_paired')} · {pairSummary('transfer_replay_paired')} · {pairSummary('normal_paired')}</span></div></div>
 }
 
 function FailureLane({ run, generation }) {
@@ -233,7 +278,7 @@ function FilterBar({ filters, setFilters, episodes }) {
 }
 
 function EpisodeTable({ episodes, onSelect }) {
-  return <div className="table-wrap"><table className="episodes-table"><thead><tr><th>Status</th><th>Case</th><th>Gen / split</th><th>Customer policy</th><th>Service policy</th><th>Task success</th><th>Error</th><th>Tools</th><th>Latency</th></tr></thead><tbody>{episodes.map((episode) => <tr key={episode.episode_id} onClick={() => onSelect(episode)}><td><StatusBadge kind={statusTone(episode.status)}>{episode.status === 'INVALID EVALUATION' ? 'INVALID' : episode.status === 'LEGITIMATE FAILURE' ? 'FAILURE' : 'SUCCESS'}</StatusBadge></td><td><strong>{episode.case_id}</strong><small>{episode.episode_id}</small></td><td>G{episode.generation} · {episode.split}</td><td>{display(episode.customer_policy_id, '—')}</td><td>{display(episode.service_policy_id, '—')}</td><td>{episode.task_success == null ? '—' : episode.task_success ? 'Yes' : 'No'}</td><td>{episode.invalid_reason || episode.error_types?.[0] || '—'}</td><td>{episode.tool_sequence?.length || 0}</td><td>{fmtLatency(episode.latency_seconds)}</td></tr>)}</tbody></table>{!episodes.length && <div className="empty-state">No episodes match these filters.</div>}</div>
+  return <div className="table-wrap"><table className="episodes-table"><thead><tr><th>Status</th><th>Case</th><th>Gen / split</th><th>Customer policy</th><th>Service policy</th><th>Task success</th><th>Attribution</th><th>Error</th><th>Tools</th><th>Latency</th></tr></thead><tbody>{episodes.map((episode) => <tr key={episode.episode_id} onClick={() => onSelect(episode)}><td><StatusBadge kind={statusTone(episode.status)}>{episode.status.replace('LEGITIMATE ', '').replace('UNATTRIBUTED LEGACY ', 'LEGACY ').replace('NON-ATTRIBUTABLE ', 'NON-ATTR. ')}</StatusBadge></td><td><strong>{episode.case_id}</strong><small>{episode.episode_id}</small></td><td>G{episode.generation} · {episode.split}</td><td>{display(episode.customer_policy_id, '—')}</td><td>{display(episode.service_policy_id, '—')}</td><td>{episode.task_success == null ? '—' : episode.task_success ? 'Yes' : 'No'}</td><td>{display(episode.attribution_status, 'legacy unavailable')}</td><td>{episode.invalid_reason || episode.error_types?.[0] || '—'}</td><td>{episode.tool_sequence?.length || 0}</td><td>{fmtLatency(episode.latency_seconds)}</td></tr>)}</tbody></table>{!episodes.length && <div className="empty-state">No episodes match these filters.</div>}</div>
 }
 
 function Episodes({ run, onSelectEpisode }) {
@@ -265,7 +310,7 @@ function EpisodeDetail({ episode, onClose }) {
   if (!episode) return null
   const invalid = episode.status === 'INVALID EVALUATION'
   const tools = traceToolEvents(episode)
-  return <div className="detail-panel"><div className="detail-header"><div><StatusBadge kind={statusTone(episode.status)}>{episode.status}</StatusBadge><h2>{episode.episode_id}</h2></div><button className="close-button" aria-label="Close episode detail" onClick={onClose}>×</button></div><div className="detail-meta-grid"><Meta label="Case" value={episode.case_id} /><Meta label="Generation" value={`G${episode.generation}`} /><Meta label="Split" value={episode.split} /><Meta label="Customer policy" value={episode.customer_policy_id} /><Meta label="Service policy" value={episode.service_policy_id} /><Meta label="Expected action" value={episode.expected_action} /><Meta label="Predicted action" value={episode.predicted_action} /><Meta label="Executed action" value={episode.executed_action} /><Meta label="Termination" value={episode.termination_reason} /><Meta label="Error" value={invalid ? episode.invalid_reason : episode.error_types?.join(', ')} /></div><div className="score-strip">{Object.entries(episode.scores || {}).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>{value == null ? '—' : Number(value).toFixed(2)}</b></div>)}</div><div className="detail-section"><SectionHeader eyebrow="Trace detail" title="Execution timeline" action={<span className="muted">display-only provenance</span>} />{episode.trace_events?.length ? <div className="trace-timeline">{episode.trace_events.map((event, index) => <TraceEvent key={event.id || index} event={event} />)}</div> : <div className="empty-state">No trace artifact was exported for this episode.</div>}</div><div className="detail-section"><SectionHeader eyebrow="Tool summary" title="Tool sequence" />{tools.length ? <div className="tool-chips">{tools.map((event, index) => <span key={`${event.id || event.payload?.name}-${index}`}><b>{index + 1}</b>{event.payload?.name || 'tool name not recorded'}</span>)}</div> : <div className="muted">No tool calls recorded.</div>}</div><div className="detail-footer"><span>trace ref: {display(episode.trace_ref, 'not recorded')}</span><span>model: {display(episode.provenance?.model, 'not recorded')}</span></div></div>
+  return <div className="detail-panel"><div className="detail-header"><div><StatusBadge kind={statusTone(episode.status)}>{episode.status}</StatusBadge><h2>{episode.episode_id}</h2></div><button className="close-button" aria-label="Close episode detail" onClick={onClose}>×</button></div><div className="detail-meta-grid"><Meta label="Case" value={episode.case_id} /><Meta label="Generation" value={`G${episode.generation}`} /><Meta label="Split" value={episode.split} /><Meta label="Customer policy" value={episode.customer_policy_id} /><Meta label="Service policy" value={episode.service_policy_id} /><Meta label="Expected action" value={episode.expected_action} /><Meta label="Predicted action" value={episode.predicted_action} /><Meta label="Executed action" value={episode.executed_action} /><Meta label="Evaluation validity" value={episode.validity_status} /><Meta label="Customer behavior valid" value={episode.customer_behavior_valid == null ? 'N/A (legacy schema)' : String(episode.customer_behavior_valid)} /><Meta label="Service attribution" value={episode.attribution_status} /><Meta label="Termination" value={episode.termination_reason} /><Meta label="Error" value={invalid ? episode.invalid_reason : episode.error_types?.join(', ')} /></div><div className="score-strip">{Object.entries(episode.scores || {}).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>{value == null ? '—' : Number(value).toFixed(2)}</b></div>)}</div><div className="detail-section"><SectionHeader eyebrow="Trace detail" title="Execution timeline" action={<span className="muted">display-only provenance</span>} />{episode.trace_events?.length ? <div className="trace-timeline">{episode.trace_events.map((event, index) => <TraceEvent key={event.id || index} event={event} />)}</div> : <div className="empty-state">No trace artifact was exported for this episode.</div>}</div><div className="detail-section"><SectionHeader eyebrow="Tool summary" title="Tool sequence" />{tools.length ? <div className="tool-chips">{tools.map((event, index) => <span key={`${event.id || event.payload?.name}-${index}`}><b>{index + 1}</b>{event.payload?.name || 'tool name not recorded'}</span>)}</div> : <div className="muted">No tool calls recorded.</div>}</div><div className="detail-footer"><span>trace ref: {display(episode.trace_ref, 'not recorded')}</span><span>model: {display(episode.provenance?.model, 'not recorded')}</span></div></div>
 }
 
 function Meta({ label, value }) { return <div className="meta-cell"><span>{label}</span><strong>{display(value, '—')}</strong></div> }
@@ -281,10 +326,31 @@ function ArtifactStatuses({ run }) {
   return <div className="artifact-grid">{Object.entries(artifacts).map(([name, value]) => <div className="artifact-row" key={name}><span>{name.replaceAll('_', ' ')}</span><StatusBadge kind={value === 'confirmed' ? 'success' : value === 'missing' ? 'failure' : 'neutral'}>{value.replaceAll('_', ' ')}</StatusBadge></div>)}</div>
 }
 
+function ServiceOutcomeEvidence({ run }) {
+  const metrics = run?.metrics || {}
+  const status = metrics.service_evidence_status
+  if (status !== 'accepted_candidate') {
+    const message = status === 'no_accepted_candidate'
+      ? 'No Service candidate passed the gate in the final recorded generation. Candidate-level evaluations remain visible on Evolution.'
+      : 'No accepted Service candidate outcome applies to this run.'
+    return <div className="panel lower"><SectionHeader eyebrow="Service gate evidence" title="Final accepted candidate" /><div className="empty-state">{message}</div></div>
+  }
+  const paired = metrics.paired_outcomes || {}
+  return <div className="panel lower"><SectionHeader eyebrow="Service gate evidence" title="Final accepted candidate outcomes" /><div className="metric-grid diagnostics-grid">
+    <MetricCard label="Latest attack" value={fmtPercent(metrics.latest_task_success)} />
+    <MetricCard label="Exact replay" value={fmtPercent(metrics.exact_replay_task_success)} />
+    <MetricCard label="Transfer replay" value={fmtPercent(metrics.transfer_replay_task_success)} />
+    <MetricCard label="Normal users" value={fmtPercent(metrics.normal_task_success)} />
+  </div><div className="signature-list lower">{['latest', 'exact_replay', 'transfer_replay', 'normal'].map((scope) => {
+    const value = paired[scope]
+    return <span key={scope}>{scope.replaceAll('_', ' ')} paired W/L/T · {value ? `${value.wins ?? '—'} / ${value.losses ?? '—'} / ${value.ties ?? '—'}` : 'Not recorded'}</span>
+  })}</div></div>
+}
+
 function Diagnostics({ run }) {
   const metrics = run?.metrics || {}
   const metadata = run?.metadata || {}
-  return <><SectionHeader eyebrow="Observability" title="Diagnostics & reproducibility" action={<StatusBadge kind={sourceTone(metadata.source_kind)}>{metadata.source_kind}</StatusBadge>} /><div className="metric-grid diagnostics-grid"><MetricCard label="Requests" value={fmtNumber(metrics.requests)} /><MetricCard label="Attempts" value={fmtNumber(metrics.attempts)} /><MetricCard label="Successes" value={fmtNumber(metrics.successes)} /><MetricCard label="Input tokens" value={fmtNumber(metrics.input_tokens)} /><MetricCard label="Output tokens" value={fmtNumber(metrics.output_tokens)} /><MetricCard label="Reasoning tokens" value={fmtNumber(metrics.reasoning_tokens)} /><MetricCard label="Latency" value={fmtLatency(metrics.latency_seconds)} detail={`avg ${fmtLatency(metrics.average_attempt_latency)} · max ${fmtLatency(metrics.max_attempt_latency)}`} /><MetricCard label="Retries" value={fmtNumber(metrics.retries)} /><MetricCard label="Timeouts" value={fmtNumber(metrics.timeouts)} tone={metrics.timeouts ? 'invalid' : 'neutral'} /><MetricCard label="Provider failures" value={fmtNumber(metrics.provider_failures)} tone={metrics.provider_failures ? 'invalid' : 'neutral'} /><MetricCard label="Invalid evaluations" value={fmtNumber(metrics.invalid_episodes)} tone={metrics.invalid_episodes ? 'invalid' : 'neutral'} /><MetricCard label="Run status" value={display(metadata.run_status, 'not recorded')} /></div><div className="two-column lower"><div className="panel"><SectionHeader eyebrow="Run identity" title="Manifest" /><div className="manifest-list"><Meta label="Output dir" value={metadata.run_dir} /><Meta label="Mode" value={metadata.mode} /><Meta label="Seed" value={metadata.seed} /><Meta label="Cases" value={metadata.case_count} /><Meta label="Runtime freeze commit" value={metadata.runtime_freeze_commit} /><Meta label="Runtime freeze tag" value={metadata.runtime_freeze_tag} /><Meta label="Freeze match status" value={metadata.runtime_freeze_match_status || 'Not confirmed'} /><Meta label="Formal protocol commit" value={metadata.formal_protocol_commit} /><Meta label="Formal protocol tag" value={metadata.formal_protocol_tag} /><Meta label="Protocol id" value={metadata.formal_protocol_id} /><Meta label="Model" value={metadata.model} /><Meta label="Provider" value={metadata.provider} /><Meta label="Split" value={metadata.split_strategy} /><Meta label="Split seed" value={metadata.split_seed} /><Meta label="Generations" value={metadata.generations} /><Meta label="Max turns" value={metadata.max_turns} /><Meta label="Judge in evolution" value={metadata.judge_in_evolution == null ? 'Not recorded' : String(metadata.judge_in_evolution)} /></div></div><div className="panel"><SectionHeader eyebrow="Protocol diagnostics" title="Invalid evaluation reasons" /><InvalidBreakdown episodes={run?.episodes || []} /><div className="detail-section"><SectionHeader eyebrow="Artifacts" title="Completeness" /><ArtifactStatuses run={run} /></div><div className="detail-section"><SectionHeader eyebrow="Integrity checklist" title="What artifacts can confirm" /><IntegrityChecklist run={run} /></div></div></div></>
+  return <><SectionHeader eyebrow="Observability" title="Diagnostics & reproducibility" action={<StatusBadge kind={sourceTone(metadata.source_kind)}>{metadata.source_kind}</StatusBadge>} /><div className="metric-grid diagnostics-grid"><MetricCard label="Requests" value={fmtNumber(metrics.requests)} /><MetricCard label="Attempts" value={fmtNumber(metrics.attempts)} /><MetricCard label="Successes" value={fmtNumber(metrics.successes)} /><MetricCard label="Input tokens" value={fmtNumber(metrics.input_tokens)} /><MetricCard label="Output tokens" value={fmtNumber(metrics.output_tokens)} /><MetricCard label="Reasoning tokens" value={fmtNumber(metrics.reasoning_tokens)} /><MetricCard label="Latency" value={fmtLatency(metrics.latency_seconds)} detail={`avg ${fmtLatency(metrics.average_attempt_latency)} · max ${fmtLatency(metrics.max_attempt_latency)}`} /><MetricCard label="Retries" value={fmtNumber(metrics.retries)} /><MetricCard label="Timeouts" value={fmtNumber(metrics.timeouts)} tone={metrics.timeouts ? 'invalid' : 'neutral'} /><MetricCard label="Provider failures" value={fmtNumber(metrics.provider_failures)} tone={metrics.provider_failures ? 'invalid' : 'neutral'} /><MetricCard label="Invalid evaluations" value={fmtNumber(metrics.invalid_episodes)} tone={metrics.invalid_episodes ? 'invalid' : 'neutral'} /><MetricCard label="Run status" value={display(metadata.run_status, 'not recorded')} /></div><ServiceOutcomeEvidence run={run} /><div className="two-column lower"><div className="panel"><SectionHeader eyebrow="Run identity" title="Manifest" /><div className="manifest-list"><Meta label="Output dir" value={metadata.run_dir} /><Meta label="Mode" value={metadata.mode} /><Meta label="Seed" value={metadata.seed} /><Meta label="Cases" value={metadata.case_count} /><Meta label="Runtime freeze commit" value={metadata.runtime_freeze_commit} /><Meta label="Runtime freeze tag" value={metadata.runtime_freeze_tag} /><Meta label="Freeze match status" value={metadata.runtime_freeze_match_status || 'Not confirmed'} /><Meta label="Formal protocol commit" value={metadata.formal_protocol_commit} /><Meta label="Formal protocol tag" value={metadata.formal_protocol_tag} /><Meta label="Protocol id" value={metadata.formal_protocol_id} /><Meta label="Model" value={metadata.model} /><Meta label="Provider" value={metadata.provider} /><Meta label="Split" value={metadata.split_strategy} /><Meta label="Split seed" value={metadata.split_seed} /><Meta label="Generations" value={metadata.generations} /><Meta label="Max turns" value={metadata.max_turns} /><Meta label="Judge in evolution" value={metadata.judge_in_evolution == null ? 'Not recorded' : String(metadata.judge_in_evolution)} /></div></div><div className="panel"><SectionHeader eyebrow="Protocol diagnostics" title="Invalid evaluation reasons" /><InvalidBreakdown episodes={run?.episodes || []} /><div className="detail-section"><SectionHeader eyebrow="Artifacts" title="Completeness" /><ArtifactStatuses run={run} /></div><div className="detail-section"><SectionHeader eyebrow="Integrity checklist" title="What artifacts can confirm" /><IntegrityChecklist run={run} /></div></div></div></>
 }
 
 function EmptyPage({ title, message }) { return <div className="empty-page"><div className="empty-illustration">⌁</div><h2>{title}</h2><p>{message}</p></div> }

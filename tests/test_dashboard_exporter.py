@@ -79,6 +79,15 @@ def make_run(tmp_path: Path, *, source_kind: str = "REAL") -> Path:
             "split": "evolution",
             "case_id": "CASE-1",
             "task_success": True,
+            "strict_process_success": True,
+            "eventual_goal_success": 1.0,
+            "recovery_success": False,
+            "protocol_valid": True,
+            "environment_valid": True,
+            "customer_behavior_valid": True,
+            "service_failure_attributable": False,
+            "vulnerability_signature": None,
+            "failure_occurrence": None,
             "expected_action": "Refund",
             "predicted_action": "Refund",
             "executed_action": "Refund",
@@ -91,6 +100,19 @@ def make_run(tmp_path: Path, *, source_kind: str = "REAL") -> Path:
             "split": "evolution",
             "case_id": "CASE-2",
             "task_success": False,
+            "strict_process_success": False,
+            "eventual_goal_success": 0.0,
+            "recovery_success": False,
+            "protocol_valid": True,
+            "environment_valid": True,
+            "customer_behavior_valid": True,
+            "service_failure_attributable": True,
+            "vulnerability_signature": {
+                "schema_version": 2,
+                "signature_id": "v2-missing-order-id",
+                "failure_stage": "VERIFICATION",
+            },
+            "failure_occurrence": {"occurrence_id": "occurrence-1"},
             "error_types": ["missed_backend_verification"],
             "failure_signature": {
                 "signature_id": "missing_order_id",
@@ -106,6 +128,12 @@ def make_run(tmp_path: Path, *, source_kind: str = "REAL") -> Path:
             "evaluation_status": "invalid",
             "invalid_reason": "output_truncated",
             "metadata": {"protocol_failure": True},
+            "protocol_valid": False,
+            "environment_valid": True,
+            "customer_behavior_valid": True,
+            "service_failure_attributable": False,
+            "vulnerability_signature": None,
+            "failure_occurrence": None,
         },
     ]
     write_jsonl(run / "generations" / "gen_000" / "episodes.jsonl", episodes)
@@ -179,7 +207,16 @@ def make_run(tmp_path: Path, *, source_kind: str = "REAL") -> Path:
                     "reason": "improved",
                     "source_failure_ids": ["missing_order_id"],
                     "patch": {"rule_category": "VERIFICATION", "rule_text": "Ask for order id."},
-                    "metrics": {"latest_task_success": 1.0},
+                    "metrics": {
+                        "latest_task_success": 1.0,
+                        "exact_replay_task_success": 1.0,
+                        "transfer_replay_task_success": 0.5,
+                        "normal_task_success": 1.0,
+                        "latest_paired": {"wins": 1, "losses": 0, "ties": 0},
+                        "exact_replay_paired": {"wins": 0, "losses": 0, "ties": 1},
+                        "transfer_replay_paired": {"wins": 1, "losses": 0, "ties": 0},
+                        "normal_paired": {"wins": 0, "losses": 0, "ties": 1},
+                    },
                 },
                 {
                     "patch_id": "patch-2",
@@ -201,6 +238,10 @@ def make_run(tmp_path: Path, *, source_kind: str = "REAL") -> Path:
             ]
         },
     )
+    write_jsonl(
+        run / "archives" / "attack_instances.jsonl",
+        [{"attack_instance_id": "instance-1", "vulnerability_signature_id": "v2-missing-order-id"}],
+    )
     return run
 
 
@@ -220,6 +261,19 @@ def test_exporter_preserves_statuses_candidates_and_trace_provenance(tmp_path: P
     assert result["metrics"]["valid_episodes"] == 2
     assert result["metrics"]["legitimate_failures"] == 1
     assert result["metrics"]["invalid_episodes"] == 1
+    assert result["metrics"]["protocol_invalid_rate"] == 1 / 3
+    assert result["metrics"]["customer_behavior_invalid_rate"] == 0.0
+    assert result["metrics"]["attributable_service_failure_rate"] == 0.5
+    assert result["metrics"]["strict_process_success"] == 0.5
+    assert result["metrics"]["eventual_goal_success"] == 0.5
+    assert result["metrics"]["recovery_success_rate"] == 0.0
+    assert result["metrics"]["unique_vulnerability_signatures_v2"] == 1
+    assert result["metrics"]["attack_instance_count"] == 1
+    assert result["metrics"]["latest_task_success"] == 1.0
+    assert result["metrics"]["exact_replay_task_success"] == 1.0
+    assert result["metrics"]["transfer_replay_task_success"] == 0.5
+    assert result["metrics"]["normal_task_success"] == 1.0
+    assert result["metrics"]["paired_outcomes"]["latest"]["wins"] == 1
     assert result["failure_analysis"]["unique_count"] == 1
     assert result["failure_analysis"]["legitimate_failure_count"] == 1
     assert result["customer_candidates"][0]["candidate_count"] == 3
@@ -227,6 +281,7 @@ def test_exporter_preserves_statuses_candidates_and_trace_provenance(tmp_path: P
 
     episode = next(item for item in result["episodes"] if item["episode_id"] == "legitimate-failure")
     assert episode["status"] == "LEGITIMATE FAILURE"
+    assert episode["attribution_status"] == "attributable"
     assert episode["latency_seconds"] == 3.25
     tool = next(item for item in episode["trace_events"] if item["kind"] == "tool_call")
     backend = next(item for item in episode["trace_events"] if item["kind"] == "backend_result")
@@ -249,6 +304,48 @@ def test_exporter_marks_mock_without_reclassifying_business_failures(tmp_path: P
     assert result["metadata"]["source_kind"] == "MOCK"
     assert result["metrics"]["legitimate_failures"] == 1
     assert result["metrics"]["invalid_episodes"] == 1
+
+
+def test_legacy_failures_are_not_silently_reclassified_as_attributable(tmp_path: Path):
+    run = make_run(tmp_path)
+    episodes_path = run / "generations" / "gen_000" / "episodes.jsonl"
+    rows = [json.loads(line) for line in episodes_path.read_text().splitlines()]
+    for row in rows:
+        for key in (
+            "strict_process_success", "eventual_goal_success", "recovery_success",
+            "protocol_valid", "environment_valid", "customer_behavior_valid",
+            "service_failure_attributable", "vulnerability_signature", "failure_occurrence",
+        ):
+            row.pop(key, None)
+    write_jsonl(episodes_path, rows)
+    (run / "archives" / "attack_instances.jsonl").unlink()
+
+    result = exporter.export_run("legacy", run)
+    failed = next(item for item in result["episodes"] if item["episode_id"] == "legitimate-failure")
+    assert failed["status"] == "UNATTRIBUTED LEGACY FAILURE"
+    assert failed["attribution_status"] == "legacy_unavailable"
+    assert result["metrics"]["attributable_service_failure_rate"] is None
+    assert result["metrics"]["strict_process_success"] is None
+    assert result["metrics"]["unique_vulnerability_signatures_v2"] is None
+    assert result["metrics"]["attack_instance_count"] is None
+    assert result["failure_analysis"]["legitimate_failure_count"] == 0
+    assert result["failure_analysis"]["legacy_unattributed_failure_count"] == 1
+
+
+def test_customer_behavior_invalid_failure_is_not_a_service_failure(tmp_path: Path):
+    run = make_run(tmp_path)
+    episodes_path = run / "generations" / "gen_000" / "episodes.jsonl"
+    rows = [json.loads(line) for line in episodes_path.read_text().splitlines()]
+    failed = next(row for row in rows if row["episode_id"] == "legitimate-failure")
+    failed["customer_behavior_valid"] = False
+    failed["service_failure_attributable"] = False
+    write_jsonl(episodes_path, rows)
+
+    result = exporter.export_run("invalid-customer", run)
+    failed_view = next(item for item in result["episodes"] if item["episode_id"] == "legitimate-failure")
+    assert failed_view["status"] == "NON-ATTRIBUTABLE FAILURE"
+    assert failed_view["validity_status"] == "customer_behavior_invalid"
+    assert result["failure_analysis"]["legitimate_failure_count"] == 0
 
 
 def test_demo_fixture_is_explicitly_demo():

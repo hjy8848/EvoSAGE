@@ -116,6 +116,7 @@ select:focus { border-color: #91aef7; box-shadow: 0 0 0 2px #e5edff; }
 .failure-mark { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
 .failure-mark.red { background: var(--red); }
 .failure-mark.orange { background: var(--orange); }
+.failure-mark.neutral { background: #98a2b3; }
 .failure-row-main { min-width: 0; flex: 1; }
 .failure-row-title { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .failure-row .muted { margin-top: 3px; font-size: 11px; }
