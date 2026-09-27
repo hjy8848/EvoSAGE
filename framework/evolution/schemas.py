@@ -345,8 +345,8 @@ class VulnerabilitySignature:
             trigger_class=attribution.trigger_class,
             service_decision_class=attribution.service_decision_class,
             consequence_class=(
-                "GOAL_NOT_FULFILLED" if not episode.task_success
-                else "PROCESS_FAILURE_WITH_GOAL_MET"
+                "RECOVERED" if bool(getattr(episode, "eventual_goal_success", 0.0))
+                else "UNRECOVERED"
             ),
         )
 
@@ -620,6 +620,12 @@ class EpisodeResult:
     # as a substantive task failure by a policy gate.
     evaluation_status: str = "valid"
     invalid_reason: Optional[str] = None
+    strict_process_success: Optional[bool] = None
+    eventual_goal_success: float = 0.0
+    recovery_attempted: bool = False
+    recovery_success: bool = False
+    recovery_count: int = 0
+    first_failure_stage: str = ""
     _signature_artifact_version: Optional[int] = field(default=None, repr=False, compare=False)
     _signature_artifact_payload: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
     _occurrence_artifact_payload: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)

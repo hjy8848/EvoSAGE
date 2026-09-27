@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from enum import Enum
 import json
 import re
+from ..backend.errors import is_failed_backend_event, is_recoverable_backend_failure
 
 
 class MetricType(Enum):
@@ -65,6 +66,12 @@ class EvaluationReport:
     action_execution_score: float = 0.0
     goal_fulfillment: float = 0.0
     task_success: bool = False
+    strict_process_success: Optional[bool] = None
+    eventual_goal_success: float = 0.0
+    recovery_attempted: bool = False
+    recovery_success: bool = False
+    recovery_count: int = 0
+    first_failure_stage: str = ""
     predicted_action: str = ""
     executed_action: str = ""
     executed_trace: List[str] = field(default_factory=list)
@@ -118,6 +125,15 @@ class EvaluationReport:
             "action_execution_score": self.action_execution_score,
             "goal_fulfillment": self.goal_fulfillment,
             "task_success": self.task_success,
+            "strict_process_success": (
+                self.task_success
+                if self.strict_process_success is None else self.strict_process_success
+            ),
+            "eventual_goal_success": self.eventual_goal_success,
+            "recovery_attempted": self.recovery_attempted,
+            "recovery_success": self.recovery_success,
+            "recovery_count": self.recovery_count,
+            "first_failure_stage": self.first_failure_stage,
             "predicted_action": self.predicted_action,
             "executed_action": self.executed_action,
             "executed_trace": self.executed_trace,
@@ -855,6 +871,83 @@ class Evaluator:
         return result.get("action_name") or event.get("name", "")
 
     @staticmethod
+    def _protocol_invalid_signal(simulation_result) -> bool:
+        for turn in getattr(simulation_result, "turns", []) or []:
+            output = getattr(turn, "agent_output", None)
+            if output is None:
+                continue
+            if getattr(output, "json_parse_failed", False):
+                return True
+            metadata = getattr(output, "metadata", {}) or {}
+            if any(metadata.get(key) for key in (
+                "protocol_failure", "provider_error", "llm_error", "timeout", "llm_timeout",
+            )):
+                return True
+            request = metadata.get("llm_request", {}) or {}
+            if request.get("finish_reason") == "length":
+                return True
+            if any(
+                item.get("finish_reason") == "length" or item.get("invalid_reason")
+                for item in metadata.get("llm_attempts", []) or []
+                if isinstance(item, dict)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _recovery_assessment(simulation_result, eventual_goal_success: float) -> Dict[str, Any]:
+        events = list(getattr(simulation_result, "backend_events", []) or [])
+        canonical_failures = []
+        for index, event in enumerate(events):
+            if not is_failed_backend_event(event):
+                continue
+            # Action tools emit a tool_call followed immediately by the
+            # authoritative action_execution event. Count the latter once.
+            if event.get("event_type") == "tool_call" and index + 1 < len(events):
+                following = events[index + 1]
+                if (
+                    following.get("event_type") == "action_execution"
+                    and following.get("turn_index") == event.get("turn_index")
+                    and (following.get("result") or {}).get("error_code")
+                    == (event.get("result") or {}).get("error_code")
+                ):
+                    continue
+            canonical_failures.append((index, event))
+
+        recoverable = [
+            (index, event) for index, event in canonical_failures
+            if is_recoverable_backend_failure(event)
+        ]
+        later_turns = {
+            getattr(turn, "turn_id", -1)
+            for turn in getattr(simulation_result, "turns", []) or []
+        }
+        recovery_attempted = False
+        for index, event in recoverable:
+            turn_index = event.get("turn_index")
+            if any(
+                later.get("event_type") in {"tool_call", "action_execution"}
+                and position > index
+                for position, later in enumerate(events)
+            ) or any(turn_id > turn_index for turn_id in later_turns if turn_index is not None):
+                recovery_attempted = True
+                break
+
+        first_failure_stage = ""
+        if canonical_failures:
+            event_type = canonical_failures[0][1].get("event_type")
+            first_failure_stage = "VERIFICATION" if event_type == "tool_call" else "ACTION"
+        protocol_valid = not Evaluator._protocol_invalid_signal(simulation_result)
+        return {
+            "strict_process_success": None,
+            "eventual_goal_success": float(eventual_goal_success),
+            "recovery_attempted": recovery_attempted,
+            "recovery_success": bool(recoverable) and eventual_goal_success >= 1.0 and protocol_valid,
+            "recovery_count": len(recoverable),
+            "first_failure_stage": first_failure_stage,
+        }
+
+    @staticmethod
     def _execution_assessment(simulation_result) -> Dict[str, Any]:
         """Compute V/P/A/G and diagnostics from auditable backend events."""
         events = getattr(simulation_result, "backend_events", []) or []
@@ -1037,6 +1130,8 @@ class Evaluator:
             verification_score >= 1.0 and policy_score >= 1.0
             and action_score >= 1.0 and goal_score >= 1.0
         )
+        recovery_metrics = Evaluator._recovery_assessment(simulation_result, goal_score)
+        recovery_metrics["strict_process_success"] = task_success
         from ..config.scenario_config import EXECUTION_EVALUATION_WEIGHTS
         execution_weights = EXECUTION_EVALUATION_WEIGHTS
         execution_score = sum([
@@ -1057,6 +1152,7 @@ class Evaluator:
             "goal_fulfillment": goal_score,
             "execution_score": execution_score,
             "task_success": task_success,
+            **recovery_metrics,
             "errors": errors,
             "executed_action": executed_action,
             "claimed_action": claimed_action,
@@ -1607,6 +1703,12 @@ class Evaluator:
         report.action_execution_score = execution_assessment["action_execution"]
         report.goal_fulfillment = execution_assessment["goal_fulfillment"]
         report.task_success = execution_assessment["task_success"]
+        report.strict_process_success = execution_assessment["task_success"]
+        report.eventual_goal_success = execution_assessment["eventual_goal_success"]
+        report.recovery_attempted = execution_assessment["recovery_attempted"]
+        report.recovery_success = execution_assessment["recovery_success"]
+        report.recovery_count = execution_assessment["recovery_count"]
+        report.first_failure_stage = execution_assessment["first_failure_stage"]
         report.predicted_action = execution_assessment["claimed_action"]
         report.executed_action = execution_assessment["executed_action"]
         report.executed_trace = execution_assessment["executed_trace"]
@@ -1653,6 +1755,13 @@ class Evaluator:
                 "average_dimensions": avg_dimensions,
             },
             "task_success": execution_assessment["task_success"],
+            "recovery": {
+                key: execution_assessment[key]
+                for key in (
+                    "eventual_goal_success", "recovery_attempted", "recovery_success",
+                    "recovery_count", "first_failure_stage",
+                )
+            },
             "diagnostics": {
                 "error_categories": execution_assessment["errors"],
                 "claimed_action": execution_assessment["claimed_action"],

@@ -51,6 +51,15 @@ def aggregate_episode_metrics(episodes: Iterable[EpisodeResult]) -> dict[str, fl
     )
     return {
         "task_success": sum(bool(item.task_success) for item in valid_values) / len(valid_values) if valid_values else 0.0,
+        "strict_process_success": sum(
+            bool(item.task_success if item.strict_process_success is None else item.strict_process_success)
+            for item in valid_values
+        ) / len(valid_values) if valid_values else 0.0,
+        "eventual_goal_success": _mean(valid_values, "eventual_goal_success"),
+        "recovery_attempted_rate": sum(bool(item.recovery_attempted) for item in valid_values) / len(valid_values) if valid_values else 0.0,
+        "recovery_success_rate": sum(bool(item.recovery_success) for item in valid_values) / len(valid_values) if valid_values else 0.0,
+        "recovery_count": sum(int(item.recovery_count or 0) for item in valid_values),
+        "mean_recovery_count": _mean(valid_values, "recovery_count"),
         "legitimate_attack_success": legitimate_failures / len(valid_values) if valid_values else 0.0,
         "execution_score": _mean(valid_values, "execution_score"),
         "verification": _mean(valid_values, "verification_score"),
@@ -762,4 +771,10 @@ class EvoSAGEEpisodeEvaluator:
             },
             evaluation_status=evaluation_status,
             invalid_reason=invalid_reasons[0] if invalid_reasons else None,
+            strict_process_success=bool(report.task_success),
+            eventual_goal_success=float(getattr(report, "eventual_goal_success", report.goal_fulfillment) or 0.0),
+            recovery_attempted=bool(getattr(report, "recovery_attempted", False)),
+            recovery_success=bool(getattr(report, "recovery_success", False)),
+            recovery_count=int(getattr(report, "recovery_count", 0) or 0),
+            first_failure_stage=str(getattr(report, "first_failure_stage", "") or ""),
         )

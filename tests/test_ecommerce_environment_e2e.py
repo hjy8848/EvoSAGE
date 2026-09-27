@@ -327,6 +327,94 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         self.assertEqual(result.backend_final_state["order"]["refund_status"], "Approved")
         self.assertEqual(report.environment_goal_fulfillment, 1.0)
 
+    def test_recoverable_failed_query_and_action_can_continue_on_next_customer_turn(self):
+        case = make_case("Unshipped", "High", "Refund")
+        order_id = case.user_knowledge["order_id"]
+        client = ScriptedClient([
+            response_with_tools(ToolCall("bad-query", "query_order", {"order_id": ""})),
+            response_with_tools(ToolCall("bad-action", "submit_refund", {"order_id": ""})),
+            response_with_json("Refund", chat="暂时无法核实，请提供订单号。"),
+            response_with_tools(ToolCall("query", "query_order", {"order_id": order_id})),
+            response_with_tools(ToolCall("payment", "query_payment", {"order_id": order_id})),
+            response_with_tools(ToolCall("refund", "submit_refund", {"order_id": order_id})),
+            response_with_json("Refund", chat="已核验订单并提交退款。"),
+        ])
+        profile = UserProfile("u", "refund_request", "weak_conflict", "ecommerce_refund")
+        user = UserModel(profile)
+        seen_user_turns = []
+
+        def next_message(**kwargs):
+            seen_user_turns.append(kwargs["turn_count"])
+            return f"订单号是 {order_id}。"
+
+        result = DialogueSimulator(
+            user, make_agent(client), max_turns=3,
+            backend_environment=create_backend(case), case_spec=case,
+        ).run("我要退款。", {"initial_observation": {}}, user_message_generator=next_message)
+        report = Evaluator("ecommerce_refund", get_sop_graph("ecommerce_refund")).evaluate_simulation(result)
+
+        assert len(result.turns) == 2
+        assert seen_user_turns == [1]
+        assert result.goal_solved
+        assert result.termination_reason == "goal_fulfilled"
+        assert report.task_success is False  # the failed action remains in strict process scoring
+        assert report.strict_process_success is False
+        assert report.eventual_goal_success == 1.0
+        assert report.recovery_attempted is True
+        assert report.recovery_success is True
+        assert report.recovery_count == 2  # query failure + one canonical failed action
+        assert report.first_failure_stage == "VERIFICATION"
+        assert report.to_dict()["recovery_success"] is True
+        assert result.backend_final_state["order"]["refund_status"] == "Approved"
+        from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
+        from framework.evolution.schemas import CustomerPolicy, EpisodeResult, ServicePolicy
+
+        episode = EvoSAGEEpisodeEvaluator.from_evosage(
+            result, report, CustomerPolicy(), ServicePolicy(), "evolution", 0, "recovery_test"
+        )
+        restored = EpisodeResult.from_dict(episode.to_dict())
+        assert restored.strict_process_success is False
+        assert restored.eventual_goal_success == 1.0
+        assert restored.recovery_success is True
+        assert restored.recovery_count == 2
+        assert restored.vulnerability_signature_v2().consequence_class == "RECOVERED"
+
+    def test_fatal_backend_exception_terminates_and_recovery_loop_is_bounded(self):
+        case = make_case("Unshipped", "High", "Refund")
+        order_id = case.user_knowledge["order_id"]
+        backend = create_backend(case)
+
+        def raise_backend_error(*_args, **_kwargs):
+            raise RuntimeError("database unavailable")
+
+        backend._execute_tool = raise_backend_error
+        client = ScriptedClient([
+            response_with_tools(ToolCall("fatal", "query_order", {"order_id": order_id})),
+            response_with_json("Refund", chat="系统暂时不可用。"),
+        ])
+        result = DialogueSimulator(
+            UserModel(UserProfile("u", "refund_request", "weak_conflict", "ecommerce_refund")),
+            make_agent(client), max_turns=3,
+            backend_environment=backend, case_spec=case,
+        ).run("我要退款。", {"initial_observation": {}}, user_message_generator=lambda **_kwargs: "继续")
+        assert len(result.turns) == 1
+        assert result.termination_reason == "fatal_backend_failure"
+
+        repeated_backend = create_backend(case)
+        repeated_client = ScriptedClient([
+            response_with_tools(ToolCall("bad-0", "query_order", {"order_id": ""})),
+            response_with_json("Refund", chat="请提供订单号。"),
+            response_with_tools(ToolCall("bad-1", "query_order", {"order_id": ""})),
+            response_with_json("Refund", chat="仍需正确订单号。"),
+        ])
+        repeated = DialogueSimulator(
+            UserModel(UserProfile("u", "refund_request", "weak_conflict", "ecommerce_refund")),
+            make_agent(repeated_client), max_turns=2,
+            backend_environment=repeated_backend, case_spec=case,
+        ).run("我要退款。", {"initial_observation": {}}, user_message_generator=lambda **_kwargs: "还没找到")
+        assert len(repeated.turns) == 2
+        assert repeated.termination_reason == "recovery_exhausted"
+
     def test_evaluator_does_not_trust_model_executed_path(self):
         case = make_case("Unshipped", "High", "Refund")
         client = ScriptedClient([

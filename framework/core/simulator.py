@@ -18,6 +18,11 @@ import json
 
 from ..models import UserModel, AgentModel, AgentTurnOutput
 from ..backend import BackendEnvironment, CaseSpec
+from ..backend.errors import (
+    is_failed_backend_event,
+    is_recoverable_backend_failure,
+    is_terminal_backend_failure,
+)
 
 
 @dataclass
@@ -287,8 +292,13 @@ class DialogueSimulator:
             if result.goal_solved:
                 result.final_status = "goal_solved"
             elif not result.termination_reason:
-                result.termination_reason = "max_turns"
-                result.final_status = "max_turns_reached"
+                result.termination_reason = self._get_termination_reason(result)
+                if result.termination_reason == "recovery_exhausted":
+                    result.final_status = "recovery_exhausted"
+                elif result.termination_reason == "fatal_backend_failure":
+                    result.final_status = "failed"
+                else:
+                    result.final_status = "max_turns_reached"
             elif result.termination_reason == "end_step_reached":
                 result.final_status = "workflow_end_without_goal_confirmation"
             elif result.termination_reason == "no_more_user_messages":
@@ -543,12 +553,14 @@ class DialogueSimulator:
                     event for event in self.backend_environment.get_event_log()
                     if event.get("turn_index") == result.turns[-1].turn_id
                 ]
-                if any(
-                    event.get("event_type") in {"tool_call", "action_execution"}
-                    and not event.get("result", {}).get("success")
-                    for event in turn_events
-                ):
+                failed_events = [event for event in turn_events if is_failed_backend_event(event)]
+                if any(is_terminal_backend_failure(event) for event in failed_events):
                     return True
+                if failed_events:
+                    # Recoverable and unknown non-fatal errors stay in the
+                    # dialogue.  The customer can respond to the public error
+                    # result and the Agent gets a later turn to recover.
+                    return False
         
         # 检查最后的步骤是否为END
         if result.turns:
@@ -683,6 +695,21 @@ class DialogueSimulator:
         """获取终止原因"""
         if self.backend_environment is not None and self.backend_environment.goal_satisfied():
             return "goal_fulfilled"
+
+        all_events = (
+            self.backend_environment.get_event_log()
+            if self.backend_environment is not None else []
+        )
+        if any(is_terminal_backend_failure(event) for event in all_events):
+            return "fatal_backend_failure"
+
+        if result.turns and result.turns[-1].agent_output.metadata.get("tool_loop_limit"):
+            return "max_tool_steps"
+
+        if len(result.turns) >= self.max_turns and any(
+            is_recoverable_backend_failure(event) for event in all_events
+        ):
+            return "recovery_exhausted"
         
         if result.turns:
             last_turn = result.turns[-1]
@@ -705,12 +732,6 @@ class DialogueSimulator:
                 return "transfer_human"
             if last_agent_output.metadata.get("tool_loop_limit"):
                 return "max_tool_steps"
-            if any(
-                event.get("event_type") in {"tool_call", "action_execution"}
-                and not event.get("result", {}).get("success")
-                for event in turn_events
-            ):
-                return "tool_failure"
 
         # 检查是否因为双方再见而终止
         if result.turns:

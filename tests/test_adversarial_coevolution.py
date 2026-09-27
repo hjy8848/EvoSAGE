@@ -667,6 +667,12 @@ def test_consecutive_invalid_candidate_evaluations_are_inconclusive(tmp_path):
     assert result.metadata["invalid_attempts"][-1]["reason"] == "protocol_failure"
     assert aggregate_episode_metrics([result]) == {
         "task_success": 0.0,
+        "strict_process_success": 0.0,
+        "eventual_goal_success": 0.0,
+        "recovery_attempted_rate": 0.0,
+        "recovery_success_rate": 0.0,
+        "recovery_count": 0,
+        "mean_recovery_count": 0.0,
         "legitimate_attack_success": 0.0,
         "execution_score": 0.0,
         "verification": 0.0,
