@@ -632,7 +632,7 @@ class EvolutionRunner:
                     episode.metadata = dict(episode.metadata, fresh_round=generation, target_service=target_label)
                 adaptation_results.extend(episodes)
                 evaluated.append((policy, episodes))
-            selected, scores = selector.select(evaluated, set(), total_nodes=max(1, len(splits.validation)))
+            selected, scores = selector.select(evaluated, set())
             incumbent = selected or incumbent
             heldout_episodes = self.evaluator.evaluate(incumbent, service, splits.heldout_test, "heldout_test", generation, "fresh_adversary_eval")
             for episode in heldout_episodes:

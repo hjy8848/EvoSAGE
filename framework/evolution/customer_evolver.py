@@ -186,7 +186,6 @@ class CustomerEvolver:
         selected, scores = self.selector.select(
             evaluated,
             {signature.signature_id for signature in archive.signatures()},
-            total_nodes=max(1, len(cases)),
         )
         return selected or incumbent, evaluated, scores
 

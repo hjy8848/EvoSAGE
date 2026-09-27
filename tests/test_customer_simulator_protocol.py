@@ -441,7 +441,7 @@ def test_persistent_empty_customer_generation_is_invalid_and_excluded_everywhere
 
     aggregate = aggregate_episode_metrics([episode])
     assert aggregate["episodes"] == 0
-    score = CustomerSelector().score(policy, [episode], set(), total_nodes=1)
+    score = CustomerSelector().score(policy, [episode], set())
     assert score.attack_success is None
     assert score.novelty is None
     assert score.coverage is None
@@ -593,7 +593,7 @@ def test_customer_score_uses_only_valid_episodes_when_invalids_are_mixed():
         invalid_reason="customer_simulator_invalid:empty_message",
     )
 
-    score = CustomerSelector().score(policy, [valid_failure, invalid], set(), total_nodes=1)
+    score = CustomerSelector().score(policy, [valid_failure, invalid], set())
     assert score.evaluation_status == "valid"
     assert score.episodes == 1
     assert score.invalid_episode_count == 1

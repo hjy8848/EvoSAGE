@@ -21,13 +21,24 @@ class CustomerEvolutionConfig:
     fitness_weights: Dict[str, float] = field(default_factory=lambda: {
         "attack_success": 0.70,
         "novelty": 0.15,
-        "coverage": 0.15,
+        "node_diversity": 0.15,
     })
     allowed_strategy_tags: list[str] = field(default_factory=lambda: [
         "truthful", "cooperative", "withholding", "pressure", "contradiction",
         "delayed_disclosure", "authority_challenge", "delayed_contradiction", "escalation", "paraphrase",
     ])
     adversary_access: str = "black_box"
+
+    def __post_init__(self) -> None:
+        if "coverage" in self.fitness_weights:
+            if "node_diversity" not in self.fitness_weights:
+                self.fitness_weights["node_diversity"] = self.fitness_weights["coverage"]
+            self.fitness_weights.pop("coverage", None)
+            warnings.warn(
+                "customer fitness weight 'coverage' is deprecated; interpreted as 'node_diversity'",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
 
 @dataclass
