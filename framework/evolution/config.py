@@ -57,6 +57,14 @@ class SplitConfig:
     holdout_paths: list[int] = field(default_factory=list)
     instances_per_path: int = 1
     max_cases: Optional[int] = None
+    customer_disclosure_variants: list[str] = field(default_factory=lambda: ["opening"])
+
+    def __post_init__(self) -> None:
+        supported = {"opening", "on_request"}
+        if not self.customer_disclosure_variants or any(
+            variant not in supported for variant in self.customer_disclosure_variants
+        ):
+            raise ValueError("customer_disclosure_variants must contain opening/on_request variants")
 
 
 @dataclass

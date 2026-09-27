@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, Optional
 
 from ..backend.types import CaseSpec
+from ..core.customer_contract import get_customer_opening_contract
 from ..llm_integration.llm_user_model import RuleUserModel
 from ..models import UserProfile
 from .schemas import CustomerPolicy, PolicyValidationError
@@ -67,11 +68,22 @@ class PolicyCustomerModel(RuleUserModel):
         self.policy = policy or CustomerPolicy()
         CustomerPolicyValidator().validate(self.policy, case_spec)
         super().__init__(profile, system_prompt, case_spec)
-        self._disclosed = False
+        self._identifier_request_count = {"order_id": 0, "record_id": 0, "customer_id": 0}
+        self._identifier_disclosed: set[str] = set()
         self._rejected_once = False
 
     def generate_initial_message(self) -> str:
         goal = self.profile.user_intent.replace("_", " ")
+        opening_contract = get_customer_opening_contract(self.case_spec)
+        required_order_id = next((item["value"] for item in opening_contract if item["field"] == "order_id"), None)
+        if required_order_id:
+            # CaseSpec's opening disclosure is a hard contract and overrides
+            # any reusable policy tag that would otherwise delay disclosure.
+            if "cooperative" in self.policy.strategy_tags:
+                return f"您好，我愿意配合核验{goal}，订单号是{required_order_id}，请帮我处理。"
+            if {"authority_challenge", "contradiction"} & set(self.policy.strategy_tags):
+                return f"您好，我想处理{goal}，订单号是{required_order_id}；若记录和我的理解不一致，请帮我核实并说明。"
+            return f"您好，我想处理{goal}，订单号是{required_order_id}，请帮我核实并处理。"
         if "paraphrase" in self.policy.strategy_tags:
             return f"您好，关于{goal}这件事，我想请您先帮我查一下具体状态。"
         if "cooperative" in self.policy.strategy_tags:
@@ -85,14 +97,19 @@ class PolicyCustomerModel(RuleUserModel):
     def generate_next_message(self, agent_last_message: str, turn_count: int, context=None) -> str:
         text = agent_last_message or ""
         lower = text.lower()
-        asks_identifier = any(token in text for token in ["订单号", "记录编号", "客户号", "编号", "id"])
-        if asks_identifier and not self._disclosed:
-            if "withholding" in self.policy.strategy_tags or "delayed_disclosure" in self.policy.strategy_tags:
-                self._disclosed = True
-                return "我先确认一下，稍后提供编号。"
-            self._disclosed = True
-            knowledge = self.case_spec.user_knowledge if self.case_spec else {}
-            return str(knowledge.get("order_id") or knowledge.get("record_id") or "我可以提供订单编号。")
+        requested_field = self._requested_identifier_field(text)
+        if requested_field and requested_field not in self._identifier_disclosed:
+            self._identifier_request_count[requested_field] += 1
+            value = self._known_identifier(requested_field)
+            if not value:
+                return "我目前没有这个编号，请先告诉我还能用什么信息核验。"
+            tags = set(self.policy.strategy_tags)
+            if "withholding" in tags and not self._agent_explained_identifier_need(lower):
+                return "能否先说明需要这个编号核验什么，以便我确认后再提供？"
+            if "delayed_disclosure" in tags and self._identifier_request_count[requested_field] == 1:
+                return "我确认一下，下一条把编号提供给您。"
+            self._identifier_disclosed.add(requested_field)
+            return value
         if self.backend_events and self.backend_events[-1].get("event_type") == "action_execution":
             result = self.backend_events[-1].get("result", {})
             if result.get("success"):
@@ -120,6 +137,36 @@ class PolicyCustomerModel(RuleUserModel):
         if turn_count >= 3 and "pressure" in self.policy.strategy_tags:
             return "我已经等待了一段时间，请给出明确的处理结果。"
         return "请继续帮我核实相关状态。"
+
+    @staticmethod
+    def _requested_identifier_field(text: str) -> Optional[str]:
+        lower = text.lower()
+        if any(token in lower for token in ("订单号", "订单编号", "order id", "order_id")):
+            return "order_id"
+        if any(token in lower for token in ("记录编号", "记录号", "record id", "record_id")):
+            return "record_id"
+        if any(token in lower for token in ("客户号", "客户编号", "customer id", "customer_id")):
+            return "customer_id"
+        if "编号" in text or " id" in lower:
+            return "order_id" if "order_id" in (getattr(self.case_spec, "user_knowledge", {}) or {}) else "record_id"
+        return None
+
+    def _known_identifier(self, field: str) -> Optional[str]:
+        if self.case_spec is None:
+            return None
+        knowledge = self.case_spec.user_knowledge or {}
+        knows_flag = {"order_id": "knows_order_id", "record_id": "knows_record_id", "customer_id": "knows_customer_id"}[field]
+        reveal_flag = {"order_id": "reveal_order_id_on_request", "record_id": "reveal_record_id_on_request", "customer_id": "reveal_customer_id_on_request"}[field]
+        value = knowledge.get(field)
+        if not (knowledge.get(knows_flag) and value and (self.case_spec.user_policy or {}).get(reveal_flag, False)):
+            return None
+        return str(value)
+
+    @staticmethod
+    def _agent_explained_identifier_need(lower_message: str) -> bool:
+        return any(token in lower_message for token in (
+            "为了核验", "用于核验", "需要核实", "用于查询", "订单核验", "验证订单",
+        ))
 
 
 def policy_for_case(policy: CustomerPolicy, case_spec: CaseSpec) -> CustomerPolicy:

@@ -101,17 +101,22 @@ class SplitManager:
         for path_id, path_config in enumerate(paths, start=1):
             intent = path_to_intent.get(path_id, "refund_before_shipping")
             for instance_index in range(max(1, self.config.instances_per_path)):
-                user_id = f"evolution_case_{path_id}_{instance_index}"
-                case_spec = build_case_spec("ecommerce_refund", intent, copy.deepcopy(path_config), user_id=user_id)
-                cases.append(DatasetCase(
-                    case_id=case_spec.case_id,
-                    split="",
-                    path_id=path_id,
-                    instance_index=instance_index,
-                    intent=intent,
-                    path_config=copy.deepcopy(path_config),
-                    case_spec=case_spec.to_dict(),
-                ))
+                for variant in self.config.customer_disclosure_variants:
+                    suffix = "" if variant == "opening" else f"_{variant}"
+                    user_id = f"evolution_case_{path_id}_{instance_index}{suffix}"
+                    case_spec = build_case_spec(
+                        "ecommerce_refund", intent, copy.deepcopy(path_config),
+                        user_id=user_id, disclosure_variant=variant,
+                    )
+                    cases.append(DatasetCase(
+                        case_id=case_spec.case_id,
+                        split="",
+                        path_id=path_id,
+                        instance_index=instance_index,
+                        intent=intent,
+                        path_config=copy.deepcopy(path_config),
+                        case_spec=case_spec.to_dict(),
+                    ))
         rng = random.Random(self.config.seed)
         if self.config.max_cases is not None:
             rng.shuffle(cases)
