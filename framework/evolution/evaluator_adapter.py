@@ -718,6 +718,11 @@ class EvoSAGEEpisodeEvaluator:
     @staticmethod
     def from_evosage(simulation, report, customer_policy, service_policy, split, generation, phase,
                      path_config=None):
+        from .trace import flatten_simulation
+
+        analysis_trace_events = [
+            event.to_dict() for event in flatten_simulation(simulation)
+        ]
         # BackendEnvironment records both query and action tools as ``tool_call``
         # events.  Keep the co-evolution trace aligned with the execution
         # evaluator; filtering for the old ``tool_query`` name silently turned
@@ -786,6 +791,10 @@ class EvoSAGEEpisodeEvaluator:
             predicted_action=report.predicted_action,
             executed_action=report.executed_action,
             tool_sequence_summary=tools,
+            trace_ref=(
+                f"simulation:{simulation.simulation_id}"
+                if analysis_trace_events else None
+            ),
             termination_reason=simulation.termination_reason,
             sop_node=location.get("sop_node"),
             path_step_index=location.get("path_step_index"),
@@ -809,6 +818,9 @@ class EvoSAGEEpisodeEvaluator:
                 "customer_behavior_assessment": customer_assessment.to_dict(),
                 "environment_valid": environment_valid,
                 "environment_invalid_reasons": environment_reasons,
+                "analysis_trace_events": analysis_trace_events,
+                "trace_seq_start": 0 if analysis_trace_events else None,
+                "trace_seq_end": len(analysis_trace_events) - 1 if analysis_trace_events else None,
             },
             evaluation_status=evaluation_status,
             invalid_reason=invalid_reasons[0] if invalid_reasons else None,

@@ -403,6 +403,8 @@ class FailureOccurrence:
     trigger_class: str = "UNCLASSIFIED_TRIGGER"
     service_decision_class: str = "UNCLASSIFIED_DECISION"
     trace_ref: Optional[str] = None
+    trace_seq_start: Optional[int] = None
+    trace_seq_end: Optional[int] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     is_primary: bool = True
     schema_version: int = 2
@@ -429,6 +431,15 @@ class FailureOccurrence:
             "split": episode.split,
         }
         digest = hashlib.sha256(_json(identity).encode("utf-8")).hexdigest()[:16]
+        trace_events = (episode.metadata or {}).get("analysis_trace_events") or []
+        trace_sequences = [
+            item.get("seq") for item in trace_events
+            if isinstance(item, dict) and isinstance(item.get("seq"), int)
+        ]
+        occurrence_metadata = dict(episode.metadata or {})
+        occurrence_metadata.pop("analysis_trace_events", None)
+        occurrence_metadata.pop("trace_seq_start", None)
+        occurrence_metadata.pop("trace_seq_end", None)
         return cls(
             occurrence_id=f"occ_v2_{digest}",
             signature_id=signature.signature_id,
@@ -454,10 +465,13 @@ class FailureOccurrence:
             trigger_class=signature.trigger_class,
             service_decision_class=signature.service_decision_class,
             trace_ref=episode.trace_ref,
+            trace_seq_start=min(trace_sequences) if trace_sequences else None,
+            trace_seq_end=max(trace_sequences) if trace_sequences else None,
             metadata={
-                **dict(episode.metadata or {}),
+                **occurrence_metadata,
                 "attribution_reason": attribution.attribution_reason,
                 "attribution_confidence": attribution.confidence,
+                "trace_range_scope": "whole_episode" if trace_sequences else None,
             },
         )
 
