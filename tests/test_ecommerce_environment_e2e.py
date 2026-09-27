@@ -165,7 +165,10 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         self.assertTrue(result.case_spec["metadata"]["legacy_gt"]["expected_path"])
         first_messages = json.dumps(client.requests[0]["messages"], ensure_ascii=False)
         self.assertNotIn("Signed", first_messages)
-        self.assertNotIn("Low", first_messages)
+        # Public SOP branches may name the credit-level vocabulary; the
+        # hidden case value must not be injected as a backend observation.
+        self.assertNotIn('"credit_level": "Low"', first_messages)
+        self.assertNotIn("CreditLevel=Low", first_messages)
         self.assertTrue(any(message.get("role") == "tool" for message in client.requests[1]["messages"]))
         self.assertIn("Signed", json.dumps(client.requests[1]["messages"], ensure_ascii=False))
         self.assertEqual([event["name"] for event in result.backend_events], [
@@ -187,7 +190,8 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         )
         first_request = json.dumps(client.requests[0]["messages"], ensure_ascii=False)
         self.assertNotIn("Signed", first_request)
-        self.assertNotIn("Low", first_request)
+        self.assertNotIn('"credit_level": "Low"', first_request)
+        self.assertNotIn("CreditLevel=Low", first_request)
         self.assertNotIn("backend_record", first_request)
 
     def test_current_user_message_is_not_injected_twice(self):

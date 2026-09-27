@@ -31,11 +31,14 @@ credit_level：用户信用等级，只能使用 query_customer_profile 返回�
 3.物流状态(step3):根据 query_order 返回的【shipping_status】进行跳转
 	- 跳转逻辑：结合工具返回的 shipping_status 和【CoreIntention】字段进行判断；状态映射以现有 SOP 图和工具结果为准。
 
-4.用户信用等级(step4):根据 query_customer_profile 返回的【credit_level】进行跳转
-	- 跳转逻辑：结合工具返回的 credit_level、【CoreIntention】和【Responsibility】字段进行判断；禁止使用用户口述替代工具结果。
+4.责任判定(step5):根据【Responsibility】字段进行跳转
+	- ReturnOrRefund 且已签收时，User 和 Merchant 均继续到 step4 核验信用等级。
 
-5.责任判定(step5):根据【Responsibility】字段进行跳转
-	- 跳转逻辑：结合【Responsibility】字段的值，1️⃣ User→step6；2️⃣ Merchant→step4。
+5.用户信用等级(step4):根据 query_customer_profile 返回的【credit_level】进行跳转
+	- 跳转逻辑：结合工具返回的 credit_level、【CoreIntention】和【Responsibility】字段进行判断；禁止使用用户口述替代工具结果。
+	- ReturnOrRefund + User：High/Medium→ACTION=CollectionService；Low→step6。
+	- ReturnOrRefund + Merchant：High→ACTION=Comfort+Compensation；Medium/Low→step7。
+	- Exchange 且已签收：High/Medium→ACTION=Exchange；Low→ACTION=PayFee。
 
 6.退款理由是否合理(step6):根据【RefundReasonable】字段进行跳转
 	- 跳转逻辑：结合【RefundReasonable】字段的值，1️⃣ Reasonable→step8；2️⃣ Unreasonable→ACTION=Reject→END。

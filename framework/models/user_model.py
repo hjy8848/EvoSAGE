@@ -95,6 +95,7 @@ class UserModel:
         # 状态管理
         self.state = UserState.INITIAL
         self.emotion_state = UserEmotionState.CALM
+        self.initial_emotion_was_explicit = False
         
         # 对话历史
         self.dialogue_history: List[Dict[str, str]] = []
@@ -138,6 +139,21 @@ class UserModel:
     def update_emotion_state(self, emotion: UserEmotionState) -> None:
         """更新用户情感状态"""
         self.emotion_state = emotion
+
+    def initialize_emotion_from_case(self, emotion: Optional[str]) -> None:
+        """Initialize customer-side affect from an explicit CaseSpec policy value."""
+        emotion_states = {
+            "Calm": UserEmotionState.CALM,
+            "Dissatisfied": UserEmotionState.ANGRY,
+        }
+        state = emotion_states.get(emotion)
+        if state is None:
+            return
+        self.emotion_state = state
+        self.initial_emotion_was_explicit = True
+        environment_state = getattr(self, "environment_state", None)
+        if environment_state is not None:
+            environment_state.emotion = state.value
     
     def update_satisfaction(self, delta: float) -> None:
         """

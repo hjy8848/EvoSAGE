@@ -87,14 +87,14 @@ def generate_path_list():
     # Merchant + Low/Medium信用 → step7（需要根据情绪判断）
     for credit in ["Medium", "Low"]:
         path_list.append({
-            "Classification_items": ["ReturnOrRefund", None, "Merchant", None, None],
+            "Classification_items": ["ReturnOrRefund", None, "Merchant", None, "Dissatisfied"],
             "system_variables": {"ShippingStatus": "Signed", "CreditLevel": credit},
             "expected_path": ["step1", "step2", "step3", "step5", "step4", "step7"],
             "final_output": {"Action": "Comfort"}
         })
 
 
-    # ========== 路径10: step1 -> step2 -> step3 -> step5 -> step4 -> ACTION=CollectionService (User + High) ==========
+    # ========== 路径11: step1 -> step2 -> step3 -> step5 -> step4 -> ACTION=CollectionService (User + High) ==========
     path_list.append({
         "Classification_items": ["ReturnOrRefund", None, "User", None, None],
         "system_variables": {"ShippingStatus": "Signed", "CreditLevel": "High"},
@@ -102,7 +102,7 @@ def generate_path_list():
         "final_output": {"Action": "CollectionService"}
     })
 
-    # ========== 路径11: step1 -> step2 -> step3 -> step5 -> step4 -> ACTION=CollectionService (User + Medium) ==========
+    # ========== 路径12: step1 -> step2 -> step3 -> step5 -> step4 -> ACTION=CollectionService (User + Medium) ==========
     path_list.append({
         "Classification_items": ["ReturnOrRefund", None, "User", None, None],
         "system_variables": {"ShippingStatus": "Signed", "CreditLevel": "Medium"},
@@ -111,7 +111,7 @@ def generate_path_list():
     })
 
 
-    # ========== 路径12: step1 -> step2 -> step3 -> step5 -> step4 -> step6 -> step8 -> ACTION=CollectionService (ProvidedDocument=True) ==========
+    # ========== 路径13: step1 -> step2 -> step3 -> step5 -> step4 -> step6 -> step8 -> ACTION=CollectionService (ProvidedDocument=True) ==========
     path_list.append({
         "Classification_items": ["ReturnOrRefund", True, "User", "Reasonable", None],
         "system_variables": {"ShippingStatus": "Signed", "CreditLevel": "Low"},
@@ -119,7 +119,7 @@ def generate_path_list():
         "final_output": {"Action": "CollectionService"}
     })
 
-    # ========== 路径13: step1 -> step2 -> step3 -> step5 -> step4 -> step6 -> step8 -> ACTION=Supplementary (ProvidedDocument=False) ==========
+    # ========== 路径14: step1 -> step2 -> step3 -> step5 -> step4 -> step6 -> step8 -> ACTION=Supplementary (ProvidedDocument=False) ==========
     path_list.append({
         "Classification_items": ["ReturnOrRefund", False, "User", "Reasonable", None],
         "system_variables": {"ShippingStatus": "Signed", "CreditLevel": "Low"},
@@ -127,7 +127,7 @@ def generate_path_list():
         "final_output": {"Action": "Supplementary"}
     })
 
-    # ========== 路径14: step1 -> step2 -> step3 -> step5 -> step4 -> step6 -> ACTION=Reject (User + Low + Unreasonable) ==========
+    # ========== 路径15: step1 -> step2 -> step3 -> step5 -> step4 -> step6 -> ACTION=Reject (User + Low + Unreasonable) ==========
     path_list.append({
         "Classification_items": ["ReturnOrRefund", None, "User", "Unreasonable", None],
         "system_variables": {"ShippingStatus": "Signed", "CreditLevel": "Low"},
@@ -254,7 +254,7 @@ def get_intent_path_mapping():
         
         "merchant_compensation_low_credit": {
             "description": "商家责任赔偿（低/中信用） - 商家责任且用户低或中信用",
-            "possible_paths": [9],  # ReturnOrRefund + Merchant + Medium/Low -> Comfort
+            "possible_paths": [9, 10],  # ReturnOrRefund + Merchant + Medium/Low -> Comfort
             "required_conditions": {
                 "CoreIntention": "ReturnOrRefund",
                 "Responsibility": "Merchant",
@@ -267,7 +267,7 @@ def get_intent_path_mapping():
         
         "user_return_high_credit": {
             "description": "用户发起退货（高信用） - 用户责任且高信用可直接揽收",
-            "possible_paths": [10],  # ReturnOrRefund + User + High -> CollectionService
+            "possible_paths": [11],  # ReturnOrRefund + User + High -> CollectionService
             "required_conditions": {
                 "CoreIntention": "ReturnOrRefund",
                 "Responsibility": "User",
@@ -278,7 +278,7 @@ def get_intent_path_mapping():
         
         "user_return_medium_credit": {
             "description": "用户发起退货（中信用） - 用户责任且中信用可直接揽收",
-            "possible_paths": [11],  # ReturnOrRefund + User + Medium -> CollectionService
+            "possible_paths": [12],  # ReturnOrRefund + User + Medium -> CollectionService
             "required_conditions": {
                 "CoreIntention": "ReturnOrRefund",
                 "Responsibility": "User",
@@ -289,7 +289,7 @@ def get_intent_path_mapping():
         
         "user_return_low_credit_with_doc": {
             "description": "用户发起退货（低信用+有凭证） - 低信用用户提交凭证可揽收",
-            "possible_paths": [12],  # ReturnOrRefund + User + Low + Reasonable + ProvidedDocument=True -> CollectionService
+            "possible_paths": [13],  # ReturnOrRefund + User + Low + Reasonable + ProvidedDocument=True -> CollectionService
             "required_conditions": {
                 "CoreIntention": "ReturnOrRefund",
                 "Responsibility": "User",
@@ -302,7 +302,7 @@ def get_intent_path_mapping():
         
         "user_return_low_credit_no_doc": {
             "description": "用户发起退货（低信用+无凭证） - 低信用用户缺少凭证需补充",
-            "possible_paths": [13],  # ReturnOrRefund + User + Low + Reasonable + ProvidedDocument=False -> Supplementary
+            "possible_paths": [14],  # ReturnOrRefund + User + Low + Reasonable + ProvidedDocument=False -> Supplementary
             "required_conditions": {
                 "CoreIntention": "ReturnOrRefund",
                 "Responsibility": "User",
@@ -315,7 +315,7 @@ def get_intent_path_mapping():
         
         "unreasonable_refund": {
             "description": "无理由退款 - 用户自身原因要求退款，理由不充分直接拒绝",
-            "possible_paths": [14, 15],  # ReturnOrRefund + User + Low + Unreasonable -> Reject (路径14和15重复)
+            "possible_paths": [15],  # ReturnOrRefund + User + Low + Unreasonable -> Reject
             "required_conditions": {
                 "CoreIntention": "ReturnOrRefund",
                 "Responsibility": "User",

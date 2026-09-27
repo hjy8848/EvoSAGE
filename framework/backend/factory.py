@@ -225,6 +225,12 @@ def build_case_spec(
     if scenario_id == "ecommerce_refund":
         system_variables = path_config.get("system_variables", {})
         classification = path_config.get("Classification_items", [])
+        declared_emotion = classification[4] if len(classification) > 4 else None
+        initial_emotion = (
+            declared_emotion
+            if declared_emotion in {"Calm", "Dissatisfied"}
+            else None
+        )
         shipping_status = system_variables.get("ShippingStatus", "Signed")
         payment_status = "Paid"
         responsibility = classification[2] if len(classification) > 2 else "User"
@@ -294,6 +300,11 @@ def build_case_spec(
             user_policy={
                 "mode": user_policy_mode,
                 "truthfulness": "truthful" if user_policy_mode == "truthful" else "unreliable",
+                **(
+                    {"initial_emotion": initial_emotion}
+                    if initial_emotion is not None
+                    else {}
+                ),
                 "reveal_order_id_on_request": True,
                 "reveal_customer_id_on_request": True,
                 "show_order_id_initially": reveal_order_id,
