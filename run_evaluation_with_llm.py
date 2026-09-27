@@ -261,6 +261,15 @@ class LLMEvaluationPipeline:
         agent_max_tokens: int = 1536,
         judge_max_tokens: int = 1024,
         customer_thinking_mode: Optional[str] = None,
+        agent_thinking_mode: Optional[str] = None,
+        user_transport_max_retries: int = 1,
+        agent_transport_max_retries: int = 1,
+        judge_transport_max_retries: int = 1,
+        judge_validation_retries: int = 2,
+        customer_protocol_retries: int = 1,
+        rate_limit_backoff_seconds: float = 0.0,
+        max_tool_steps: int = 3,
+        request_budget=None,
         tool_contract_config=None,
     ):
         """
@@ -308,6 +317,17 @@ class LLMEvaluationPipeline:
         if customer_thinking_mode not in {None, "enabled", "disabled"}:
             raise ValueError("customer_thinking_mode must be None, 'enabled', or 'disabled'")
         self.customer_thinking_mode = customer_thinking_mode
+        if agent_thinking_mode not in {None, "enabled", "disabled"}:
+            raise ValueError("agent_thinking_mode must be None, 'enabled', or 'disabled'")
+        self.agent_thinking_mode = agent_thinking_mode
+        self.user_transport_max_retries = int(user_transport_max_retries)
+        self.agent_transport_max_retries = int(agent_transport_max_retries)
+        self.judge_transport_max_retries = int(judge_transport_max_retries)
+        self.judge_validation_retries = int(judge_validation_retries)
+        self.customer_protocol_retries = int(customer_protocol_retries)
+        self.rate_limit_backoff_seconds = float(rate_limit_backoff_seconds)
+        self.max_tool_steps = int(max_tool_steps)
+        self.request_budget = request_budget
         from framework.backend.tool_contract import ToolContractConfig
         self.tool_contract_config = ToolContractConfig.from_value(tool_contract_config)
         
@@ -398,7 +418,10 @@ class LLMEvaluationPipeline:
                 # records each provider response.  Disable hidden transport
                 # retries here so a logical two-attempt cap is also a true
                 # two-request cap for Customer generation.
-                max_retries=1,
+                max_retries=self.user_transport_max_retries,
+                request_budget=self.request_budget,
+                request_role="user",
+                rate_limit_backoff_seconds=self.rate_limit_backoff_seconds,
             )
             self.agent_llm_client = get_llm_client(
                 client_type,
@@ -406,6 +429,10 @@ class LLMEvaluationPipeline:
                 api_key=api_key,
                 model_name=agent_model_name,
                 timeout=api_timeout,
+                max_retries=self.agent_transport_max_retries,
+                request_budget=self.request_budget,
+                request_role="agent",
+                rate_limit_backoff_seconds=self.rate_limit_backoff_seconds,
             )
             self.judge_llm_client = get_llm_client(
                 client_type,
@@ -413,6 +440,10 @@ class LLMEvaluationPipeline:
                 api_key=api_key,
                 model_name=judge_model_name,
                 timeout=api_timeout,
+                max_retries=self.judge_transport_max_retries,
+                request_budget=self.request_budget,
+                request_role="judge",
+                rate_limit_backoff_seconds=self.rate_limit_backoff_seconds,
             )
             return
         
@@ -583,6 +614,7 @@ class LLMEvaluationPipeline:
                     max_tokens=self.user_max_tokens,
                     case_spec=case_spec,
                     thinking_mode=self.customer_thinking_mode,
+                    protocol_retry_limit=self.customer_protocol_retries,
                 )
             else:
                 # Real co-evolution uses the LLM customer with a validated,
@@ -596,6 +628,7 @@ class LLMEvaluationPipeline:
                     max_tokens=self.user_max_tokens,
                     case_spec=case_spec,
                     thinking_mode=self.customer_thinking_mode,
+                    protocol_retry_limit=self.customer_protocol_retries,
                 )
         elif self.user_simulator_mode == "rule":
             user_model = RuleUserModel(user_profile, user_system_prompt, case_spec)
@@ -606,8 +639,9 @@ class LLMEvaluationPipeline:
                 llm_client=self.user_llm_client,
                 temperature=0.8,
                 max_tokens=self.user_max_tokens,
-                case_spec=case_spec,
-                thinking_mode=self.customer_thinking_mode,
+                    case_spec=case_spec,
+                    thinking_mode=self.customer_thinking_mode,
+                    protocol_retry_limit=self.customer_protocol_retries,
             )
         else:
             user_model = LLMUserModel(
@@ -618,6 +652,7 @@ class LLMEvaluationPipeline:
                 max_tokens=self.user_max_tokens,
                 case_spec=case_spec,
                 thinking_mode=self.customer_thinking_mode,
+                protocol_retry_limit=self.customer_protocol_retries,
             )
         
         # 创建客服模型
@@ -636,6 +671,7 @@ class LLMEvaluationPipeline:
             use_llm_for_full_output=True,  # 使用LLM生成完整JSON输出(classification+path+finals+chat)
             max_tokens=self.agent_max_tokens,
             tool_contract_config=self.tool_contract_config,
+            thinking_mode=self.agent_thinking_mode,
         )
         agent_model.scenario_id = self.scenario_id
         
@@ -649,6 +685,7 @@ class LLMEvaluationPipeline:
             verbose=self.verbose,
             backend_environment=backend_environment,
             case_spec=case_spec,
+            max_tool_steps=self.max_tool_steps,
             legacy_execution=self.legacy_execution,
         )
         
@@ -709,6 +746,8 @@ class LLMEvaluationPipeline:
                 llm_client=self.judge_llm_client,
                 temperature=0.2,
                 max_tokens=self.judge_max_tokens,
+                validation_retries=self.judge_validation_retries,
+                rate_limit_backoff_seconds=self.rate_limit_backoff_seconds,
             )
 
         evaluator = Evaluator(

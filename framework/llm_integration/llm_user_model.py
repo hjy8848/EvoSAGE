@@ -56,6 +56,7 @@ class LLMUserModel(UserModel):
         max_tokens: Optional[int] = 512,
         case_spec: Optional[CaseSpec] = None,
         thinking_mode: Optional[str] = None,
+        protocol_retry_limit: int = CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT,
     ):
         """
         初始化LLM用户模型
@@ -75,7 +76,7 @@ class LLMUserModel(UserModel):
         if thinking_mode not in {None, "enabled", "disabled"}:
             raise ValueError("thinking_mode must be None, 'enabled', or 'disabled'")
         self.thinking_mode = thinking_mode
-        self.generation_retry_limit = CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT
+        self.generation_retry_limit = max(0, int(protocol_retry_limit))
         self.customer_simulator_provenance: list[dict[str, Any]] = []
         self.backend_events = []
         self.environment_state = UserEnvironmentState(
@@ -254,6 +255,7 @@ class LLMUserModel(UserModel):
             response = None
             provider_error = None
             timed_out = False
+            thinking_effective = "unknown" if self.thinking_mode else "provider_default"
             try:
                 request_options = {}
                 if self.thinking_mode is not None:
@@ -271,6 +273,7 @@ class LLMUserModel(UserModel):
                 raw_content = self._raw_response_content(response)
                 finish_reason = self._response_finish_reason(response)
                 metadata = getattr(response, "metadata", {}) or {}
+                thinking_effective = metadata.get("thinking_effective", thinking_effective)
                 raw_response = getattr(response, "raw_response", None)
                 assistant_message = metadata.get("assistant_message")
                 if not isinstance(assistant_message, dict) and isinstance(raw_response, dict):
@@ -297,6 +300,8 @@ class LLMUserModel(UserModel):
                     reasoning_tokens = completion_details.get("reasoning_tokens", completion_details.get("reasoningTokens"))
                 provider_error = None
             except Exception as exc:
+                if getattr(exc, "budget_exhausted", False):
+                    raise
                 latency = time.perf_counter() - started
                 raw_content = ""
                 finish_reason = None
@@ -326,6 +331,8 @@ class LLMUserModel(UserModel):
             attempt_record = {
                 "attempt_index": attempt_index,
                 "thinking_mode": self.thinking_mode or "default",
+                "thinking_requested": self.thinking_mode or "default",
+                "thinking_effective": thinking_effective,
                 "finish_reason": finish_reason,
                 "max_tokens": self.max_tokens,
                 "raw_content": self._safe_provenance_text(raw_content),

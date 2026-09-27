@@ -62,6 +62,8 @@ class CustomerEvolver:
                     raise
                 generated = []
             except Exception as exc:
+                if getattr(exc, "budget_exhausted", False):
+                    raise
                 if self.require_strategy_generator:
                     raise RuntimeError("LLM customer policy generation failed in strict real mode") from exc
                 generated = []
@@ -199,7 +201,8 @@ class LLMCustomerPolicyGenerator:
     """
 
     def __init__(self, llm_client, adversary_access: str = "black_box", max_tokens: int = 4096,
-                 summary_limit: int = 5, allowed_strategy_tags=None):
+                 summary_limit: int = 5, allowed_strategy_tags=None,
+                 thinking_mode=None, protocol_retries: int = 1):
         self.llm_client = llm_client
         self.max_tokens = max_tokens
         self.summary_limit = max(1, int(summary_limit))
@@ -210,6 +213,8 @@ class LLMCustomerPolicyGenerator:
             raise ValueError("adversary_access must be black_box or white_box")
         self.adversary_access = adversary_access
         self.last_generation_record = None
+        self.thinking_mode = thinking_mode
+        self.protocol_retries = max(0, int(protocol_retries))
 
     def generate(self, incumbent, failures, service_policy, generation, count, frontier=None, archive_summary=None):
         failure_view = [
@@ -251,6 +256,9 @@ class LLMCustomerPolicyGenerator:
                 role="customer",
                 max_tokens=self.max_tokens,
                 temperature=0.7,
+                retry_limit=self.protocol_retries,
+                thinking_mode=self.thinking_mode,
+                generation=generation,
             )
         except GenerationProtocolError as exc:
             # The helper raises after the final attempt, so retain the full

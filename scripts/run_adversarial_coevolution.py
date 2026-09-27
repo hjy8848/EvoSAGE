@@ -20,6 +20,7 @@ from framework.evolution.service_evolver import LLMServicePatchGenerator, Servic
 from framework.evolution.service_gate import ServiceGate
 from framework.evolution.service_policy import ServicePolicySanitizer
 from framework.evolution.customer_selector import CustomerSelector
+from framework.evolution.request_budget import APIRequestBudget
 
 
 def main() -> int:
@@ -60,6 +61,12 @@ def main() -> int:
     # the runner resolved a fresh directory afterwards, artifacts would be
     # split between two different runs.
     run_dir, _ = EvolutionRunner.resolve_run_dir(config)
+    request_budget = APIRequestBudget(
+        max_per_generation=config.evaluation.max_api_requests_per_generation,
+        max_per_run=config.evaluation.max_api_requests_per_run,
+        persist_path=run_dir / "analysis" / "request_budget.json",
+        resume=config.persistence.resume,
+    )
     evaluator = MockEpisodeEvaluator()
     customer_evolver = None
     service_evolver = None
@@ -79,13 +86,25 @@ def main() -> int:
                                         resume=config.persistence.resume,
                                         token_budget=config.evaluation.token_budget,
                                         customer_thinking_mode=config.evaluation.customer_thinking_mode,
-                                        tool_contract_config=config.evaluation.tool_contract)
+                                        agent_thinking_mode=config.evaluation.agent_thinking_mode,
+                                        evolver_thinking_mode=config.evaluation.evolver_thinking_mode,
+                                        tool_contract_config=config.evaluation.tool_contract,
+                                        max_tool_steps=config.evaluation.max_tool_steps,
+                                        invalid_evaluation_retries=config.evaluation.invalid_evaluation_retries,
+                                        request_budget=request_budget,
+                                        customer_transport_max_retries=config.evaluation.customer_transport_max_retries,
+                                        agent_max_retries=config.evaluation.agent_max_retries,
+                                        judge_max_retries=config.evaluation.judge_max_retries,
+                                        judge_validation_retries=config.evaluation.judge_validation_retries,
+                                        customer_protocol_retries=config.evaluation.customer_protocol_retries,
+                                        rate_limit_backoff_seconds=config.evaluation.rate_limit_backoff_seconds)
         evolution_client = get_llm_client(
             args.client, api_key=api_key, base_url=args.api_url, model_name=args.model,
             timeout=config.evaluation.api_timeout,
-            # Structured Evolver retries are owned by generation_protocol so
-            # each logical attempt has one provider request at most.
-            max_retries=1,
+            max_retries=config.evaluation.evolver_max_retries,
+            request_budget=request_budget,
+            request_role="evolver",
+            rate_limit_backoff_seconds=config.evaluation.rate_limit_backoff_seconds,
         )
         customer_evolver = CustomerEvolver(
             config.seed,
@@ -97,6 +116,8 @@ def main() -> int:
                 max_tokens=config.evaluation.token_budget.customer_evolver,
                 summary_limit=config.evaluation.summary_limit,
                 allowed_strategy_tags=config.customer.allowed_strategy_tags,
+                thinking_mode=config.evaluation.evolver_thinking_mode,
+                protocol_retries=config.evaluation.evolver_protocol_retries,
             ),
             require_strategy_generator=True,
         )
@@ -113,6 +134,8 @@ def main() -> int:
                 evolution_client,
                 max_tokens=config.evaluation.token_budget.service_evolver,
                 summary_limit=config.evaluation.summary_limit,
+                thinking_mode=config.evaluation.evolver_thinking_mode,
+                protocol_retries=config.evaluation.evolver_protocol_retries,
             ),
             require_patch_generator=True,
         )

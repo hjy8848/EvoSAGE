@@ -113,13 +113,52 @@ class EvaluationConfig:
     token_budget: TokenBudgetConfig = field(default_factory=TokenBudgetConfig)
     summary_limit: int = 5
     # None preserves provider defaults; explicit values currently target the
-    # Customer simulator only, leaving Agent/Evolver/Judge requests unchanged.
+    # roles that accept provider-specific thinking controls.
     customer_thinking_mode: Optional[str] = None
+    agent_thinking_mode: Optional[str] = None
+    evolver_thinking_mode: Optional[str] = None
+    # These are maximum total transport attempts per client.generate call
+    # (max_retries=1 therefore means one provider request, not one retry).
+    agent_max_retries: int = 1
+    customer_transport_max_retries: int = 1
+    evolver_max_retries: int = 1
+    judge_max_retries: int = 1
+    judge_validation_retries: int = 2
+    customer_protocol_retries: int = 1
+    evolver_protocol_retries: int = 1
+    rate_limit_backoff_seconds: float = 0.0
+    # Preserve historical evaluator retry and tool-loop behavior for configs
+    # that predate these fields. Fast profiles opt down explicitly.
+    invalid_evaluation_retries: int = 1
+    max_tool_steps: int = 8
+    max_api_requests_per_generation: Optional[int] = None
+    max_api_requests_per_run: Optional[int] = None
     tool_contract: ToolContractConfig = field(default_factory=ToolContractConfig)
 
     def __post_init__(self) -> None:
-        if self.customer_thinking_mode not in {None, "enabled", "disabled"}:
-            raise ValueError("customer_thinking_mode must be None, 'enabled', or 'disabled'")
+        for field_name in ("customer_thinking_mode", "agent_thinking_mode", "evolver_thinking_mode"):
+            if getattr(self, field_name) not in {None, "enabled", "disabled"}:
+                raise ValueError(f"{field_name} must be None, 'enabled', or 'disabled'")
+        for field_name in (
+            "agent_max_retries", "customer_transport_max_retries",
+            "evolver_max_retries", "judge_max_retries",
+        ):
+            if int(getattr(self, field_name)) < 1:
+                raise ValueError(f"{field_name} is a total-attempt count and must be at least 1")
+        if self.invalid_evaluation_retries < 0:
+            raise ValueError("invalid_evaluation_retries cannot be negative")
+        if self.customer_protocol_retries < 0 or self.evolver_protocol_retries < 0:
+            raise ValueError("protocol retries cannot be negative")
+        if self.judge_validation_retries < 0:
+            raise ValueError("judge_validation_retries cannot be negative")
+        if self.max_tool_steps < 1:
+            raise ValueError("max_tool_steps must be at least 1")
+        if self.rate_limit_backoff_seconds < 0:
+            raise ValueError("rate_limit_backoff_seconds cannot be negative")
+        for field_name in ("max_api_requests_per_generation", "max_api_requests_per_run"):
+            value = getattr(self, field_name)
+            if value is not None and int(value) < 1:
+                raise ValueError(f"{field_name} must be positive or null")
 
     @classmethod
     def from_dict(cls, value: Optional[Dict[str, Any]]) -> "EvaluationConfig":

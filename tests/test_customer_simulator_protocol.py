@@ -292,7 +292,9 @@ def test_pipeline_thinking_setting_is_customer_scoped(tmp_path, monkeypatch):
     pipeline.run_single_simulation("exchange_product", user_id="thinking-test-user")
 
     assert created_users[-1].thinking_mode == "disabled"
-    assert "thinking_mode" not in created_agents[-1].kwargs
+    # Customer thinking is role-scoped; Agent keeps provider-default thinking
+    # unless the caller explicitly configures an Agent mode.
+    assert created_agents[-1].kwargs["thinking_mode"] is None
     assert len(created_clients) == 3
     assert all("thinking" not in client.config for client in created_clients)
 
@@ -740,5 +742,7 @@ def test_pipeline_disables_hidden_transport_retries_for_customer_only(tmp_path, 
 
     user, agent, judge = created
     assert user.config["max_retries"] == 1
-    assert "max_retries" not in agent.config
-    assert "max_retries" not in judge.config
+    # All API roles use the explicit one-attempt default instead of silently
+    # inheriting the OpenAI-compatible client's retry=3 default.
+    assert agent.config["max_retries"] == 1
+    assert judge.config["max_retries"] == 1

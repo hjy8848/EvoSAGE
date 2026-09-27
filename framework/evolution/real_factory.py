@@ -12,7 +12,14 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
                         max_turns: int = 10, user_simulator_mode: str = "llm", api_timeout: int = 300,
                         client_type: str = "openai_api", judge_in_evolution: bool = False,
                         resume: bool = False, token_budget=None,
-                        customer_thinking_mode=None, tool_contract_config=None):
+                        customer_thinking_mode=None, agent_thinking_mode=None,
+                        evolver_thinking_mode=None, tool_contract_config=None,
+                        max_tool_steps: int = 8, invalid_evaluation_retries: int = 1,
+                        request_budget=None, customer_transport_max_retries: int = 1,
+                        agent_max_retries: int = 1, judge_max_retries: int = 1,
+                        judge_validation_retries: int = 2,
+                        customer_protocol_retries: int = 1,
+                        rate_limit_backoff_seconds: float = 0.0):
     from run_evaluation_with_llm import LLMEvaluationPipeline
     tool_contract_config = ToolContractConfig.from_value(tool_contract_config)
 
@@ -47,6 +54,15 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
             agent_max_tokens=budget("agent", 1536),
             judge_max_tokens=budget("judge", 1024),
             customer_thinking_mode=customer_thinking_mode,
+            agent_thinking_mode=agent_thinking_mode,
+            user_transport_max_retries=customer_transport_max_retries,
+            agent_transport_max_retries=agent_max_retries,
+            judge_transport_max_retries=judge_max_retries,
+            judge_validation_retries=judge_validation_retries,
+            customer_protocol_retries=customer_protocol_retries,
+            rate_limit_backoff_seconds=rate_limit_backoff_seconds,
+            max_tool_steps=max_tool_steps,
+            request_budget=request_budget,
             tool_contract_config=tool_contract_config,
         )
 
@@ -56,9 +72,19 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
         cache_namespace=(
             f"{client_type}|{model}|{api_url}|turns={max_turns}|timeout={api_timeout}"
             f"|customer-thinking={customer_thinking_mode or 'default'}"
+            f"|agent-thinking={agent_thinking_mode or 'default'}"
+            f"|evolver-thinking={evolver_thinking_mode or 'default'}"
+            f"|max-tool-steps={max_tool_steps}"
+            f"|tokens={budget('user', 512)}:{budget('agent', 1536)}:{budget('judge', 1024)}"
+            f"|transport-attempts={customer_transport_max_retries}:{agent_max_retries}:{judge_max_retries}"
+            f"|customer-protocol-retries={customer_protocol_retries}"
+            f"|invalid-eval-retries={invalid_evaluation_retries}"
+            f"|judge-retries={judge_max_retries}:{judge_validation_retries}"
             f"|tool-contract={tool_contract_config.provider_schema_strict}:"
             f"{tool_contract_config.runtime_schema_validation}"
         ),
         cache_path=Path(output_dir) / "environment" / "episode_cache.jsonl",
         reset_cache=not resume,
+        invalid_evaluation_retries=invalid_evaluation_retries,
+        request_budget=request_budget,
     )

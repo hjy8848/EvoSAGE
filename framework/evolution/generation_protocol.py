@@ -7,6 +7,8 @@ import re
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from .request_budget import request_context
+
 
 PROTOCOL_RETRY_LIMIT = 1
 
@@ -88,6 +90,8 @@ def _attempt_record(
         "timeout": False,
         "latency_seconds": metadata.get("latency_seconds"),
         "request_id": request_id,
+        "thinking_requested": metadata.get("thinking_requested", "default"),
+        "thinking_effective": metadata.get("thinking_effective", "unknown"),
     }
     if error is not None:
         record["provider_error"] = f"{type(error).__name__}: {error}"
@@ -107,6 +111,8 @@ def request_json_with_retry(
     max_tokens: int,
     temperature: float,
     retry_limit: int = PROTOCOL_RETRY_LIMIT,
+    thinking_mode: Optional[str] = None,
+    generation: Optional[int] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Request JSON with at most ``retry_limit`` protocol retries.
 
@@ -126,12 +132,21 @@ def request_json_with_retry(
     for attempt_index in range(retry_limit + 1):
         request_started = time.perf_counter()
         try:
-            response = client.generate(
-                prompt=prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            with request_context(
+                generation, f"{role}_generation", role=f"{role}_evolver",
+            ):
+                request_options = {}
+                if thinking_mode is not None:
+                    request_options["thinking"] = {"type": thinking_mode}
+                response = client.generate(
+                    prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **request_options,
+                )
         except Exception as exc:
+            if getattr(exc, "budget_exhausted", False):
+                raise
             attempt = _attempt_record(role, attempt_index, max_tokens, error=exc)
             attempt["latency_seconds"] = time.perf_counter() - request_started
             record["attempts"].append(attempt)

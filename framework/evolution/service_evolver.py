@@ -59,6 +59,8 @@ class ServiceEvolver:
                     self.last_generation_record["status"] = "candidate_rejected"
                     self.last_generation_record["reason"] = "service_candidate_rejected:all_candidates"
             except Exception as exc:
+                if getattr(exc, "budget_exhausted", False):
+                    raise
                 self.last_generation_record = copy.deepcopy(
                     getattr(self.patch_generator, "last_generation_record", None)
                 )
@@ -443,6 +445,8 @@ class ServiceEvolver:
                     self.last_selected_metrics = candidate_metrics
                     accepted.append((decision, candidate, patch, candidate_metrics))
             except Exception as exc:
+                if getattr(exc, "budget_exhausted", False):
+                    raise
                 if isinstance(exc, PairingSetMismatch):
                     # Asymmetric valid sample coverage is a data-integrity
                     # failure. Do not relabel it as a provider error or allow
@@ -539,11 +543,14 @@ def _top_k(items, limit: int = 5):
 
 
 class LLMServicePatchGenerator:
-    def __init__(self, llm_client, max_tokens: int = 4096, summary_limit: int = 5):
+    def __init__(self, llm_client, max_tokens: int = 4096, summary_limit: int = 5,
+                 thinking_mode=None, protocol_retries: int = 1):
         self.llm_client = llm_client
         self.max_tokens = max_tokens
         self.summary_limit = max(1, int(summary_limit))
         self.last_generation_record = None
+        self.thinking_mode = thinking_mode
+        self.protocol_retries = max(0, int(protocol_retries))
 
     def generate(self, policy, failures, generation, count, defense_summary=None, historical_summary=None):
         view = [{"errors": list(item.error_types), "node": item.sop_node,
@@ -592,6 +599,9 @@ class LLMServicePatchGenerator:
                 role="service",
                 max_tokens=self.max_tokens,
                 temperature=0.3,
+                retry_limit=self.protocol_retries,
+                thinking_mode=self.thinking_mode,
+                generation=generation,
             )
         except GenerationProtocolError as exc:
             self.last_generation_record = copy.deepcopy(exc.record)

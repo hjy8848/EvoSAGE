@@ -18,8 +18,7 @@ from .customer_evolver import CustomerEvolver
 from .customer_policy import CustomerPolicyValidator
 from .customer_selector import CustomerSelector
 from .evaluator_adapter import BudgetedEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
-from .generation_protocol import GenerationProtocolError, PROTOCOL_RETRY_LIMIT
-from ..llm_integration.llm_user_model import CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT
+from .generation_protocol import GenerationProtocolError
 from .persistence import RunStore
 from .reporting import generate_report
 from .schemas import (
@@ -33,6 +32,7 @@ from .service_policy import ServicePolicySanitizer
 from .service_gate import ServiceGate
 from .split_manager import SplitManager
 from .weakness_frontier import WeaknessFrontier
+from .request_budget import APIRequestBudgetExceeded
 
 
 class GenerationEvaluationInconclusive(RuntimeError):
@@ -60,6 +60,7 @@ class EvolutionRunner:
             scenario=self.config.scenario,
         )
         self.base_evaluator = evaluator or MockEpisodeEvaluator()
+        self.request_budget = getattr(self.base_evaluator, "request_budget", None)
         self.evaluator = BudgetedEpisodeEvaluator(
             self.base_evaluator,
             repetitions=self.config.evaluation.repetitions,
@@ -177,6 +178,57 @@ class EvolutionRunner:
                 "case_ids": [item.get("case_id") for item in content.get("cases", [])],
             }
         return manifest
+
+    def _estimate_generation_workload(self, splits) -> dict[str, Any]:
+        """A deliberately rough planning estimate; hard budgets remain authoritative."""
+        cfg = self.config
+        evolution_count = len(splits.evolution)
+        validation_count = len(splits.validation)
+        mode = cfg.experiment_mode
+        episode_runs = validation_count  # generation summary
+        evolver_calls = 0
+        if mode in {"customer_only", "coevolution"}:
+            candidate_cases = min(evolution_count, max(1, cfg.customer.cases_per_candidate))
+            episode_runs += evolution_count  # baseline failure scan
+            episode_runs += cfg.customer.candidate_count * candidate_cases
+            episode_runs += cfg.customer.elite_count * candidate_cases
+            episode_runs += evolution_count  # selected customer confirmation
+            evolver_calls += 1
+        if mode in {"service_only", "coevolution"}:
+            episode_runs += evolution_count  # service failure scan
+            service_cases_per_candidate = (
+                2 * validation_count
+                + cfg.service.exact_replay_instance_count
+                + int(cfg.service.transfer_replay_policy_count or 0)
+            )
+            episode_runs += cfg.service.candidate_count * service_cases_per_candidate
+            evolver_calls += 1
+        assumed_user_calls = 2
+        assumed_agent_calls = 3
+        per_episode = assumed_user_calls + assumed_agent_calls
+        requests = episode_runs * per_episode + evolver_calls
+        upper_calls_per_episode = (
+            (cfg.evaluation.max_turns + 1)
+            + cfg.evaluation.max_turns * (cfg.evaluation.max_tool_steps + 1)
+        )
+        return {
+            "estimate_type": "rough_expected_not_guaranteed",
+            "mode": mode,
+            "evolution_cases": evolution_count,
+            "validation_cases": validation_count,
+            "estimated_episode_runs_per_generation": episode_runs,
+            "assumptions": {
+                "user_requests_per_episode": assumed_user_calls,
+                "agent_requests_per_episode": assumed_agent_calls,
+                "evolver_generation_requests_per_generation": evolver_calls,
+                "transport_attempts_per_logical_request": 1,
+                "max_possible_user_and_agent_calls_per_episode": upper_calls_per_episode,
+            },
+            "estimated_provider_requests_per_generation": requests,
+            "estimated_provider_requests_total": requests * cfg.max_generations,
+            "configured_generation_hard_limit": cfg.evaluation.max_api_requests_per_generation,
+            "configured_run_hard_limit": cfg.evaluation.max_api_requests_per_run,
+        }
 
     @classmethod
     def resolve_run_dir(cls, config: EvolutionConfig) -> tuple[Path, bool]:
@@ -319,7 +371,46 @@ class EvolutionRunner:
         stats["llm_requests"] = stats["pipeline_requests"] + stats["policy_generation_requests"]
         stats["total_requests_including_retries"] = stats["llm_requests"]
         stats["generation_wall_times_seconds"] = dict(self._generation_wall_times)
+        if self.request_budget is not None:
+            stats["request_budget"] = self.request_budget.snapshot()
         return stats
+
+    def _update_effective_thinking_provenance(self) -> None:
+        path = self.store.run_dir / "environment" / "provenance.json"
+        if not path.exists():
+            return
+        try:
+            provenance = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        clients: dict[str, list[str]] = {key: [] for key in (
+            "customer", "agent", "customer_evolver", "service_evolver"
+        )}
+        adapter = self.base_evaluator
+        for pipeline in getattr(adapter, "_pipelines", []) or []:
+            for role in ("customer", "agent"):
+                client = getattr(pipeline, f"{role if role != 'customer' else 'user'}_llm_client", None)
+                if client is not None:
+                    clients[role].append(getattr(client, "thinking_effective", "unknown"))
+        for role, evolver, attr in (
+            ("customer_evolver", self.customer_evolver, "strategy_generator"),
+            ("service_evolver", self.service_evolver, "patch_generator"),
+        ):
+            client = getattr(getattr(evolver, attr, None), "llm_client", None)
+            if client is not None:
+                clients[role].append(getattr(client, "thinking_effective", "unknown"))
+        effective = {}
+        for role, values in clients.items():
+            if not values:
+                effective[role] = "unknown"
+            elif "unsupported/not_applied" in values:
+                effective[role] = "unsupported/not_applied"
+            elif all(value == "provider_default" for value in values):
+                effective[role] = "provider_default"
+            else:
+                effective[role] = "unknown"
+        provenance["effective_thinking_modes"] = effective
+        self.store.write_json("environment/provenance.json", provenance)
 
     def run(self) -> dict[str, Any]:
         """Run an experiment and persist diagnostics even on a hard failure."""
@@ -333,7 +424,51 @@ class EvolutionRunner:
             # partial experiment remains auditable.
             try:
                 self._persist_pending_evolver_records()
+                self._update_effective_thinking_provenance()
                 metrics = self._runtime_stats()
+                if isinstance(exc, APIRequestBudgetExceeded):
+                    generation = self._active_generation
+                    if generation is not None:
+                        checkpoint = {
+                            "generation": generation,
+                            "status": "incomplete_budget_exhausted",
+                            "reason": "api_request_budget_exceeded",
+                            "budget_scope": exc.scope,
+                            "limit": exc.limit,
+                            "used": exc.used,
+                            "completed_generations": self.store.completed_generations(),
+                            "customer_policy": getattr(self, "_active_customer_policy", None).to_dict()
+                            if getattr(self, "_active_customer_policy", None) is not None else None,
+                            "service_policy": getattr(self, "_active_service_policy", None).to_dict()
+                            if getattr(self, "_active_service_policy", None) is not None else None,
+                            "episode_cache": (
+                                "environment/episode_cache.jsonl"
+                                if (self.store.run_dir / "environment/episode_cache.jsonl").exists()
+                                else None
+                            ),
+                        }
+                        self.store.write_json(
+                            f"generations/gen_{generation:03d}/CHECKPOINT.json", checkpoint
+                        )
+                    metrics.update({
+                        "run_status": "budget_exhausted",
+                        "inconclusive_reason": "api_request_budget_exceeded",
+                        "budget_scope": exc.scope,
+                        "budget_limit": exc.limit,
+                        "budget_used": exc.used,
+                        "wall_time_seconds": time.monotonic() - run_started,
+                    })
+                    self.store.write_json("analysis/orchestration_metrics.json", metrics)
+                    if self.request_budget is not None:
+                        self.store.write_json("analysis/request_budget.json", self.request_budget.snapshot())
+                    return {
+                        "run_dir": str(self.store.run_dir),
+                        "report": None,
+                        "history": [],
+                        "completed_generations": self.store.completed_generations(),
+                        "run_status": "budget_exhausted",
+                        "orchestration_metrics": metrics,
+                    }
                 inconclusive = (
                     isinstance(exc, GenerationProtocolError)
                     or bool(getattr(exc, "inconclusive", False))
@@ -347,6 +482,8 @@ class EvolutionRunner:
                 if inconclusive:
                     metrics["inconclusive_reason"] = str(exc)
                 self.store.write_json("analysis/orchestration_metrics.json", metrics)
+                if self.request_budget is not None:
+                    self.store.write_json("analysis/request_budget.json", self.request_budget.snapshot())
             except Exception:
                 # Never hide the original provider or evaluation exception if
                 # diagnostics persistence itself is unavailable.
@@ -361,6 +498,17 @@ class EvolutionRunner:
         # instances_per_path/seed from silently running against stale data.
         splits = SplitManager.load(self.store.run_dir / "split_manifest") if (manifest_exists and self.config.persistence.resume) else self.split_manager.build()
         self.store.write_json("config/evolution.json", self.config.to_dict())
+        estimate = self._estimate_generation_workload(splits)
+        self.store.write_json("analysis/request_budget_estimate.json", estimate)
+        print(
+            "[API budget estimate; rough, not guaranteed] "
+            f"evolution_cases={estimate['evolution_cases']} "
+            f"validation_cases={estimate['validation_cases']} "
+            f"episodes/gen≈{estimate['estimated_episode_runs_per_generation']} "
+            f"provider_requests/gen≈{estimate['estimated_provider_requests_per_generation']} "
+            f"hard_limits(gen/run)={self.config.evaluation.max_api_requests_per_generation}/"
+            f"{self.config.evaluation.max_api_requests_per_run}"
+        )
         model_metadata = self.config.model_metadata
         self.store.write_json("environment/provenance.json", {
             "scenario": self.config.scenario,
@@ -382,14 +530,40 @@ class EvolutionRunner:
             ),
             "customer_adversary_access": self.config.customer.adversary_access,
             "customer_thinking_mode": self.config.evaluation.customer_thinking_mode or "default",
+            "requested_thinking_modes": {
+                "customer": self.config.evaluation.customer_thinking_mode or "default",
+                "agent": self.config.evaluation.agent_thinking_mode or "default",
+                "customer_evolver": self.config.evaluation.evolver_thinking_mode or "default",
+                "service_evolver": self.config.evaluation.evolver_thinking_mode or "default",
+            },
+            "effective_thinking_modes": {
+                role: ("unknown" if mode != "default" else "provider_default")
+                for role, mode in {
+                    "customer": self.config.evaluation.customer_thinking_mode or "default",
+                    "agent": self.config.evaluation.agent_thinking_mode or "default",
+                    "customer_evolver": self.config.evaluation.evolver_thinking_mode or "default",
+                    "service_evolver": self.config.evaluation.evolver_thinking_mode or "default",
+                }.items()
+            },
             "tool_contract": asdict(self.config.evaluation.tool_contract),
             "token_budget": asdict(self.config.evaluation.token_budget),
-            "customer_protocol_retry_limit": CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT,
-            "evolver_protocol_retry_limit": PROTOCOL_RETRY_LIMIT,
+            "customer_protocol_retry_limit": self.config.evaluation.customer_protocol_retries,
+            "evolver_protocol_retry_limit": self.config.evaluation.evolver_protocol_retries,
+            "agent_max_retries": self.config.evaluation.agent_max_retries,
+            "customer_transport_max_retries": self.config.evaluation.customer_transport_max_retries,
+            "evolver_max_retries": self.config.evaluation.evolver_max_retries,
+            "judge_max_retries": self.config.evaluation.judge_max_retries,
+            "judge_validation_retries": self.config.evaluation.judge_validation_retries,
+            "invalid_evaluation_retries": self.config.evaluation.invalid_evaluation_retries,
+            "max_tool_steps": self.config.evaluation.max_tool_steps,
+            "max_api_requests_per_generation": self.config.evaluation.max_api_requests_per_generation,
+            "max_api_requests_per_run": self.config.evaluation.max_api_requests_per_run,
+            "rate_limit_backoff_seconds": self.config.evaluation.rate_limit_backoff_seconds,
             "max_generations": self.config.max_generations,
             "max_turns": self.config.evaluation.max_turns,
             "repetitions_per_case": self.config.evaluation.repetitions,
             "model_metadata": model_metadata,
+            "estimated_workload": estimate,
             "split_manifest": self._split_manifest_provenance(),
             **self._git_provenance(),
             "requested_output_dir": str(self.requested_output_dir),
@@ -400,6 +574,8 @@ class EvolutionRunner:
         start = (max(completed) + 1) if self.config.persistence.resume and completed else 0
         customer = self._load_policy("customer_policy", CustomerPolicy())
         service = self._load_policy("service_policy", ServicePolicy())
+        self._active_customer_policy = customer
+        self._active_service_policy = service
         if not self.config.persistence.resume or not (self.store.run_dir / "environment/initial_service_policy.json").exists():
             self.store.write_json("environment/initial_customer_policy.json", CustomerPolicy().to_dict())
             self.store.write_json("environment/initial_service_policy.json", ServicePolicy().to_dict())
@@ -430,6 +606,7 @@ class EvolutionRunner:
                     frontier=self.frontier.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
                     archive_summary=self.attack_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
                 )
+                self._active_customer_policy = customer
                 customer_evaluation_inconclusive = bool(scores) and not any(
                     score.episodes > 0 for score in scores
                 )
@@ -521,6 +698,7 @@ class EvolutionRunner:
                     defense_summary=self.defense_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
                     historical_summary=self.service_evolver.last_candidate_records[-max(1, self.config.evaluation.summary_limit):],
                 )
+                self._active_service_policy = service
                 self.store.write_json(f"generations/gen_{generation:03d}/service_gate.json", {
                     "accepted": decision.accepted, "reason": decision.reason, "delta": decision.delta,
                     "patch": patch.to_dict() if patch else None,
@@ -577,6 +755,14 @@ class EvolutionRunner:
                 "customer_policy_id": customer.policy_id,
                 "orchestration": self._runtime_stats(),
             })
+            if self.request_budget is not None:
+                gen_stats = self.request_budget.snapshot().get("generations", {}).get(str(generation), {})
+                used = gen_stats.get("provider_attempts", 0)
+                limit = self.config.evaluation.max_api_requests_per_generation
+                print(
+                    f"[G{generation} complete] provider_attempts={used} "
+                    f"generation_budget={used}/{limit if limit is not None else 'unbounded'}"
+                )
             generation_metrics = aggregate_episode_metrics(episodes)
             history.append({
                 "generation": generation,
@@ -595,6 +781,9 @@ class EvolutionRunner:
         orchestration_metrics = self._runtime_stats()
         orchestration_metrics["wall_time_seconds"] = time.monotonic() - run_started
         self.store.write_json("analysis/orchestration_metrics.json", orchestration_metrics)
+        if self.request_budget is not None:
+            self.store.write_json("analysis/request_budget.json", self.request_budget.snapshot())
+        self._update_effective_thinking_provenance()
         report = generate_report(self.store.run_dir)
         return {
             "run_dir": str(self.store.run_dir),

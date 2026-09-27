@@ -41,6 +41,8 @@ class LLMJudge:
         llm_client: LLMClient,
         temperature: float = 0.3,  # 降低温度以获得更一致的评估
         max_tokens: int = 1024,
+        validation_retries: int = 2,
+        rate_limit_backoff_seconds: float = 0.0,
     ):
         """
         初始化LLM评判模型
@@ -53,6 +55,8 @@ class LLMJudge:
         self.llm_client = llm_client
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.validation_retries = max(0, int(validation_retries))
+        self.rate_limit_backoff_seconds = max(0.0, float(rate_limit_backoff_seconds or 0.0))
     
     @classmethod
     def calculate_chat_quality_score(cls, dimensions: Dict[str, int]) -> float:
@@ -115,7 +119,7 @@ class LLMJudge:
         scenario_id: str = "online_education",
         context_data: Optional[Dict[str, Any]] = None,
         use_rule_verification: bool = True,  # 是否使用规则引擎验证
-        max_retries: int = 2,  # 最大重试次数
+        max_retries: Optional[int] = None,  # 最大规则校验重试次数
     ) -> Dict[str, Any]:
         """
         综合评估单轮对话 - 一次性输出分类Ground Truth和话术质量评分
@@ -139,6 +143,8 @@ class LLMJudge:
                 "verification_result": {...}  # 验证结果(如果启用)
             }
         """
+        if max_retries is None:
+            max_retries = self.validation_retries
         dialogue_context = ""
         if dialogue_history:
             dialogue_context = self._build_dialogue_context(dialogue_history, max_turns=turn_id + 1)
@@ -263,15 +269,17 @@ class LLMJudge:
                 return result
                 
             except Exception as e:
+                if getattr(e, "budget_exhausted", False):
+                    raise
                 # 检查是否是429错误(请求速率限制)
                 error_str = str(e)
                 is_429 = "429" in error_str or "rate limit" in error_str.lower() or "too many requests" in error_str.lower()
                 
                 if is_429:
-                    logger.warning(f"遇到429错误(请求速率限制),等待120秒后重试... (attempt {attempt + 1})")
+                    logger.warning(f"遇到429错误(请求速率限制), backoff={self.rate_limit_backoff_seconds}s")
                     import time
-                    time.sleep(120)
-                    logger.info(f"等待完成,继续重试 (attempt {attempt + 1})")
+                    if self.rate_limit_backoff_seconds:
+                        time.sleep(self.rate_limit_backoff_seconds)
                 else:
                     logger.error(f"Error in evaluate_turn_comprehensive (attempt {attempt + 1}): {e}")
                 
@@ -372,17 +380,17 @@ class LLMJudge:
                 }
         
         except Exception as e:
+            if getattr(e, "budget_exhausted", False):
+                raise
             # 检查是否是429错误(请求速率限制)
             error_str = str(e)
             is_429 = "429" in error_str or "rate limit" in error_str.lower() or "too many requests" in error_str.lower()
             
             if is_429:
-                logger.warning(f"遇到429错误(请求速率限制),等待120秒后重试...")
+                logger.warning(f"遇到429错误(请求速率限制), backoff={self.rate_limit_backoff_seconds}s")
                 import time
-                time.sleep(120)
-                logger.info(f"等待完成,重新调用evaluate_chat_quality")
-                # 递归重试一次
-                return self.evaluate_chat_quality(chat_text, user_message, dialogue_context, evaluation_criteria)
+                if self.rate_limit_backoff_seconds:
+                    time.sleep(self.rate_limit_backoff_seconds)
             
             logger.error(f"Error in evaluate_chat_quality: {e}")
             return 0.5, {
@@ -923,6 +931,8 @@ class LLMJudge:
         llm_client: LLMClient,
         temperature: float = 0.3,  # 降低温度以获得更一致的评估
         max_tokens: int = 1024,
+        validation_retries: int = 2,
+        rate_limit_backoff_seconds: float = 0.0,
     ):
         """
         初始化LLM评判模型
@@ -935,6 +945,8 @@ class LLMJudge:
         self.llm_client = llm_client
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.validation_retries = max(0, int(validation_retries))
+        self.rate_limit_backoff_seconds = max(0.0, float(rate_limit_backoff_seconds or 0.0))
     
     @classmethod
     def calculate_chat_quality_score(cls, dimensions: Dict[str, int]) -> float:
@@ -997,7 +1009,7 @@ class LLMJudge:
         scenario_id: str = "online_education",
         context_data: Optional[Dict[str, Any]] = None,
         use_rule_verification: bool = True,  # 是否使用规则引擎验证
-        max_retries: int = 2,  # 最大重试次数
+        max_retries: Optional[int] = None,  # 最大规则校验重试次数
     ) -> Dict[str, Any]:
         """
         综合评估单轮对话 - 一次性输出分类Ground Truth和话术质量评分
@@ -1021,6 +1033,8 @@ class LLMJudge:
                 "verification_result": {...}  # 验证结果(如果启用)
             }
         """
+        if max_retries is None:
+            max_retries = self.validation_retries
         dialogue_context = ""
         if dialogue_history:
             dialogue_context = self._build_dialogue_context(dialogue_history, max_turns=turn_id + 1)
@@ -1167,15 +1181,17 @@ class LLMJudge:
                     return result
                 
             except Exception as e:
+                if getattr(e, "budget_exhausted", False):
+                    raise
                 # 检查是否是429错误(请求速率限制)
                 error_str = str(e)
                 is_429 = "429" in error_str or "rate limit" in error_str.lower() or "too many requests" in error_str.lower()
                 
                 if is_429:
-                    logger.warning(f"遇到429错误(请求速率限制),等待120秒后重试... (attempt {attempt + 1})")
+                    logger.warning(f"遇到429错误(请求速率限制), backoff={self.rate_limit_backoff_seconds}s")
                     import time
-                    time.sleep(120)
-                    logger.info(f"等待完成,继续重试 (attempt {attempt + 1})")
+                    if self.rate_limit_backoff_seconds:
+                        time.sleep(self.rate_limit_backoff_seconds)
                 else:
                     logger.error(f"Error in evaluate_turn_comprehensive (attempt {attempt + 1}): {e}")
                 
@@ -1276,17 +1292,17 @@ class LLMJudge:
                 }
         
         except Exception as e:
+            if getattr(e, "budget_exhausted", False):
+                raise
             # 检查是否是429错误(请求速率限制)
             error_str = str(e)
             is_429 = "429" in error_str or "rate limit" in error_str.lower() or "too many requests" in error_str.lower()
             
             if is_429:
-                logger.warning(f"遇到429错误(请求速率限制),等待120秒后重试...")
+                logger.warning(f"遇到429错误(请求速率限制), backoff={self.rate_limit_backoff_seconds}s")
                 import time
-                time.sleep(120)
-                logger.info(f"等待完成,重新调用evaluate_chat_quality")
-                # 递归重试一次
-                return self.evaluate_chat_quality(chat_text, user_message, dialogue_context, evaluation_criteria)
+                if self.rate_limit_backoff_seconds:
+                    time.sleep(self.rate_limit_backoff_seconds)
             
             logger.error(f"Error in evaluate_chat_quality: {e}")
             return 0.5, {
@@ -2204,15 +2220,18 @@ class MultiModelVotingJudge:
                 logger.info(f"【Judge-{idx}】{model_name} ✓ 评测完成")
             
             except Exception as e:
+                if getattr(e, "budget_exhausted", False):
+                    raise
                 # 检查是否是429错误(请求速率限制)
                 error_str = str(e)
                 is_429 = "429" in error_str or "rate limit" in error_str.lower() or "too many requests" in error_str.lower()
                 
                 if is_429:
-                    logger.warning(f"【Judge-{idx}】{model_name} 遇到429错误,等待120秒后重试...")
+                    logger.warning(f"【Judge-{idx}】{model_name} 遇到429错误, fast-fail/backoff disabled")
                     import time
-                    time.sleep(120)
-                    logger.info(f"【Judge-{idx}】{model_name} 等待完成,重新调用...")
+                    backoff = float(getattr(self, "rate_limit_backoff_seconds", 0.0) or 0.0)
+                    if backoff:
+                        time.sleep(backoff)
                     # 重试一次
                     try:
                         result = judge.evaluate_turn_comprehensive(
@@ -2241,6 +2260,8 @@ class MultiModelVotingJudge:
                         
                         logger.info(f"【Judge-{idx}】{model_name} ✓ 重试成功")
                     except Exception as retry_e:
+                        if getattr(retry_e, "budget_exhausted", False):
+                            raise
                         logger.error(f"【Judge-{idx}】{model_name} ✗ 重试仍失败: {retry_e}", exc_info=True)
                         individual_results[model_name] = {"error": str(retry_e)}
                 else:

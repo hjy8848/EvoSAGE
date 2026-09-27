@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterable, Protocol
 from .attribution import infer_failure_attribution, infer_failure_location
 from .customer_behavior_validity import assess_customer_behavior
 from .schemas import CustomerPolicy, EpisodeResult, ServicePolicy
+from .request_budget import request_context
 
 
 class EpisodeEvaluator(Protocol):
@@ -295,7 +296,7 @@ class EvoSAGEEpisodeEvaluator:
     def __init__(self, pipeline_factory: Callable[..., Any], user_policy_mode: str = "truthful",
                  judge_in_evolution: bool = False, cache_namespace: str = "default",
                  cache_path: str | Path | None = None, reset_cache: bool = False,
-                 invalid_evaluation_retries: int = 1):
+                 invalid_evaluation_retries: int = 1, request_budget=None):
         self.pipeline_factory = pipeline_factory
         self.user_policy_mode = user_policy_mode
         self.judge_in_evolution = judge_in_evolution
@@ -308,6 +309,7 @@ class EvoSAGEEpisodeEvaluator:
         )
         self._reset_cache = reset_cache
         self.invalid_evaluation_retries = max(0, int(invalid_evaluation_retries))
+        self.request_budget = request_budget
         self._cache_lock = threading.Lock()
         self._pipelines = []
         self._pipeline_lock = threading.Lock()
@@ -334,6 +336,21 @@ class EvoSAGEEpisodeEvaluator:
         if self.judge_in_evolution:
             return True
         return phase not in self._FAST_PHASES
+
+    def _print_phase_summary(self, generation: int, phase: str) -> None:
+        if self.request_budget is None:
+            return
+        summary = self.request_budget.phase_summary(generation, phase)
+        snapshot = self.request_budget.snapshot()
+        used = snapshot.get("generations", {}).get(str(generation), {}).get("provider_attempts", 0)
+        limit = snapshot.get("limits", {}).get("per_generation")
+        print(
+            f"[G{generation} {phase}] episodes={summary.get('episodes', 0)} "
+            f"provider_attempts={summary.get('provider_attempts', 0)} "
+            f"tokens={summary.get('input_tokens', 0) + summary.get('output_tokens', 0)} "
+            f"latency={summary.get('latency_seconds', 0.0):.1f}s "
+            f"generation_budget={used}/{limit if limit is not None else 'unbounded'}"
+        )
 
     def _cache_key(self, customer_policy, service_policy, case, split, generation, judge_enabled):
         payload = {
@@ -544,6 +561,8 @@ class EvoSAGEEpisodeEvaluator:
 
     def evaluate(self, customer_policy, service_policy, cases, split, generation, phase):
         cases = list(cases)
+        if self.request_budget is not None:
+            self.request_budget.record_episodes(len(cases), generation, phase)
         judge_enabled = self._use_llm_judge(phase)
         outputs = [None] * len(cases)
         missing = []
@@ -559,6 +578,7 @@ class EvoSAGEEpisodeEvaluator:
                 self.cache_hits += 1
 
         if not missing:
+            self._print_phase_summary(generation, phase)
             return outputs
 
         # Policies are pipeline-construction state.  Older factories that do
@@ -595,16 +615,19 @@ class EvoSAGEEpisodeEvaluator:
                 report = None
                 terminal_customer_invalid = False
                 try:
-                    simulation, report = self._call_pipeline(
-                        pipeline,
-                        getattr(case, "intent", "refund_before_shipping"),
-                        run_kwargs,
-                    )
+                    with request_context(generation, phase):
+                        simulation, report = self._call_pipeline(
+                            pipeline,
+                            getattr(case, "intent", "refund_before_shipping"),
+                            run_kwargs,
+                        )
                     episode = self.from_evosage(
                         simulation, report, customer_policy, service_policy, split, generation, phase,
                         path_config=getattr(case, "path_config", None),
                     )
                 except Exception as exc:
+                    if getattr(exc, "budget_exhausted", False):
+                        raise
                     reason = _exception_invalid_reason(exc)
                     terminal_customer_invalid = bool(
                         getattr(exc, "customer_simulator_protocol_invalid", False)
@@ -657,6 +680,7 @@ class EvoSAGEEpisodeEvaluator:
                     self._persist_episode(key, cached_episode)
             self.real_episode_count += 1
             outputs[index] = episode
+        self._print_phase_summary(generation, phase)
         return outputs
 
     def get_stats(self) -> dict[str, Any]:

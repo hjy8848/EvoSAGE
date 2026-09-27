@@ -85,8 +85,50 @@ def _is_timeout_exception(exc: BaseException) -> bool:
     )
 
 
+def _is_unsupported_thinking_error(value: Any) -> bool:
+    """Recognize explicit provider rejection of the optional thinking field."""
+    response = getattr(value, "response", None)
+    body = ""
+    if response is not None:
+        try:
+            body = response.text or ""
+        except Exception:
+            body = ""
+    text = f"{value} {body}".lower()
+    return "thinking" in text and any(
+        marker in text for marker in ("unsupported", "not supported", "unknown", "unrecognized", "not allowed", "extra field")
+    )
+
+
+def _is_rate_limit_error(value: Any) -> bool:
+    """Recognize 429 errors from LiteLLM's provider-specific wrappers."""
+    response = getattr(value, "response", None)
+    status = getattr(value, "status_code", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    try:
+        if int(status) == 429:
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = str(value).lower()
+    return "429" in text or "rate limit" in text or "too many requests" in text
+
+
 class LLMClient(ABC):
     """LLM客户端抽象基类"""
+
+    def _configure_runtime_controls(self, request_budget=None, request_role="unattributed",
+                                    rate_limit_backoff_seconds=0.0) -> None:
+        self.request_budget = request_budget
+        self.request_role = request_role
+        self.rate_limit_backoff_seconds = max(0.0, float(rate_limit_backoff_seconds or 0.0))
+        self.thinking_effective = "unknown"
+
+    def _before_api_request(self, attempt: int) -> None:
+        if self.request_budget is not None:
+            self.request_budget.before_attempt(self.request_role, attempt)
+        self._record_request(attempt)
 
     def _init_request_stats(self) -> None:
         self.request_count = 0
@@ -120,7 +162,12 @@ class LLMClient(ABC):
                 self.timeouts = getattr(self, "timeouts", 0) + 1
 
     def _record_failed_attempt(self, started_at: float, timeout: bool = False) -> None:
-        self._record_attempt_timing(time.perf_counter() - started_at, success=False, timeout=timeout)
+        elapsed = time.perf_counter() - started_at
+        self._record_attempt_timing(elapsed, success=False, timeout=timeout)
+        if self.request_budget is not None:
+            self.request_budget.record_result(
+                self.request_role, latency_seconds=elapsed, success=False, timeout=timeout,
+            )
 
     def _record_completed(self, input_tokens: int = 0, output_tokens: int = 0,
                           latency_seconds: float = 0.0) -> None:
@@ -128,6 +175,11 @@ class LLMClient(ABC):
         self.output_tokens = getattr(self, "output_tokens", 0) + int(output_tokens or 0)
         self.latency_seconds = getattr(self, "latency_seconds", 0.0) + float(latency_seconds or 0.0)
         self._record_attempt_timing(latency_seconds, success=True)
+        if self.request_budget is not None:
+            self.request_budget.record_result(
+                self.request_role, input_tokens=input_tokens, output_tokens=output_tokens,
+                latency_seconds=latency_seconds, success=True,
+            )
 
     def request_stats(self) -> Dict[str, Any]:
         return {
@@ -525,6 +577,9 @@ class OpenAIAPIClient(LLMClient):
         model_name: str = "gpt-3.5-turbo",
         timeout: int = 300,
         max_retries: int = 3,
+        request_budget=None,
+        request_role: str = "unattributed",
+        rate_limit_backoff_seconds: float = 0.0,
     ):
         """
         初始化OpenAI兼容API客户端
@@ -541,6 +596,7 @@ class OpenAIAPIClient(LLMClient):
         self.model_name = model_name
         self.timeout = timeout
         self.max_retries = max_retries
+        self._configure_runtime_controls(request_budget, request_role, rate_limit_backoff_seconds)
         self._init_request_stats()
     
     def _filter_think_tags(self, text: str) -> str:
@@ -605,10 +661,14 @@ class OpenAIAPIClient(LLMClient):
             "Content-Type": "application/json",
         }
         
-        for attempt in range(self.max_retries):
+        thinking_requested = (kwargs.get("thinking") or {}).get("type") if isinstance(kwargs.get("thinking"), dict) else None
+        thinking_effective = "provider_default" if thinking_requested is None else "unknown"
+        thinking_fallback_used = False
+        attempts_allowed = self.max_retries + (1 if thinking_requested is not None else 0)
+        for attempt in range(attempts_allowed):
+            self._before_api_request(attempt)
+            request_started = time.perf_counter()
             try:
-                self._record_request(attempt)
-                request_started = time.perf_counter()
                 response = requests.post(
                     url,
                     json=payload,
@@ -629,6 +689,7 @@ class OpenAIAPIClient(LLMClient):
                     text = self._filter_think_tags(text)
                     usage = data.get("usage", {}) or {}
                     latency_seconds = time.perf_counter() - request_started
+                    self.thinking_effective = thinking_effective
                     self._record_completed(
                         usage.get("prompt_tokens", 0),
                         usage.get("completion_tokens", 0),
@@ -645,6 +706,8 @@ class OpenAIAPIClient(LLMClient):
                             "attempts": attempt + 1,
                             "usage": usage,
                             "latency_seconds": latency_seconds,
+                            "thinking_requested": thinking_requested or "default",
+                            "thinking_effective": thinking_effective,
                         },
                         tool_calls=tool_calls,
                         raw_response=data,
@@ -662,10 +725,25 @@ class OpenAIAPIClient(LLMClient):
             
             except requests.exceptions.HTTPError as e:
                 self._record_failed_attempt(request_started)
+                if (
+                    thinking_requested is not None
+                    and not thinking_fallback_used
+                    and "thinking" in payload
+                    and _is_unsupported_thinking_error(e)
+                ):
+                    payload.pop("thinking", None)
+                    thinking_fallback_used = True
+                    thinking_effective = "unsupported/not_applied"
+                    self.thinking_effective = thinking_effective
+                    continue
                 if e.response.status_code == 429:
-                    logger.warning(f"Rate limit exceeded (429) on attempt {attempt + 1}/{self.max_retries}. Waiting 120 seconds...")
+                    logger.warning(
+                        "Rate limit exceeded (429) on attempt %s/%s; backoff=%ss",
+                        attempt + 1, self.max_retries, self.rate_limit_backoff_seconds,
+                    )
                     if attempt < self.max_retries - 1:
-                        time.sleep(120)
+                        if self.rate_limit_backoff_seconds:
+                            time.sleep(self.rate_limit_backoff_seconds)
                         continue
                     else:
                         raise
@@ -702,12 +780,16 @@ class LiteLLMClient(LLMClient):
         model_name: str = "gpt-3.5-turbo",
         timeout: int = 300,
         max_retries: int = 3,
+        request_budget=None,
+        request_role: str = "unattributed",
+        rate_limit_backoff_seconds: float = 0.0,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
         self.timeout = timeout
         self.max_retries = max_retries
+        self._configure_runtime_controls(request_budget, request_role, rate_limit_backoff_seconds)
         self._init_request_stats()
 
     @staticmethod
@@ -753,12 +835,18 @@ class LiteLLMClient(LLMClient):
             payload["tools"] = kwargs["tools"]
         if kwargs.get("tool_choice") is not None:
             payload["tool_choice"] = kwargs["tool_choice"]
+        thinking_requested = (kwargs.get("thinking") or {}).get("type") if isinstance(kwargs.get("thinking"), dict) else None
+        thinking_effective = "provider_default" if thinking_requested is None else "unknown"
+        thinking_fallback_used = False
+        if kwargs.get("thinking") is not None:
+            payload["thinking"] = kwargs["thinking"]
 
         litellm.suppress_debug_info = True
-        for attempt in range(self.max_retries):
+        attempts_allowed = self.max_retries + (1 if thinking_requested is not None else 0)
+        for attempt in range(attempts_allowed):
+            self._before_api_request(attempt)
+            request_started = time.perf_counter()
             try:
-                self._record_request(attempt)
-                request_started = time.perf_counter()
                 response = litellm.completion(**payload)
                 raw_response = self._as_dict(response)
                 choices = raw_response.get("choices") or []
@@ -770,6 +858,7 @@ class LiteLLMClient(LLMClient):
                 tool_calls = _parse_tool_calls(assistant_message)
                 usage = self._as_dict(raw_response.get("usage"))
                 latency_seconds = time.perf_counter() - request_started
+                self.thinking_effective = thinking_effective
                 self._record_completed(
                     usage.get("prompt_tokens", 0),
                     usage.get("completion_tokens", 0),
@@ -785,6 +874,8 @@ class LiteLLMClient(LLMClient):
                         "attempts": attempt + 1,
                         "usage": usage,
                         "latency_seconds": latency_seconds,
+                        "thinking_requested": thinking_requested or "default",
+                        "thinking_effective": thinking_effective,
                     },
                     tool_calls=tool_calls,
                     raw_response=raw_response,
@@ -794,6 +885,18 @@ class LiteLLMClient(LLMClient):
                 # different classes depending on the transport.  Preserve a
                 # reliable timeout counter even when the gateway does not
                 # expose requests.exceptions.Timeout directly.
+                if (
+                    thinking_requested is not None
+                    and not thinking_fallback_used
+                    and "thinking" in payload
+                    and _is_unsupported_thinking_error(exc)
+                ):
+                    self._record_failed_attempt(request_started)
+                    payload.pop("thinking", None)
+                    thinking_fallback_used = True
+                    thinking_effective = "unsupported/not_applied"
+                    self.thinking_effective = thinking_effective
+                    continue
                 self._record_failed_attempt(request_started, timeout=_is_timeout_exception(exc))
                 if attempt >= self.max_retries - 1:
                     raise
@@ -801,7 +904,11 @@ class LiteLLMClient(LLMClient):
                     "LiteLLM request failed on attempt %s/%s: %s",
                     attempt + 1, self.max_retries, exc,
                 )
-                time.sleep(2 ** attempt)
+                if _is_rate_limit_error(exc):
+                    if self.rate_limit_backoff_seconds:
+                        time.sleep(self.rate_limit_backoff_seconds)
+                else:
+                    time.sleep(2 ** attempt)
         raise RuntimeError(f"LiteLLM failed after {self.max_retries} attempts")
 
 

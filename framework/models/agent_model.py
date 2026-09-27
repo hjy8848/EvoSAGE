@@ -342,7 +342,7 @@ class AgentModel:
     def __init__(self, scenario_id: str, sop_graph, system_prompt: str = "", 
                  use_llm_for_classification: bool = False, llm_client=None,
                  use_llm_for_full_output: bool = True, max_tokens: int = 1536,
-                 tool_contract_config=None):
+                 tool_contract_config=None, thinking_mode: Optional[str] = None):
         """
         初始化客服模型
         
@@ -361,6 +361,9 @@ class AgentModel:
         self.use_llm_for_full_output = use_llm_for_full_output
         self.llm_client = llm_client
         self.max_tokens = max_tokens
+        if thinking_mode not in {None, "enabled", "disabled"}:
+            raise ValueError("thinking_mode must be None, 'enabled', or 'disabled'")
+        self.thinking_mode = thinking_mode
         self.tool_contract_config = ToolContractConfig.from_value(tool_contract_config)
         
         # 状态管理
@@ -1041,6 +1044,8 @@ class AgentModel:
                     "temperature": 0.1,
                     "max_tokens": self.max_tokens,
                 }
+                if self.thinking_mode is not None:
+                    generation_kwargs["thinking"] = {"type": self.thinking_mode}
                 if backend_environment is not None:
                     generation_kwargs["tools"] = backend_environment.get_tool_definitions()
                     generation_kwargs["tool_choice"] = "auto"
@@ -1153,6 +1158,14 @@ class AgentModel:
                         ],
                     },
                     "request_id": request_id,
+                    "thinking_requested": (
+                        response_metadata.get("thinking_requested", self.thinking_mode or "default")
+                        if isinstance(response_metadata, dict) else self.thinking_mode or "default"
+                    ),
+                    "thinking_effective": (
+                        response_metadata.get("thinking_effective", "unknown")
+                        if isinstance(response_metadata, dict) else "unknown"
+                    ),
                     "latency_seconds": (
                         response_metadata.get("latency_seconds")
                         if isinstance(response_metadata, dict) else None
@@ -1604,6 +1617,8 @@ class AgentModel:
             return turn_output
             
         except Exception as e:
+            if getattr(e, "budget_exhausted", False):
+                raise
             import traceback
             import logging
             logger = logging.getLogger(__name__)
