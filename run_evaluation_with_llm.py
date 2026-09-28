@@ -615,6 +615,7 @@ class LLMEvaluationPipeline:
                     case_spec=case_spec,
                     thinking_mode=self.customer_thinking_mode,
                     protocol_retry_limit=self.customer_protocol_retries,
+                    customer_policy=compiled_policy,
                 )
             else:
                 # Real co-evolution uses the LLM customer with a validated,
@@ -629,6 +630,7 @@ class LLMEvaluationPipeline:
                     case_spec=case_spec,
                     thinking_mode=self.customer_thinking_mode,
                     protocol_retry_limit=self.customer_protocol_retries,
+                    customer_policy=compiled_policy,
                 )
         elif self.user_simulator_mode == "rule":
             user_model = RuleUserModel(user_profile, user_system_prompt, case_spec)

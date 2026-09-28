@@ -63,7 +63,10 @@ def response_with_json(action, path=None, chat="已根据后台结果完成处�
     )
 
 
-def make_case(shipping_status="Signed", credit_level="Low", expected_action="CollectionService"):
+def make_case(
+    shipping_status="Signed", credit_level="Low", expected_action="CollectionService",
+    disclosure_variant="opening",
+):
     path = {
         "Classification_items": ["ReturnOrRefund", True, "User", "Reasonable", "Calm"],
         "system_variables": {
@@ -74,7 +77,8 @@ def make_case(shipping_status="Signed", credit_level="Low", expected_action="Col
         "final_output": {"Action": expected_action},
     }
     case = build_case_spec(
-        "ecommerce_refund", "refund_request", path, user_id="e2e-user"
+        "ecommerce_refund", "refund_request", path, user_id="e2e-user",
+        disclosure_variant=disclosure_variant,
     )
     return case
 
@@ -332,7 +336,7 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         self.assertEqual(report.environment_goal_fulfillment, 1.0)
 
     def test_recoverable_failed_query_and_action_can_continue_on_next_customer_turn(self):
-        case = make_case("Unshipped", "High", "Refund")
+        case = make_case("Unshipped", "High", "Refund", disclosure_variant="on_request")
         order_id = case.user_knowledge["order_id"]
         client = ScriptedClient([
             response_with_tools(ToolCall("bad-query", "query_order", {"order_id": ""})),

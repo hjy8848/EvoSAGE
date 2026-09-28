@@ -24,6 +24,41 @@ logger = logging.getLogger(__name__)
 
 CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT = 1
 
+_CUSTOMER_IDENTIFIER_KNOWS_FLAGS = {
+    "order_id": "knows_order_id",
+    "customer_id": "knows_customer_id",
+    "record_id": "knows_record_id",
+    "booking_id": "knows_booking_id",
+    "ticket_id": "knows_ticket_id",
+    "account_id": "knows_account_id",
+}
+_CUSTOMER_IDENTIFIER_REVEAL_FLAGS = {
+    "order_id": "reveal_order_id_on_request",
+    "customer_id": "reveal_customer_id_on_request",
+    "record_id": "reveal_record_id_on_request",
+    "booking_id": "reveal_booking_id_on_request",
+    "ticket_id": "reveal_ticket_id_on_request",
+    "account_id": "reveal_account_id_on_request",
+}
+_CUSTOMER_IDENTIFIER_LABELS = {
+    "order_id": "订单号",
+    "customer_id": "客户号",
+    "record_id": "记录号",
+    "booking_id": "预订编号",
+    "ticket_id": "票号",
+    "account_id": "账户号",
+}
+_CUSTOMER_CLAIM_KINDS = {"FACT", "CUSTOMER_STATE", "PREFERENCE", "REQUEST", "OPINION"}
+_CUSTOMER_CLAIM_BASES = {
+    "KNOWN_FACT", "CUSTOMER_BELIEF", "CUSTOMER_STATE", "DIALOGUE_LEARNED",
+    "POLICY_AUTHORIZED_DECEPTION", "NOT_APPLICABLE",
+}
+_CUSTOMER_CLAIM_FIELDS = (
+    "order_id, customer_id, record_id, product_name, product_variant, model, size, "
+    "color, quantity, shipping_status, delivery_status, received, purchase_date, "
+    "return_reason, exchange_reason"
+)
+
 
 class CustomerSimulatorProtocolError(RuntimeError):
     """Raised when a Customer message remains invalid after one retry."""
@@ -57,6 +92,7 @@ class LLMUserModel(UserModel):
         case_spec: Optional[CaseSpec] = None,
         thinking_mode: Optional[str] = None,
         protocol_retry_limit: int = CUSTOMER_SIMULATOR_PROTOCOL_RETRY_LIMIT,
+        customer_policy: Optional[Any] = None,
     ):
         """
         初始化LLM用户模型
@@ -73,16 +109,35 @@ class LLMUserModel(UserModel):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.case_spec = case_spec
+        self.customer_policy = customer_policy
+        self.customer_policy_guidance = (
+            customer_policy.runtime_guidance()
+            if customer_policy is not None
+            and callable(getattr(customer_policy, "runtime_guidance", None))
+            else ""
+        )
+        self.customer_policy_id = getattr(customer_policy, "policy_id", None)
+        self.customer_policy_fingerprint = (
+            customer_policy.semantic_fingerprint()
+            if customer_policy is not None
+            and callable(getattr(customer_policy, "semantic_fingerprint", None))
+            else None
+        )
         if thinking_mode not in {None, "enabled", "disabled"}:
             raise ValueError("thinking_mode must be None, 'enabled', or 'disabled'")
         self.thinking_mode = thinking_mode
         self.generation_retry_limit = max(0, int(protocol_retry_limit))
         self.customer_simulator_provenance: list[dict[str, Any]] = []
+        self._last_customer_claim_metadata: Optional[dict[str, Any]] = None
         self.backend_events = []
+        # Private knowledge is sourced only from the explicit CaseSpec
+        # customer-knowledge contract. Disclosure flags affect turn behavior,
+        # never whether a known fact exists in this state.
+        self.private_knowledge = self._extract_private_knowledge(case_spec)
         self.environment_state = UserEnvironmentState(
             goal=case_spec.user_goal if case_spec else {"type": profile.user_intent},
-            facts=case_spec.user_knowledge if case_spec else {},
-            known_facts=case_spec.user_knowledge if case_spec else {},
+            facts=copy.deepcopy(self.private_knowledge),
+            known_facts=copy.deepcopy(self.private_knowledge),
         )
         if case_spec:
             self.initialize_emotion_from_case(
@@ -105,6 +160,31 @@ class LLMUserModel(UserModel):
     def attach_case_spec(self, case_spec: CaseSpec) -> None:
         """Bind this customer simulator to one deterministic benchmark case."""
         self.case_spec = case_spec
+        self.private_knowledge = self._extract_private_knowledge(case_spec)
+        self.environment_state.facts = copy.deepcopy(self.private_knowledge)
+        self.environment_state.known_facts = copy.deepcopy(self.private_knowledge)
+
+    @staticmethod
+    def _extract_private_knowledge(case_spec: Optional[CaseSpec]) -> Dict[str, Any]:
+        """Copy facts explicitly known by the Customer, never backend truth.
+
+        Identifier values are included only when the corresponding ``knows_*``
+        flag is true. ``show_*_initially`` and ``reveal_*_on_request`` are
+        deliberately not consulted here; they are disclosure policy, not
+        knowledge state.
+        """
+        if case_spec is None:
+            return {}
+        source = case_spec.user_knowledge or {}
+        private: Dict[str, Any] = {}
+        for field, value in source.items():
+            if str(field).startswith("knows_") or value is None:
+                continue
+            knows_flag = _CUSTOMER_IDENTIFIER_KNOWS_FLAGS.get(str(field))
+            if knows_flag and not source.get(knows_flag):
+                continue
+            private[str(field)] = copy.deepcopy(value)
+        return private
 
     def observe_backend_event(self, event: Dict[str, Any]) -> None:
         """Observe only the public result of a backend event.
@@ -151,6 +231,7 @@ class LLMUserModel(UserModel):
         return self._generate_protocol_checked_message(
             prompt, stage="opening", turn_index=0,
             required_order_id=self._mandatory_opening_order_id(),
+            policy_constraint_overrides=self._policy_constraint_overrides("opening"),
         )
     
     def generate_next_message(
@@ -188,6 +269,14 @@ class LLMUserModel(UserModel):
     def get_customer_simulator_provenance(self) -> list[dict[str, Any]]:
         return copy.deepcopy(self.customer_simulator_provenance)
 
+    def get_last_customer_claim_metadata(self) -> Optional[dict[str, Any]]:
+        """Return internal claims for the most recently generated utterance.
+
+        The simulator stores this beside the user turn; only ``utterance`` is
+        returned to the Agent.
+        """
+        return copy.deepcopy(self._last_customer_claim_metadata)
+
     def _mandatory_opening_order_id(self) -> Optional[str]:
         """Return the required opening identifier from the shared contract."""
         return next((
@@ -195,6 +284,19 @@ class LLMUserModel(UserModel):
             for item in get_customer_opening_contract(self.case_spec)
             if item["field"] == "order_id"
         ), None)
+
+    def _policy_constraint_overrides(self, stage: str) -> list[dict[str, str]]:
+        if stage != "opening" or self.customer_policy is None:
+            return []
+        contract = get_customer_opening_contract(self.case_spec)
+        tags = set(getattr(self.customer_policy, "strategy_tags", []) or [])
+        if not contract or not ({"withholding", "delayed_disclosure"} & tags):
+            return []
+        return [{
+            "constraint": "mandatory_opening_disclosure",
+            "field": str(item["field"]),
+            "reason": "policy_constraint_overridden_by_case_contract",
+        } for item in contract]
 
     @staticmethod
     def _raw_response_content(response: Any) -> str:
@@ -219,6 +321,111 @@ class LLMUserModel(UserModel):
         text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]", text)
         text = re.sub(r"\bsk-[A-Za-z0-9_-]{16,}\b", "[REDACTED_API_KEY]", text)
         return text
+
+    @classmethod
+    def _parse_customer_response(cls, raw_content: str) -> tuple[str, dict[str, Any]]:
+        """Parse one same-call utterance/claims envelope conservatively.
+
+        Plain text is retained as an utterance for diagnosis, but marked as
+        missing structured metadata so it can never silently pass grounding.
+        """
+        raw = str(raw_content or "").strip()
+        candidate = raw
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.I)
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError) as exc:
+            # If the envelope is malformed but still contains a recoverable
+            # JSON string for utterance, preserve that user-side text. The
+            # metadata remains invalid and the evaluator will quarantine it.
+            recovered = ""
+            match = re.search(r'"utterance"\s*:\s*("(?:\\.|[^"\\])*")', candidate, re.S)
+            if match:
+                try:
+                    recovered = json.loads(match.group(1))
+                except (json.JSONDecodeError, TypeError):
+                    recovered = ""
+            if not recovered and not candidate.startswith("{"):
+                recovered = raw
+            return recovered, {
+                "required": True,
+                "parse_status": "invalid",
+                "parse_error": f"malformed_customer_response_json:{type(exc).__name__}",
+                "claims": [],
+                "declared_claims": [],
+                "raw_envelope": cls._safe_provenance_text(raw_content),
+            }
+
+        if not isinstance(parsed, dict):
+            return "", {
+                "required": True, "parse_status": "invalid",
+                "parse_error": "customer_response_envelope_not_object",
+                "claims": [], "declared_claims": [],
+                "raw_envelope": cls._safe_provenance_text(raw_content),
+            }
+
+        utterance = parsed.get("utterance")
+        if not isinstance(utterance, str) or not utterance.strip():
+            return "", {
+                "required": True, "parse_status": "invalid",
+                "parse_error": "customer_response_utterance_missing_or_invalid",
+                "claims": parsed.get("claims") if isinstance(parsed.get("claims"), list) else [],
+                "declared_claims": [],
+                "raw_envelope": cls._safe_provenance_text(raw_content),
+            }
+
+        raw_claims = parsed.get("claims")
+        error = None
+        normalized_claims: list[dict[str, Any]] = []
+        if not isinstance(raw_claims, list):
+            error = "customer_response_claims_missing_or_not_list"
+            raw_claims = []
+        else:
+            for index, claim in enumerate(raw_claims):
+                if not isinstance(claim, dict):
+                    error = f"customer_response_claim_{index}_not_object"
+                    continue
+                kind = str(claim.get("kind", "")).strip().upper()
+                field = claim.get("field")
+                value = claim.get("value")
+                basis = str(claim.get("basis", claim.get("epistemic_basis", ""))).strip().upper()
+                if kind not in _CUSTOMER_CLAIM_KINDS:
+                    error = f"customer_response_claim_{index}_invalid_kind"
+                    continue
+                if not isinstance(field, str) or not field.strip():
+                    error = f"customer_response_claim_{index}_invalid_field"
+                    continue
+                if isinstance(value, (dict, list)) or value is None or value == "":
+                    error = f"customer_response_claim_{index}_invalid_value"
+                    continue
+                if not basis and kind in {"PREFERENCE", "REQUEST", "OPINION"}:
+                    basis = "NOT_APPLICABLE"
+                if basis not in _CUSTOMER_CLAIM_BASES:
+                    error = f"customer_response_claim_{index}_invalid_or_missing_basis"
+                    continue
+                if kind in {"FACT", "CUSTOMER_STATE"} and basis == "NOT_APPLICABLE":
+                    error = f"customer_response_claim_{index}_grounded_claim_missing_basis"
+                    continue
+                if kind in {"PREFERENCE", "REQUEST", "OPINION"} and basis != "NOT_APPLICABLE":
+                    error = f"customer_response_claim_{index}_nonfactual_claim_has_grounding_basis"
+                    continue
+                normalized_claims.append({
+                    "kind": kind,
+                    "field": field.strip(),
+                    "value": copy.deepcopy(value),
+                    "basis": basis,
+                })
+
+        metadata = {
+            "required": True,
+            "parse_status": "valid" if error is None else "invalid",
+            "parse_error": error,
+            "claims": normalized_claims,
+            "declared_claims": copy.deepcopy(raw_claims),
+            "raw_envelope": cls._safe_provenance_text(raw_content),
+        }
+        return utterance, metadata
 
     @staticmethod
     def _response_finish_reason(response: Any) -> Optional[str]:
@@ -245,6 +452,7 @@ class LLMUserModel(UserModel):
         stage: str,
         turn_index: int,
         required_order_id: Optional[str] = None,
+        policy_constraint_overrides: Optional[list[dict[str, str]]] = None,
     ) -> str:
         attempts: list[dict[str, Any]] = []
         invalid_reason = "empty_message"
@@ -316,11 +524,13 @@ class LLMUserModel(UserModel):
                 )
                 invalid_reason = "timeout" if timed_out else "provider_error"
 
+            claim_metadata = None
             if response is not None:
                 if str(finish_reason or "").lower() in {"length", "max_tokens"}:
                     invalid_reason = "output_truncated"
                 else:
-                    cleaned = self._clean_generated_message(raw_content, record_courtesy=False)
+                    utterance, claim_metadata = self._parse_customer_response(raw_content)
+                    cleaned = self._clean_generated_message(utterance, record_courtesy=False)
                     if not cleaned.strip():
                         invalid_reason = "empty_message"
                     elif required_order_id and required_order_id not in cleaned:
@@ -344,18 +554,32 @@ class LLMUserModel(UserModel):
                 "reasoning_content_present": reasoning_content_present,
                 "provider_error": provider_error,
                 "timeout": timed_out,
-                "parse_status": "NOT_APPLICABLE",
+                "parse_status": (
+                    claim_metadata.get("parse_status") if claim_metadata else "NOT_APPLICABLE"
+                ),
+                "parse_error": claim_metadata.get("parse_error") if claim_metadata else None,
                 "generation_status": "valid" if not invalid_reason else "invalid",
                 "invalid_reason": invalid_reason or None,
             }
             attempts.append(attempt_record)
 
             if not invalid_reason:
+                self._last_customer_claim_metadata = copy.deepcopy(claim_metadata)
                 self.customer_simulator_provenance.append({
                     "stage": stage,
                     "turn_index": turn_index,
                     "thinking_mode": self.thinking_mode or "default",
+                    "customer_policy_id": self.customer_policy_id,
+                    "customer_policy_fingerprint": self.customer_policy_fingerprint,
+                    "policy_guidance_injected": bool(
+                        self.customer_policy_guidance or "【客户交互策略" in prompt
+                    ),
+                    "policy_constraint_overrides": copy.deepcopy(policy_constraint_overrides or []),
                     "status": "valid",
+                    "structured_claims_required": True,
+                    "claim_metadata_status": claim_metadata.get("parse_status"),
+                    "claim_metadata_error": claim_metadata.get("parse_error"),
+                    "declared_claims": copy.deepcopy(claim_metadata.get("declared_claims", [])),
                     "retry_count": attempt_index - 1,
                     "attempts": attempts,
                 })
@@ -366,7 +590,14 @@ class LLMUserModel(UserModel):
             "stage": stage,
             "turn_index": turn_index,
             "thinking_mode": self.thinking_mode or "default",
+            "customer_policy_id": self.customer_policy_id,
+            "customer_policy_fingerprint": self.customer_policy_fingerprint,
+            "policy_guidance_injected": bool(
+                self.customer_policy_guidance or "【客户交互策略" in prompt
+            ),
+            "policy_constraint_overrides": copy.deepcopy(policy_constraint_overrides or []),
             "status": "invalid",
+            "structured_claims_required": True,
             "invalid_reason": invalid_reason,
             "retry_count": max_attempts - 1,
             "attempts": attempts,
@@ -421,6 +652,9 @@ class LLMUserModel(UserModel):
         scenario_id = self.profile.scenario_id
         role_desc = self._get_role_description()
         emotion_line = self._emotion_prompt_line()
+        policy_block = ""
+        if self.customer_policy_guidance and self.customer_policy_guidance not in self.system_prompt:
+            policy_block = f"\n【当前 CustomerPolicy：本轮必须遵守】\n{self.customer_policy_guidance}\n"
         opening_contract = get_customer_opening_contract(self.case_spec)
         contract_text = ""
         if opening_contract:
@@ -446,15 +680,20 @@ class LLMUserModel(UserModel):
 【你的背景和问题】
 {self.system_prompt}
 
-【你实际知道的信息】
+【你私下知道的信息（只供你自己判断，不代表开场必须披露）】
 {self._known_case_facts_text()}
+【本轮披露时机】
+{self._disclosure_timing_text(stage="opening")}
+{policy_block}
 {contract_text}
 
 【要求】
 1. 根据身份、背景、已知信息和以上强制约定，生成第一条开场消息
-2. 消息自然、简洁(30-60字)，直接表达问题或诉求，并按对抗强度调整语气: {intensity_desc}
-3. 只提供当前诉求和必要事实；不要主动泄露无关信息，也不要为了多轮而隐藏必要事实
-4. 只输出下一条 Customer 消息本身，不要提供解释、分析或额外格式
+2. 消息自然、简洁(30-60字)，直接表达问题或诉求。对抗强度只能在不违反 CustomerPolicy 的范围内影响语气
+3. 只提供当前诉求和本轮披露约束允许的信息；不要提前披露尚未到时机的信息，也不要因暂缓披露而遗忘、猜测或编造事实
+4. 用一次响应输出 JSON：{{"utterance":"给客服看的自然语言","claims":[{{"kind":"FACT|CUSTOMER_STATE|PREFERENCE|REQUEST|OPINION","field":"字段名","value":"具体值","basis":"KNOWN_FACT|CUSTOMER_BELIEF|CUSTOMER_STATE|DIALOGUE_LEARNED|POLICY_AUTHORIZED_DECEPTION|NOT_APPLICABLE"}}]}}
+5. factual fields: {_CUSTOMER_CLAIM_FIELDS}。claims 列出 utterance 中明确表达的每个具体业务事实或会影响处理的客户状态。每个 FACT/CUSTOMER_STATE 必须选择真实来源：KNOWN_FACT 对应你私下明确知道的确定事实；CUSTOMER_BELIEF 对应私有信息中 believes_* 记录的个人信念（即使可能与后台真实状态不同，忠实表达也合法）；CUSTOMER_STATE 对应私有信息中明确记录的个人状态（如退货原因）；DIALOGUE_LEARNED 仅对应此前客服话语或公开工具结果中已经获得的信息；POLICY_AUTHORIZED_DECEPTION 仅在明确 deceptive_claim 策略允许时使用，且不得用于伪造标识符。模型填写 basis 不会自动获得授权，后台会核验来源。无来源时不要声称该业务事实/状态。普通偏好、请求、意见、情绪使用相应 kind 和 NOT_APPLICABLE，不把主观态度伪装成业务事实
+6. 只输出 JSON，不要代码围栏或解释。客服只会收到 utterance；claims 是内部核验元数据，不会展示给客服
 
 【你的第一条消息】
 """
@@ -512,6 +751,10 @@ class LLMUserModel(UserModel):
         scenario_id = self.profile.scenario_id
         role_desc = self._get_role_description()
         emotion_line = self._emotion_prompt_line()
+        policy_block = (
+            f"【当前 CustomerPolicy：此约束在每一轮持续有效】\n{self.customer_policy_guidance}\n"
+            if self.customer_policy_guidance else ""
+        )
         
         prompt = f"""你正在扮演{role_desc},继续与客服的对话。
 
@@ -522,11 +765,17 @@ class LLMUserModel(UserModel):
 - 当前轮次: {turn_count}
 - 场景: {scenario_id}
 
+【策略优先级】CaseSpec 硬约束 > 当前 CustomerPolicy > 通用人格/对抗强度。通用对抗强度不得推翻策略标签。
+{policy_block}
+
 【对话上下文】
 {dialogue_context}
 
-【你实际知道的信息】
+【你私下知道的信息（只供你自己判断，不代表现在必须披露）】
 {self._known_case_facts_text()}
+
+【本轮披露时机】
+{self._disclosure_timing_text(stage="reply", agent_last_message=agent_last_message)}
 
 【最近的业务事件】
 {self._recent_backend_event_text()}
@@ -541,43 +790,123 @@ class LLMUserModel(UserModel):
 2. 保持角色一致性,但避免过度礼貌导致对话无法结束
 3. 回复应该自然、简洁(20-50字),不要过度感谢
 4. 根据满意度和情感状态调整态度
-5. 只返回你的消息,不要有额外的说明
+5. 用一次响应输出 JSON：{{"utterance":"给客服看的自然语言","claims":[{{"kind":"FACT|CUSTOMER_STATE|PREFERENCE|REQUEST|OPINION","field":"字段名","value":"具体值","basis":"KNOWN_FACT|CUSTOMER_BELIEF|CUSTOMER_STATE|DIALOGUE_LEARNED|POLICY_AUTHORIZED_DECEPTION|NOT_APPLICABLE"}}]}}
+6. factual fields: {_CUSTOMER_CLAIM_FIELDS}。claims 列出本轮 utterance 明确表达的每个具体业务事实或会影响处理的客户状态。每个 FACT/CUSTOMER_STATE 必须按私有信息或先前公开对话选择真实 basis：KNOWN_FACT 对应明确知道的确定事实；CUSTOMER_BELIEF 对应 believes_* 个人信念，忠实表达 belief 即合法，不要求 belief 与后台真值相同，也不要求 mistaken_belief 标签；CUSTOMER_STATE 对应明确记录的个人业务状态（例如 return_reason）；DIALOGUE_LEARNED 对应先前客服消息或公开工具结果中已获知的信息；POLICY_AUTHORIZED_DECEPTION 只在 deceptive_claim 策略允许时使用且不能用于标识符。basis 必须有对应记录，不能靠模型自我授权。没有来源时不要声称业务事实/状态。普通偏好、请求、意见、情绪标为 PREFERENCE、REQUEST、OPINION，并使用 NOT_APPLICABLE，不要把业务相关原因伪装成请求或意见
+7. 只输出 JSON，不要代码围栏或解释。客服只会收到 utterance；claims 是内部核验元数据，不会展示给客服
 
 【你的下一条消息】
 """
         return prompt
 
     def _known_case_facts_text(self) -> str:
-        """Render only customer-known facts, never the full backend record."""
-        if not self.case_spec:
-            return "暂无额外结构化信息。"
-        knowledge = self.case_spec.user_knowledge or {}
+        """Render Customer-private CaseSpec facts, independent of disclosure timing."""
+        return json.dumps(self.private_knowledge, ensure_ascii=False)
+
+    @staticmethod
+    def _requested_identifier_field(message: str) -> Optional[str]:
+        text = str(message or "")
+        lower = text.casefold()
+        cues = {
+            "order_id": ("订单号", "订单编号", "order id", "order number", "order_id"),
+            "customer_id": ("客户号", "客户编号", "customer id", "customer number", "customer_id"),
+            "record_id": ("记录号", "记录编号", "record id", "record number", "record_id"),
+            "booking_id": ("预订编号", "预订号", "booking id", "booking number"),
+            "ticket_id": ("票号", "机票号", "ticket id", "ticket number"),
+            "account_id": ("账户号", "account id", "account number"),
+        }
+        return next((field for field, terms in cues.items() if any(term in lower for term in terms)), None)
+
+    def _prior_identifier_request_count(self, field: str, current_message: str) -> int:
+        assistant_messages = [
+            str(item.get("content", ""))
+            for item in self.dialogue_history
+            if item.get("role") == "assistant"
+        ]
+        if assistant_messages and assistant_messages[-1].strip() == str(current_message or "").strip():
+            assistant_messages = assistant_messages[:-1]
+        return sum(
+            self._requested_identifier_field(message) == field
+            for message in assistant_messages
+        )
+
+    @staticmethod
+    def _agent_explained_identifier_need(message: str) -> bool:
+        lower = str(message or "").casefold()
+        return any(term in lower for term in (
+            "为了核验", "用于核验", "需要核实", "用于查询", "订单核验", "验证订单",
+            "核实订单状态", "查询订单状态", "verify the order", "check the order status",
+            "to verify", "for verification", "to look up the order",
+        ))
+
+    def _disclosure_timing_text(self, stage: str, agent_last_message: str = "") -> str:
+        """Render turn-level disclosure instructions without mutating knowledge."""
+        if self.case_spec is None:
+            return "没有 CaseSpec 私有事实；不得猜测或编造具体标识符。"
         policy = self.case_spec.user_policy or {}
-        visible = {}
-        if (
-            knowledge.get("knows_order_id")
-            and knowledge.get("order_id")
-            and policy.get("show_order_id_initially", True)
-        ):
-            visible["order_id"] = knowledge["order_id"]
-        if knowledge.get("knows_record_id") and knowledge.get("record_id"):
-            visible["record_id"] = knowledge["record_id"]
-        if knowledge.get("knows_customer_id") and knowledge.get("customer_id"):
-            visible["customer_id"] = knowledge["customer_id"]
-        if knowledge.get("product_name"):
-            visible["product_name"] = knowledge["product_name"]
-        if knowledge.get("believes_shipping_status"):
-            visible["user_belief_about_shipping"] = knowledge["believes_shipping_status"]
-        visible["can_reveal_order_id_on_request"] = policy.get(
-            "reveal_order_id_on_request", False
-        )
-        visible["can_reveal_record_id_on_request"] = policy.get(
-            "reveal_record_id_on_request", False
-        )
-        visible["can_reveal_customer_id_on_request"] = policy.get(
-            "reveal_customer_id_on_request", False
-        )
-        return json.dumps(visible, ensure_ascii=False)
+        tags = set(getattr(self.customer_policy, "strategy_tags", []) or [])
+        lines = [
+            "私有知识和值不会因暂缓披露而消失。任何时候都不得猜测、改写或把一种标识符替换成另一种标识符。",
+            "若私有知识中没有某字段的值，应如实表示不知道；若知道但暂不披露，应如实说明暂缓，不要编造替代值。",
+        ]
+        opening_contract = get_customer_opening_contract(self.case_spec)
+        required_fields = {str(item["field"]) for item in opening_contract}
+        if stage == "opening":
+            order_id = self.private_knowledge.get("order_id")
+            if order_id:
+                if "order_id" in required_fields:
+                    lines.append(f"CaseSpec 要求开场披露真实订单号：{order_id}。必须逐字使用该值。")
+                elif policy.get("show_order_id_initially", True) is False:
+                    lines.append(
+                        f"你知道真实订单号 {order_id}，但本轮是开场且 show_order_id_initially=false；不要主动说出订单号。"
+                        "这只限制开场披露，不会删除你对订单号的知识。"
+                    )
+                else:
+                    lines.append(f"若开场确有必要提及订单号，只能使用真实值 {order_id}。")
+            elif not self.private_knowledge.get("order_id"):
+                lines.append("你没有已知订单号；开场不得猜测或编造订单号。")
+            return "\n".join(f"- {line}" for line in lines)
+
+        requested_field = self._requested_identifier_field(agent_last_message)
+        if requested_field:
+            label = _CUSTOMER_IDENTIFIER_LABELS[requested_field]
+            value = self.private_knowledge.get(requested_field)
+            knows_flag = _CUSTOMER_IDENTIFIER_KNOWS_FLAGS[requested_field]
+            reveal_flag = _CUSTOMER_IDENTIFIER_REVEAL_FLAGS[requested_field]
+            if value and self.case_spec.user_knowledge.get(knows_flag):
+                if policy.get(reveal_flag, False):
+                    should_withhold = (
+                        "withholding" in tags
+                        and not self._agent_explained_identifier_need(agent_last_message)
+                    )
+                    should_delay = (
+                        "delayed_disclosure" in tags
+                        and self._prior_identifier_request_count(requested_field, agent_last_message) == 0
+                    )
+                    if should_withhold:
+                        lines.append(
+                            f"客服本轮询问{label}。你私下知道的准确值是 {value}，且 CaseSpec 允许按请求披露；"
+                            "但 withholding 策略要求先确认必要性：本轮可礼貌询问为何需要，不要说出编号。"
+                            "客服解释用途后，按策略披露时必须原样使用该值。"
+                        )
+                    elif should_delay:
+                        lines.append(
+                            f"客服首次询问{label}。你私下知道的准确值是 {value}；delayed_disclosure 策略允许本轮暂缓一次，"
+                            "可以简短表示正在确认/请客服说明用途。后续披露时必须原样使用该值，绝不另造编号。"
+                        )
+                    else:
+                        lines.append(
+                            f"客服本轮询问{label}。你知道且获准披露；必须使用私有知识中的准确值 {value}，不能猜测或替换成其他编号。"
+                        )
+                else:
+                    lines.append(
+                        f"客服本轮询问{label}。你知道准确值 {value}，但 CaseSpec 当前不允许按请求披露；"
+                        "可以如实说明暂不提供，绝不可声称另一个编号是该字段值。"
+                    )
+            else:
+                lines.append(f"客服本轮询问{label}，但你并不知道该字段的值；明确表示不知道，不要猜测，也不要拿其他类型的编号代替。")
+        else:
+            lines.append("本轮没有明确询问某个标识符；不要无关地主动披露私有标识符。")
+        return "\n".join(f"- {line}" for line in lines)
 
     def _recent_backend_event_text(self) -> str:
         if not self.backend_events:

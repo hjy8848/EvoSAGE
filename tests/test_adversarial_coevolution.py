@@ -675,6 +675,10 @@ def test_policy_semantic_fingerprints_ignore_provenance_but_track_behavior():
     behavior_change.strategy_tags = ["truthful", "withholding"]
     assert customer_a.semantic_fingerprint() != behavior_change.semantic_fingerprint()
 
+    field_change = CustomerPolicy.from_dict(customer_a.to_dict())
+    field_change.pressure_strategy = "apply pressure only after a delay"
+    assert customer_a.semantic_fingerprint() != field_change.semantic_fingerprint()
+
 
 def test_service_semantic_fingerprint_tracks_compiled_rules_not_provenance():
     service_a = ServicePolicy(
@@ -1145,7 +1149,7 @@ def test_llm_generators_return_valid_structured_candidates_without_api():
             return Response(self.text)
 
     customer = CustomerPolicy()
-    generated = LLMCustomerPolicyGenerator(FakeClient('[{"name":"authority","description":"ask for an explanation","strategy_tags":["authority_challenge"],"disclosure_strategy":"answer necessary questions","pressure_strategy":"remain firm","contradiction_strategy":"ask for clarification","response_to_verification":"acknowledge the result","response_to_rejection":"request a reason"}]')).generate(customer, [], ServicePolicy(), 1, 1)
+    generated = LLMCustomerPolicyGenerator(FakeClient('[{"name":"authority","description":"ask for an explanation","strategy_tags":["authority_challenge"],"disclosure_strategy":"answer necessary questions","claim_strategy":"state only customer-known facts","pressure_strategy":"remain firm without urgency","contradiction_strategy":"ask for clarification","timing_strategy":"respond after a result","response_to_verification":"acknowledge the result","response_to_rejection":"request a reason","escalation_strategy":"escalate only if unresolved"}]')).generate(customer, [], ServicePolicy(), 1, 1)
     patch = LLMServicePatchGenerator(FakeClient(
         '[{"category":"VERIFICATION","trigger":{"type":"BEFORE_STATE_DEPENDENT_ACTION"},'
         '"obligations":[{"type":"VERIFY_WITH_TOOL"}],"prohibitions":[],'
@@ -1162,10 +1166,13 @@ def test_customer_generator_prompt_anchors_policy_to_customer_behavior():
                 '"description":"ask the customer to request an explanation",'
                 '"strategy_tags":["authority_challenge"],'
                 '"disclosure_strategy":"share known facts when asked",'
+                '"claim_strategy":"state only known facts",'
                 '"pressure_strategy":"remain firm",'
                 '"contradiction_strategy":"politely question inconsistencies",'
+                '"timing_strategy":"respond after the result",'
                 '"response_to_verification":"ask why the result matters",'
-                '"response_to_rejection":"ask for the reason"}]')
+                '"response_to_rejection":"ask for the reason",'
+                '"escalation_strategy":"escalate only if unresolved"}]')
 
     class CapturingClient:
         prompt = None
@@ -1183,6 +1190,8 @@ def test_customer_generator_prompt_anchors_policy_to_customer_behavior():
     assert "not for the service agent" in client.prompt
     assert "Never prescribe service-agent behavior" in client.prompt
     assert "customer's reaction or utterance" in client.prompt
+    for field in ("claim_strategy", "timing_strategy", "escalation_strategy"):
+        assert field in client.prompt
 
 
 def _provider_json_response(text, *, finish_reason="stop", completion_tokens=100,
@@ -1226,10 +1235,13 @@ def _valid_customer_json():
     return ('[{"name":"authority","description":"ask for an explanation",'
             '"strategy_tags":["authority_challenge"],'
             '"disclosure_strategy":"answer necessary questions",'
+            '"claim_strategy":"state only customer-known facts",'
             '"pressure_strategy":"remain firm",'
             '"contradiction_strategy":"ask for clarification",'
+            '"timing_strategy":"respond after a result",'
             '"response_to_verification":"acknowledge the result",'
-            '"response_to_rejection":"request a reason"}]')
+            '"response_to_rejection":"request a reason",'
+            '"escalation_strategy":"escalate only if unresolved"}]')
 
 
 def test_customer_generation_retries_protocol_truncation_and_persists_attempts():

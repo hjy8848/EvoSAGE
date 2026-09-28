@@ -160,6 +160,19 @@ def flatten_simulation(simulation: Any) -> list[TraceEvent]:
         append(turn, "USER_MESSAGE", "user", "message", {
             "text": str(turn_record.get("user_message") or ""),
         })
+        customer_claim_metadata = _mapping(turn_record.get("customer_claim_metadata"))
+        if not customer_claim_metadata:
+            user_turn_metadata = _mapping(turn_record.get("metadata"))
+            customer_claim_metadata = _mapping(user_turn_metadata.get("customer_claim_metadata"))
+        if customer_claim_metadata:
+            append(turn, "CUSTOMER_CLAIMS", "customer_simulator", "claims", {
+                key: customer_claim_metadata[key]
+                for key in (
+                    "required", "parse_status", "parse_error", "claims",
+                    "declared_claims", "raw_envelope", "claim_validation",
+                )
+                if key in customer_claim_metadata
+            })
         output = _mapping(turn_record.get("agent_output"))
         append(turn, "AGENT_MESSAGE", "agent", "message", {
             "text": str(output.get("chat") or ""),

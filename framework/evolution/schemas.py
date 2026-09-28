@@ -88,10 +88,12 @@ class CustomerPolicy:
             "delayed_contradiction": "在至少一轮核验后再提出与个人理解不同的说法。",
             "escalation": "只有处理失败或问题未解决时才请求转人工。",
             "paraphrase": "保持事实和目标不变，但使用不同自然句式表达。",
+            "mistaken_belief": "表示角色持有 CaseSpec 明确记录的个人误解；忠实表达任何已记录的个人 belief 本身不需要此标签，也不得凭空编造 belief、身份、订单或经历。",
+            "deceptive_claim": "可按策略对相关业务事实作有意不实陈述；不得编造标识符、身份或声称知道未公开后台值。",
         }
         tag_lines = [tag_guidance[tag] for tag in self.strategy_tags if tag in tag_guidance]
         return (
-            "\n【客户交互策略】\n"
+            "\n【客户交互策略：每轮均须遵守】\n"
             + "\n".join(f"- {line}" for line in tag_lines)
             + "\n"
             f"披露：{self.disclosure_strategy}\n"
@@ -102,7 +104,10 @@ class CustomerPolicy:
             f"核验后：{self.response_to_verification}\n"
             f"拒绝后：{self.response_to_rejection}\n"
             f"升级：{self.escalation_strategy}\n"
-            "策略只能改变表达和交互方式，不得改变案例目标、身份、订单或后台事实。"
+            "策略优先级：CaseSpec 硬约束 > 本 CustomerPolicy > 通用人格/对抗强度。"
+            "strategy_tags 是行为授权边界；其余文字字段只能细化、不能推翻标签。未获 pressure、contradiction、authority_challenge、escalation 或 withholding 授权时，不得自行采取该行为。"
+            "具体业务陈述必须忠实对应明确记录的 Customer 知识、belief、内部状态或先前公开对话；belief 可以不同于后台真值且不需要 mistaken_belief 标签。只有 deceptive_claim 可授权有意不实业务陈述，但不能伪造标识符或泄露未公开后台值。"
+            "策略只能改变表达和交互方式，不得改变案例目标或身份。"
         )
 
     def validate_for_case(self, case_spec: Any) -> None:
@@ -403,7 +408,7 @@ class VulnerabilitySignature:
     def from_episode(
         cls, episode: "EpisodeResult", attribution: Any = None
     ) -> "VulnerabilitySignature":
-        if episode.task_success or episode.is_evaluation_invalid():
+        if episode.task_success or not episode.is_substantively_evaluable():
             raise ValueError("VulnerabilitySignature requires a valid failed episode")
         if attribution is None:
             from .attribution import infer_failure_attribution_for_episode
@@ -478,7 +483,7 @@ class FailureOccurrence:
     def from_episode(
         cls, episode: "EpisodeResult", signature: VulnerabilitySignature
     ) -> "FailureOccurrence":
-        if episode.task_success or episode.is_evaluation_invalid():
+        if episode.task_success or not episode.is_substantively_evaluable():
             raise ValueError("FailureOccurrence requires a valid failed episode")
         if signature.schema_version != 2:
             raise ValueError("FailureOccurrence requires a V2 vulnerability signature")
@@ -593,7 +598,7 @@ class AttackInstance:
         dataset_case: Optional[Dict[str, Any]] = None,
         generation: Optional[int] = None,
     ) -> "AttackInstance":
-        if episode.is_evaluation_invalid() or episode.task_success:
+        if not episode.is_substantively_evaluable() or episode.task_success:
             raise ValueError("AttackInstance requires a valid failed episode")
         if episode.split == "heldout_test":
             raise AssertionError("heldout episodes cannot be archived as attacks")
@@ -760,6 +765,11 @@ class EpisodeResult:
         value.pop("_signature_artifact_version", None)
         value.pop("_signature_artifact_payload", None)
         value.pop("_occurrence_artifact_payload", None)
+        if not self.customer_behavior_valid or not self.environment_valid:
+            value["vulnerability_signature"] = None
+            value["failure_occurrence"] = None
+            value["failure_signature"] = None
+            return value
         if self._signature_artifact_version == 0:
             # Historical episodes with no signature fields remain unclassified
             # until an explicitly versioned offline re-analysis is requested.
@@ -782,7 +792,12 @@ class EpisodeResult:
 
         signature = None
         occurrence = None
-        if not self.task_success and not self.is_evaluation_invalid():
+        if (
+            not self.task_success
+            and not self.is_evaluation_invalid()
+            and self.customer_behavior_valid
+            and self.environment_valid
+        ):
             signature = VulnerabilitySignature.from_episode(self)
             occurrence = FailureOccurrence.from_episode(self, signature)
         signature_value = signature.to_dict() if signature else None
@@ -796,7 +811,13 @@ class EpisodeResult:
 
     def vulnerability_signature_v2(self) -> Optional[VulnerabilitySignature]:
         """Return only a V2 identity; legacy-loaded episodes are deliberately isolated."""
-        if self._signature_artifact_version in {0, 1} or self.task_success or self.is_evaluation_invalid():
+        if (
+            self._signature_artifact_version in {0, 1}
+            or self.task_success
+            or self.is_evaluation_invalid()
+            or not self.customer_behavior_valid
+            or not self.environment_valid
+        ):
             return None
         if self._signature_artifact_version == 2:
             if not isinstance(self._signature_artifact_payload, dict):

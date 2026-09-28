@@ -14,6 +14,7 @@ User Model System
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from enum import Enum
+import copy
 import json
 from datetime import datetime
 
@@ -113,7 +114,12 @@ class UserModel:
             "content": message
         })
     
-    def add_user_message(self, message: str, action: Optional[Dict[str, Any]] = None) -> None:
+    def add_user_message(
+        self,
+        message: str,
+        action: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """
         添加用户消息到对话历史
         
@@ -133,6 +139,7 @@ class UserModel:
             user_action=action,
             emotion_state=self.emotion_state
         )
+        turn.metadata = copy.deepcopy(metadata or {})
         self.turn_history.append(turn)
         self.current_turn += 1
     

@@ -799,9 +799,20 @@ class EvoSAGEEpisodeEvaluator:
                      path_config=None):
         from .trace import flatten_simulation
 
-        analysis_trace_events = [
-            event.to_dict() for event in flatten_simulation(simulation)
-        ]
+        customer_assessment = assess_customer_behavior(simulation, customer_policy)
+        analysis_trace_events = [event.to_dict() for event in flatten_simulation(simulation)]
+        claim_validation = (
+            customer_assessment.checks.get("factual_grounding", {}).get("claim_validation", [])
+        )
+        validation_by_turn: dict[int, list[dict[str, Any]]] = {}
+        for item in claim_validation:
+            if isinstance(item, dict) and isinstance(item.get("turn_index"), int):
+                validation_by_turn.setdefault(item["turn_index"], []).append(item)
+        for event in analysis_trace_events:
+            if event.get("event_type") == "CUSTOMER_CLAIMS":
+                event.setdefault("payload", {})["claim_validation"] = validation_by_turn.get(
+                    int(event.get("turn_index", -1)), []
+                )
         # BackendEnvironment records both query and action tools as ``tool_call``
         # events.  Keep the co-evolution trace aligned with the execution
         # evaluator; filtering for the old ``tool_query`` name silently turned
@@ -825,7 +836,6 @@ class EvoSAGEEpisodeEvaluator:
             or bool(diagnostics.get("protocol_failure", False))
         )
         evaluation_status = "invalid" if protocol_failure else "valid"
-        customer_assessment = assess_customer_behavior(simulation, customer_policy)
         environment_valid = True
         environment_reasons: list[str] = []
         report_diagnostics = diagnostics if isinstance(diagnostics, dict) else {}

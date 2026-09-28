@@ -40,8 +40,10 @@ class CandidateScore:
 
 
 class CustomerSelector:
-    def __init__(self, weights=None):
+    def __init__(self, weights=None, tie_tolerance: float = 1e-12):
         self.weights = dict(CustomerEvolutionConfig().fitness_weights)
+        self.tie_tolerance = max(0.0, float(tie_tolerance))
+        self.last_selection_record = None
         if weights:
             weights = dict(weights)
             if "coverage" in weights:
@@ -94,7 +96,7 @@ class CustomerSelector:
             if signature is not None
         }
         novelty = len(signatures - known_signatures) / max(1, len(signatures))
-        candidate_case_count = len({episode.case_id for episode in episodes})
+        candidate_case_count = len({episode.case_id for episode in valid_episodes})
         failure_nodes = {
             episode.sop_node
             for episode in valid_episodes
@@ -111,9 +113,82 @@ class CustomerSelector:
             len(valid_episodes), "valid", len(invalid_episodes), invalid_reasons,
         )
 
-    def select(self, candidates: list[tuple[CustomerPolicy, list[EpisodeResult]]], known_signatures: set[str], total_nodes: Optional[int] = None, allow_heldout: bool = False):
+    def select(
+        self,
+        candidates: list[tuple[CustomerPolicy, list[EpisodeResult]]],
+        known_signatures: set[str],
+        total_nodes: Optional[int] = None,
+        allow_heldout: bool = False,
+        incumbent_policy_id: Optional[str] = None,
+    ):
         scores = [self.score(policy, episodes, known_signatures, total_nodes, allow_heldout=allow_heldout) for policy, episodes in candidates]
         eligible = [index for index, score in enumerate(scores) if score.episodes > 0]
-        order = sorted(eligible, key=lambda i: (-scores[i].fitness, -scores[i].attack_success, -scores[i].novelty, candidates[i][0].policy_id))
-        index = order[0] if order else None
-        return (candidates[index][0] if index is not None else None), scores
+        incumbent_index = next((
+            index for index, (policy, _) in enumerate(candidates)
+            if incumbent_policy_id is not None and policy.policy_id == incumbent_policy_id
+        ), None)
+        order = sorted(
+            eligible,
+            key=lambda i: (
+                -float(scores[i].fitness),
+                -float(scores[i].attack_success),
+                -float(scores[i].novelty),
+                candidates[i][0].policy_id,
+            ),
+        )
+
+        selected_index = order[0] if order else None
+        reason = "best_valid_candidate" if selected_index is not None else "no_valid_candidate"
+        if incumbent_index is not None:
+            incumbent = candidates[incumbent_index][0]
+            incumbent_score = scores[incumbent_index]
+            child_order = [
+                index for index in order
+                if index != incumbent_index
+                and candidates[index][0].semantic_fingerprint() != incumbent.semantic_fingerprint()
+            ]
+            best_child_index = next((
+                index for index in child_order
+                if incumbent_score.fitness is not None
+                and scores[index].fitness > incumbent_score.fitness + self.tie_tolerance
+            ), None)
+            selected_index = incumbent_index
+            if not incumbent_score.episodes:
+                reason = "incumbent_unscored"
+            elif best_child_index is None:
+                if not child_order and any(index != incumbent_index for index in eligible):
+                    reason = "no_behavioral_change"
+                elif not child_order and not any(index != incumbent_index for index in eligible):
+                    reason = "all_candidates_invalid" if len(candidates) > 1 else "no_valid_candidate"
+                else:
+                    reason = "no_fitness_improvement"
+            else:
+                selected_index = best_child_index
+                reason = "strict_fitness_improvement"
+            selected = candidates[selected_index][0]
+            self.last_selection_record = {
+                "incumbent_policy_id": incumbent.policy_id,
+                "incumbent_score": incumbent_score.to_dict(),
+                "candidate_scores": [
+                    score.to_dict() for index, score in enumerate(scores)
+                    if index != incumbent_index
+                ],
+                "selected_policy_id": selected.policy_id,
+                "customer_changed": (
+                    selected.semantic_fingerprint() != incumbent.semantic_fingerprint()
+                ),
+                "selection_reason": reason,
+                "tie_tolerance": self.tie_tolerance,
+            }
+            return selected, scores
+
+        self.last_selection_record = {
+            "incumbent_policy_id": incumbent_policy_id,
+            "incumbent_score": None,
+            "candidate_scores": [score.to_dict() for score in scores],
+            "selected_policy_id": candidates[selected_index][0].policy_id if selected_index is not None else None,
+            "customer_changed": selected_index is not None,
+            "selection_reason": reason,
+            "tie_tolerance": self.tie_tolerance,
+        }
+        return (candidates[selected_index][0] if selected_index is not None else None), scores

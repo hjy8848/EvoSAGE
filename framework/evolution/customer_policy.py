@@ -21,7 +21,7 @@ class CustomerPolicyValidator:
     DEFAULT_TAGS = {
         "truthful", "cooperative", "withholding", "pressure", "contradiction",
         "delayed_disclosure", "authority_challenge", "delayed_contradiction",
-        "escalation", "paraphrase",
+        "escalation", "paraphrase", "mistaken_belief", "deceptive_claim",
     }
 
     def __init__(self, allowed_tags=None):

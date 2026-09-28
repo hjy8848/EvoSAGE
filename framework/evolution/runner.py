@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -727,6 +728,7 @@ class EvolutionRunner:
                         source_failures=prior_failures,
                         frontier=self.frontier.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
                         archive_summary=self.attack_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
+                        incumbent_episodes=prior_customer_episodes,
                     )
                 self._active_customer_policy = customer
                 customer_evaluation_inconclusive = bool(scores) and not any(
@@ -738,6 +740,9 @@ class EvolutionRunner:
                 if "customer_candidate_selection_completed" not in self._completed_phases:
                     self.store.write_json(f"generations/gen_{generation:03d}/customer_candidates.json", {
                         "selected_policy": customer.to_dict(), "scores": [score.to_dict() for score in scores],
+                        "selection": copy.deepcopy(
+                            getattr(self.customer_evolver, "last_selection_record", None)
+                        ),
                         "candidate_episode_counts": [len(items) for _, items in candidate_records],
                         "candidate_valid_episode_counts": [
                             sum(item.is_substantively_evaluable() for item in items)
@@ -762,6 +767,9 @@ class EvolutionRunner:
                         selected_policy=customer.to_dict(),
                         selected_policy_id=customer.policy_id,
                         scores=[score.to_dict() for score in scores],
+                        selection=copy.deepcopy(
+                            getattr(self.customer_evolver, "last_selection_record", None)
+                        ),
                         evaluation_status=customer_evaluation_status,
                         selection_status=customer_evaluation_status,
                     )

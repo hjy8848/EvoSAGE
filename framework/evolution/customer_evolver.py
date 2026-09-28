@@ -38,6 +38,7 @@ class CustomerEvolver:
         self.last_rejections = []
         self.last_candidate_records = []
         self.last_generation_record = None
+        self.last_selection_record = None
 
     def propose(self, incumbent: CustomerPolicy, generation: int, count: int = 5, source_failures=None,
                 service_policy=None, frontier=None, archive_summary=None, validation_cases=None) -> list[CustomerPolicy]:
@@ -171,7 +172,8 @@ class CustomerEvolver:
         return candidates
 
     def evolve(self, incumbent, service_policy, cases, evaluator, archive, generation, count=5,
-               cases_per_candidate=None, elite_count=0, source_failures=None, frontier=None, archive_summary=None):
+               cases_per_candidate=None, elite_count=0, source_failures=None, frontier=None,
+               archive_summary=None, incumbent_episodes=None):
         validation_cases = list(cases)
         candidate_cases = list(validation_cases)
         if any(getattr(case, "split", "") == "heldout_test" for case in validation_cases):
@@ -182,12 +184,35 @@ class CustomerEvolver:
             incumbent, generation, count, source_failures, service_policy,
             frontier, archive_summary, validation_cases=validation_cases,
         )
-        evaluated = [(candidate, evaluator.evaluate(candidate, service_policy, candidate_cases, "evolution", generation, "customer_candidate")) for candidate in candidates]
-        if elite_count:
-            evaluated.insert(0, (incumbent, evaluator.evaluate(incumbent, service_policy, candidate_cases, "evolution", generation, "customer_elite")))
+        candidate_case_ids = {getattr(case, "case_id", None) for case in candidate_cases}
+        baseline = [
+            item for item in (incumbent_episodes or [])
+            if getattr(item, "case_id", None) in candidate_case_ids
+        ]
+        baseline_case_ids = {item.case_id for item in baseline}
+        if candidate_case_ids - baseline_case_ids:
+            # The runner normally supplies its just-completed failure scan so
+            # incumbent comparison adds no model calls. Direct callers still
+            # receive a fair same-case comparison when no reusable scan exists.
+            baseline = evaluator.evaluate(
+                incumbent, service_policy, candidate_cases, "evolution", generation,
+                "customer_elite" if elite_count else "customer_incumbent_comparison",
+            )
+        evaluated = [(incumbent, baseline)]
+        evaluated.extend(
+            (candidate, evaluator.evaluate(
+                candidate, service_policy, candidate_cases, "evolution", generation,
+                "customer_candidate",
+            ))
+            for candidate in candidates
+        )
         selected, scores = self.selector.select(
             evaluated,
             {signature.signature_id for signature in archive.signatures()},
+            incumbent_policy_id=incumbent.policy_id,
+        )
+        self.last_selection_record = copy.deepcopy(
+            getattr(self.selector, "last_selection_record", None)
         )
         return selected or incumbent, evaluated, scores
 
@@ -239,9 +264,13 @@ class LLMCustomerPolicyGenerator:
             "Use only generic interaction language such as authoritative result, required identifier, "
             "or failed action. strategy_tags must be a subset of this exact list: "
             f"{json.dumps(self.allowed_strategy_tags)}. Do not invent tags such as transparent. "
-            "Return a JSON array only. Each item must contain name, "
-            "description, strategy_tags, disclosure_strategy, pressure_strategy, "
-            "contradiction_strategy, response_to_verification, response_to_rejection.\n"
+            "The tags are binding authorization boundaries: prose fields must be consistent with them, "
+            "and must not grant an untagged behavior such as pressure or deception. truthful is the default; "
+            "deceptive_claim and mistaken_belief are permitted only when explicitly tagged. "
+            "Return a JSON array only. Each item must contain every behavior field: name, description, "
+            "strategy_tags, disclosure_strategy, claim_strategy, pressure_strategy, "
+            "contradiction_strategy, timing_strategy, response_to_verification, "
+            "response_to_rejection, escalation_strategy. Do not rely on implicit inheritance.\n"
             f"Current strategy tags: {json.dumps(incumbent.strategy_tags)}\n"
             f"Observed abstract failures: {json.dumps(failure_view, ensure_ascii=False)}\n"
             f"Service rule summary: {json.dumps([r.text for r in service_policy.rules if r.active], ensure_ascii=False) if self.adversary_access == 'white_box' else 'WITHHELD_IN_BLACK_BOX_MODE'}\n"
@@ -271,9 +300,9 @@ class LLMCustomerPolicyGenerator:
         policies = []
         candidate_records = []
         required_fields = {
-            "name", "description", "strategy_tags", "disclosure_strategy",
-            "pressure_strategy", "contradiction_strategy",
-            "response_to_verification", "response_to_rejection",
+            "name", "description", "strategy_tags", "disclosure_strategy", "claim_strategy",
+            "pressure_strategy", "contradiction_strategy", "timing_strategy",
+            "response_to_verification", "response_to_rejection", "escalation_strategy",
         }
         for index, item in enumerate(value if isinstance(value, list) else []):
             candidate_record = {
