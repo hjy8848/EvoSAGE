@@ -683,6 +683,12 @@ class EvolutionRunner:
             self._write_incomplete_checkpoint()
             generation_started = time.monotonic()
             gen_dir = self.store.generation_dir(generation)
+            service_evolution_summary = {
+                "status": "not_applicable",
+                "candidate_count": 0,
+                "selected_policy_id": service.policy_id,
+                "service_changed": False,
+            }
             if self.config.experiment_mode in {"customer_only", "coevolution"} and self.config.experiment_mode != "static":
                 self._active_stage = "customer_failure_scan"
                 prior_customer_episodes = self.evaluator.evaluate(
@@ -813,12 +819,15 @@ class EvolutionRunner:
                 self._mark_phase_complete("service_failure_scan_completed", "service_failure_scan_completed")
                 service_gate_path = gen_dir / "service_gate.json"
                 if (
-                    "service_candidate_gate_completed" in self._completed_phases
+                    (
+                        "service_candidate_gate_completed" in self._completed_phases
+                        or "service_evolution_completed" in self._completed_phases
+                    )
                     and service_gate_path.exists()
                 ):
-                    # The gate artifact contains the selected/rejected patch and
-                    # candidate provenance. Rehydrate it instead of regenerating
-                    # a stochastic Service proposal after a restart.
+                    # The Service-stage artifact contains the proposal/no-op and
+                    # selected-policy provenance. Rehydrate it rather than
+                    # regenerating a stochastic proposal after a restart.
                     gate_payload = json.loads(service_gate_path.read_text(encoding="utf-8"))
                     service_record_path = gen_dir / "service_generation.json"
                     service_record = (
@@ -843,6 +852,18 @@ class EvolutionRunner:
                     self.service_evolver.last_candidate_records = list(gate_payload.get("candidates") or [])
                     self.service_evolver.last_baseline_metrics = dict(gate_payload.get("baseline_metrics") or {})
                     self.service_evolver.last_selected_metrics = dict(gate_payload.get("selected_metrics") or {})
+                    service_evolution_summary = dict(gate_payload.get("service_evolution") or {})
+                    if not service_evolution_summary:
+                        service_evolution_summary = {
+                            "status": "candidate_accepted" if decision.accepted else "candidate_rejected",
+                            "candidate_count": len(self.service_evolver.last_candidate_records),
+                            "selected_policy_id": service.policy_id,
+                            "service_changed": service.policy_id != baseline_service.policy_id,
+                        }
+                    self.service_evolver.last_evolution_status = service_evolution_summary["status"]
+                    self.service_evolver.last_no_candidate_reason = service_evolution_summary.get(
+                        "no_candidate_reason"
+                    )
                 else:
                     self._active_stage = "service_candidate_generation_and_gate"
                     service, decision, patch = self.service_evolver.evolve(
@@ -860,9 +881,26 @@ class EvolutionRunner:
                         historical_summary=self.service_evolver.last_candidate_records[-max(1, self.config.evaluation.summary_limit):],
                     )
                     self._active_service_policy = service
+                    no_candidate = decision.reason == "no_candidate_proposed"
+                    service_evolution_summary = {
+                        "status": (
+                            "no_candidate_proposed" if no_candidate
+                            else getattr(self.service_evolver, "last_evolution_status", None)
+                            or ("candidate_accepted" if decision.accepted else "candidate_rejected")
+                        ),
+                        "no_candidate_reason": decision.metrics.get("no_candidate_reason") if no_candidate else None,
+                        "candidate_count": (
+                            0 if no_candidate
+                            else len(getattr(self.service_evolver, "last_candidate_records", []))
+                        ),
+                        "selected_policy_id": service.policy_id,
+                        "service_changed": service.policy_id != baseline_service.policy_id,
+                    }
                     self.store.write_json(f"generations/gen_{generation:03d}/service_gate.json", {
                         "accepted": decision.accepted, "reason": decision.reason, "delta": decision.delta,
                         "patch": patch.to_dict() if patch else None,
+                        "gate_executed": not no_candidate,
+                        "service_evolution": service_evolution_summary,
                         "decision_metrics": decision.metrics,
                         "baseline_metrics": getattr(self.service_evolver, "last_baseline_metrics", {}),
                         "selected_metrics": getattr(self.service_evolver, "last_selected_metrics", {}),
@@ -873,6 +911,7 @@ class EvolutionRunner:
                         "service",
                         selected_policy=service.to_dict(),
                         selected_policy_id=service.policy_id,
+                        service_evolution=service_evolution_summary,
                         gate={
                             "accepted": decision.accepted,
                             "reason": decision.reason,
@@ -881,7 +920,8 @@ class EvolutionRunner:
                     )
                     self._active_service_policy = service
                     self._mark_phase_complete(
-                        "service_candidate_gate_completed", "service_candidate_gate_completed"
+                        "service_evolution_completed" if no_candidate else "service_candidate_gate_completed",
+                        "service_evolution_completed" if no_candidate else "service_candidate_gate_completed",
                     )
                 if decision.accepted and patch:
                     before = getattr(self.service_evolver, "last_baseline_metrics", {})
@@ -922,6 +962,7 @@ class EvolutionRunner:
                 "episode_count": len(episodes),
                 "service_policy_id": service.policy_id,
                 "customer_policy_id": customer.policy_id,
+                "service_evolution": service_evolution_summary,
                 "orchestration": self._runtime_stats(),
             })
             self._completed_phases.add("generation_summary_completed")

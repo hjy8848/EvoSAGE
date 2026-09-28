@@ -10,7 +10,7 @@ from .evaluator_adapter import aggregate_episode_metrics
 from .generation_protocol import GenerationProtocolError, request_json_with_retry
 from .paired_stats import PairingSetMismatch, compare_paired_episodes
 from .schemas import AttackInstance, CustomerPolicy, ServicePatch, ServicePolicy, ServiceRule
-from .service_gate import ServiceGate
+from .service_gate import GateDecision, ServiceGate
 from .service_policy import ServicePolicyCompiler, ServicePolicySanitizer
 from .split_manager import dataset_case_from_attack_instance
 
@@ -26,16 +26,63 @@ class ServiceEvolver:
         self.require_patch_generator = require_patch_generator
         self.last_candidate_records = []
         self.last_generation_record = None
+        self.last_evolution_status = None
+        self.last_no_candidate_reason = None
         self.last_baseline_metrics = {}
         self.last_selected_metrics = {}
 
     def propose(self, policy: ServicePolicy, failures, generation: int, count: int = 5, defense_summary=None, historical_summary=None):
+        if not failures:
+            # There is no attributable evidence to justify asking for or
+            # installing a repair. Treat this as a successful no-op, including
+            # in strict mode; strictness applies to requested generations.
+            self.last_generation_record = {
+                "status": "no_candidate_proposed",
+                "no_candidate_reason": "no_attributable_service_failure",
+                "candidate_count": 0,
+                "response_candidate_count": 0,
+                "candidates": [],
+                "attempts": [],
+            }
+            self.last_candidate_records = []
+            self.last_no_candidate_reason = "no_attributable_service_failure"
+            return []
         if self.patch_generator is not None:
             try:
                 generated = self.patch_generator.generate(policy, failures, generation, count, defense_summary, historical_summary)
                 self.last_generation_record = copy.deepcopy(
                     getattr(self.patch_generator, "last_generation_record", None)
                 )
+                if isinstance(generated, list) and not generated:
+                    response_candidate_count = int(
+                        (self.last_generation_record or {}).get("response_candidate_count", 0) or 0
+                    )
+                    if response_candidate_count:
+                        # A non-empty JSON array whose entries could not be
+                        # constructed is candidate-level rejection, not a valid
+                        # empty proposal set.
+                        if self.last_generation_record is not None:
+                            self.last_generation_record.update({
+                                "status": "candidate_rejected",
+                                "reason": "service_candidate_rejected:all_candidates",
+                                "candidate_count": 0,
+                            })
+                        return []
+                    reason = (
+                        "no_attributable_service_failure"
+                        if not failures else "generator_returned_empty_candidate_set"
+                    )
+                    self.last_generation_record = self.last_generation_record or {}
+                    self.last_generation_record.update({
+                        "status": "valid_empty_candidate_set",
+                        "no_candidate_reason": reason,
+                        "candidate_count": 0,
+                        "response_candidate_count": 0,
+                        "candidates": [],
+                    })
+                    self.last_candidate_records = []
+                    self.last_no_candidate_reason = reason
+                    return []
                 valid = []
                 for patch in generated:
                     try:
@@ -58,6 +105,7 @@ class ServiceEvolver:
                 if self.last_generation_record is not None:
                     self.last_generation_record["status"] = "candidate_rejected"
                     self.last_generation_record["reason"] = "service_candidate_rejected:all_candidates"
+                return []
             except Exception as exc:
                 if getattr(exc, "budget_exhausted", False):
                     raise
@@ -150,6 +198,10 @@ class ServiceEvolver:
         if any(getattr(case, "split", "") == "heldout_test" for case in normal_cases + adversarial_cases):
             raise AssertionError("ServiceEvolver cannot consume heldout cases")
         self.last_candidate_records = []
+        self.last_evolution_status = None
+        self.last_no_candidate_reason = None
+        self.last_baseline_metrics = {}
+        self.last_selected_metrics = {}
         customer_policy = customer_policy or self._baseline_customer()
         if transfer_replay_policies is None:
             transfer_replay_policies = list(replay_policies or [])
@@ -265,6 +317,35 @@ class ServiceEvolver:
                 or [0]
             )
 
+        proposals = self.propose(
+            incumbent, failures, generation, count, defense_summary, historical_summary
+        )
+        if not proposals and self.last_generation_record and (
+            self.last_generation_record.get("status") in {
+                "valid_empty_candidate_set", "no_candidate_proposed"
+            }
+        ):
+            reason = self.last_generation_record.get("no_candidate_reason") or (
+                "no_attributable_service_failure" if not failures
+                else "generator_returned_empty_candidate_set"
+            )
+            self.last_evolution_status = "no_candidate_proposed"
+            self.last_no_candidate_reason = reason
+            self.last_baseline_metrics = {}
+            self.last_selected_metrics = {}
+            return incumbent, GateDecision(
+                accepted=False,
+                reason="no_candidate_proposed",
+                delta=0.0,
+                metrics={
+                    "service_evolution_status": "no_candidate_proposed",
+                    "no_candidate_reason": reason,
+                    "candidate_count": 0,
+                    "selected_policy_id": incumbent.policy_id,
+                    "service_changed": False,
+                },
+            ), None
+
         baseline_latest = evaluate_latest(incumbent, "service_baseline")
         baseline_exact = evaluate_exact(incumbent, "service_baseline")
         baseline_transfer = evaluate_transfer(incumbent, "service_baseline")
@@ -279,7 +360,7 @@ class ServiceEvolver:
         accepted = []
         invalid_candidate_reasons = []
         substantive_candidate_rejection = False
-        for patch in self.propose(incumbent, failures, generation, count, defense_summary, historical_summary):
+        for patch in proposals:
             candidate = None
             try:
                 candidate = self.compiler.apply_patch(
@@ -480,7 +561,14 @@ class ServiceEvolver:
                 accepted,
                 key=lambda item: candidate_selection_key(item[3], item[2].patch_id),
             )[0]
+            self.last_evolution_status = "candidate_accepted"
             return candidate, decision, patch
+        self.last_evolution_status = (
+            "candidate_rejected"
+            if self.last_candidate_records
+            or (self.last_generation_record or {}).get("status") == "candidate_rejected"
+            else "no_candidate_proposed"
+        )
         rejected = self.gate.evaluate(baseline_metrics, baseline_metrics)
         if baseline_has_invalid:
             rejected.reason = f"baseline_evaluation_invalid:{baseline_invalid[0]}"

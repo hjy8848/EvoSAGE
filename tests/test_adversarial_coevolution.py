@@ -45,6 +45,22 @@ def _structured_service_rule(rule_id="r", category="VERIFICATION", trigger=None,
     )
 
 
+def _service_failure_stub():
+    return SimpleNamespace(
+        signature_id="failure-1",
+        error_types=["authoritative_conflict"],
+        sop_node="verify_order",
+        predicted_action="Refund",
+        executed_action="",
+        termination_reason="goal_not_fulfilled",
+        required_verification_score=0.0,
+        policy_score=0.0,
+        action_execution_score=0.0,
+        goal_fulfillment_score=0.0,
+        tool_sequence_summary=[],
+    )
+
+
 def test_role_token_budgets_load_as_nested_config():
     config = EvolutionConfig.from_dict({
         "evaluation": {
@@ -1041,7 +1057,7 @@ def test_service_candidate_protocol_failure_is_not_a_substantive_gate_rejection(
     evaluator = Evaluator()
     evolver = ServiceEvolver(patch_generator=PatchGenerator())
     _, decision, patch = evolver.evolve(
-        ServicePolicy(), [], split.validation, split.validation, evaluator, 0,
+        ServicePolicy(), [_service_failure_stub()], split.validation, split.validation, evaluator, 0,
         count=1, customer_policy=CustomerPolicy(),
     )
 
@@ -1095,7 +1111,7 @@ def test_service_latest_filter_skips_replay_and_normal_for_rejected_patch():
     evaluator = NonImprovingEvaluator()
     evolver = ServiceEvolver(patch_generator=PatchGenerator())
     _, decision, _ = evolver.evolve(
-        ServicePolicy(), [], split.validation, split.validation, evaluator, 0,
+        ServicePolicy(), [_service_failure_stub()], split.validation, split.validation, evaluator, 0,
         count=1, customer_policy=CustomerPolicy(),
         replay_policies=[CustomerPolicy()], replay_attack_count=1,
     )
@@ -1288,6 +1304,160 @@ def test_service_generation_retries_protocol_truncation_and_keeps_raw_candidate(
     assert generator.last_generation_record["candidates"][0]["raw_candidate"]["category"] == "VERIFICATION"
 
 
+@pytest.mark.parametrize(
+    ("failures", "expected_reason", "expected_calls", "expected_generation_status"),
+    [([], "no_attributable_service_failure", 0, "no_candidate_proposed"),
+     ([_service_failure_stub()], "generator_returned_empty_candidate_set", 1, "valid_empty_candidate_set")],
+)
+def test_service_valid_empty_candidate_set_is_noop_and_skips_gate(
+    failures, expected_reason, expected_calls, expected_generation_status
+):
+    class EmptyGenerator:
+        last_generation_record = {
+            "status": "valid",
+            "attempts": [{"parse_status": "PASS", "raw_content": "[]"}],
+        }
+
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, *args, **kwargs):
+            self.calls += 1
+            return []
+
+    class MustNotEvaluate:
+        def evaluate(self, *args, **kwargs):
+            raise AssertionError("no-op service evolution must not run candidate/baseline evaluation")
+
+    class MustNotGate:
+        def evaluate(self, *args, **kwargs):
+            raise AssertionError("no-op service evolution must not invoke the candidate gate")
+
+    incumbent = ServicePolicy(policy_id="incumbent-service")
+    generator = EmptyGenerator()
+    evolver = ServiceEvolver(
+        patch_generator=generator, gate=MustNotGate(), require_patch_generator=True
+    )
+    selected, decision, patch = evolver.evolve(
+        incumbent, failures, [], [], MustNotEvaluate(), generation=0, count=1
+    )
+
+    assert selected.to_dict() == incumbent.to_dict()
+    assert decision.accepted is False
+    assert decision.reason == "no_candidate_proposed"
+    assert decision.metrics["service_evolution_status"] == "no_candidate_proposed"
+    assert decision.metrics["no_candidate_reason"] == expected_reason
+    assert decision.metrics["candidate_count"] == 0
+    assert decision.metrics["selected_policy_id"] == incumbent.policy_id
+    assert decision.metrics["service_changed"] is False
+    assert patch is None
+    assert generator.calls == expected_calls
+    assert evolver.last_evolution_status == "no_candidate_proposed"
+    assert evolver.last_generation_record["status"] == expected_generation_status
+    assert evolver.last_generation_record["candidate_count"] == 0
+
+
+def test_service_malformed_json_remains_protocol_invalid():
+    client = _SequenceClient([_provider_json_response("[{bad json")])
+    generator = LLMServicePatchGenerator(client, max_tokens=8192, protocol_retries=0)
+    evolver = ServiceEvolver(patch_generator=generator, require_patch_generator=True)
+
+    with pytest.raises(GenerationProtocolError):
+        evolver.evolve(
+            ServicePolicy(), [_service_failure_stub()], [], [],
+            MockEpisodeEvaluator(), generation=0, count=1,
+        )
+
+    assert client.calls == 1
+    assert evolver.last_generation_record["status"] == "inconclusive"
+
+
+def test_service_sanitizer_rejection_remains_distinct_from_empty_response():
+    rejected_raw = {
+        "candidate_index": 1,
+        "raw_candidate": {"category": "NOT_ALLOWED"},
+        "patch_id": "rejected-patch",
+        "accepted": False,
+    }
+
+    class RejectedPatchGenerator:
+        last_generation_record = {"status": "valid", "candidates": [rejected_raw]}
+
+        def generate(self, *args, **kwargs):
+            return [ServicePatch(
+                "rejected-patch", "add",
+                [_structured_service_rule("rejected-rule", category="NOT_ALLOWED")],
+            )]
+
+    incumbent = ServicePolicy(policy_id="incumbent-service")
+    evaluator = MockEpisodeEvaluator(vulnerability_tags=())
+    evolver = ServiceEvolver(patch_generator=RejectedPatchGenerator())
+    cases = SplitManager().build().validation
+    selected, decision, patch = evolver.evolve(
+        incumbent, [_service_failure_stub()], cases, cases, evaluator, generation=0, count=1
+    )
+
+    assert selected.to_dict() == incumbent.to_dict()
+    assert decision.accepted is False
+    assert decision.reason == "no_candidate_passed_validation_gate"
+    assert patch is None
+    assert evolver.last_generation_record["status"] == "candidate_rejected"
+    candidate = evolver.last_generation_record["candidates"][0]
+    assert candidate["candidate_validation"]["status"] == "FAIL"
+    assert "unsupported service rule category" in candidate["candidate_validation"]["exact_reason"]
+
+
+def test_runner_completes_generation_and_persists_service_noop(tmp_path):
+    class EmptyGenerator:
+        last_generation_record = {
+            "status": "valid",
+            "attempts": [{"parse_status": "PASS", "raw_content": "[]"}],
+            "candidates": [],
+        }
+
+        def generate(self, *args, **kwargs):
+            return []
+
+    run_dir = tmp_path / "service-noop-run"
+    config = EvolutionConfig.from_dict({
+        "experiment_mode": "service_only",
+        "max_generations": 1,
+        "splits": {
+            "strategy": "instance_holdout", "seed": 7,
+            "evolution_ratio": 0.5, "validation_ratio": 0.25,
+            "heldout_ratio": 0.25, "max_cases": 3,
+        },
+        "persistence": {"output_dir": str(run_dir), "resume": False},
+    })
+    runner = EvolutionRunner(
+        config,
+        evaluator=MockEpisodeEvaluator(vulnerability_tags=()),
+        service_evolver=ServiceEvolver(
+            patch_generator=EmptyGenerator(), require_patch_generator=True
+        ),
+    )
+
+    result = runner.run()
+
+    assert result["completed_generations"] == [0]
+    generation_dir = run_dir / "generations" / "gen_000"
+    gate_artifact = json.loads((generation_dir / "service_gate.json").read_text())
+    service_record = json.loads((generation_dir / "service_generation.json").read_text())
+    complete = json.loads((generation_dir / "COMPLETE.json").read_text())
+    assert gate_artifact["gate_executed"] is False
+    assert gate_artifact["service_evolution"]["status"] == "no_candidate_proposed"
+    assert gate_artifact["service_evolution"]["candidate_count"] == 0
+    assert gate_artifact["service_evolution"]["service_changed"] is False
+    assert service_record["status"] == "no_candidate_proposed"
+    assert service_record["service_evolution"]["status"] == "no_candidate_proposed"
+    assert service_record["attempts"] == []
+    assert complete["service_evolution"]["status"] == "no_candidate_proposed"
+    initial_service = json.loads(
+        (run_dir / "environment" / "initial_service_policy.json").read_text()
+    )
+    assert complete["service_evolution"]["selected_policy_id"] == initial_service["policy_id"]
+
+
 def test_runner_persists_inconclusive_customer_generation_provenance(tmp_path):
     client = _SequenceClient([
         _provider_json_response("", finish_reason="length", completion_tokens=4096, reasoning_tokens=4096),
@@ -1325,7 +1495,7 @@ def test_real_mode_does_not_silently_fallback_to_templates():
         )
     with pytest.raises(RuntimeError, match="strict real mode"):
         ServiceEvolver(patch_generator=BrokenGenerator(), require_patch_generator=True).propose(
-            ServicePolicy(), [], 0, count=1
+            ServicePolicy(), [_service_failure_stub()], 0, count=1
         )
 
 

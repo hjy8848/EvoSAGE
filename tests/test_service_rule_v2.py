@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from framework.evolution.schemas import (
     PolicyValidationError,
@@ -68,8 +69,8 @@ def test_legacy_v1_rule_loads_for_compatibility_but_strict_generation_rejects_it
             return [ServicePatch("legacy-patch", "add", [legacy])]
 
     evolver = ServiceEvolver(patch_generator=LegacyGenerator(), require_patch_generator=True)
-    with pytest.raises(RuntimeError, match="no valid candidates"):
-        evolver.propose(ServicePolicy(), [], 1, count=1)
+    failures = [SimpleNamespace(signature_id="failure-v1", error_types=["tool_failure"])]
+    assert evolver.propose(ServicePolicy(), failures, 1, count=1) == []
 
 
 def test_llm_generator_uses_structured_v2_as_source_of_truth():
