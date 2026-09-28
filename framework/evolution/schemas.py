@@ -22,6 +22,10 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _semantic_fingerprint(value: Any) -> str:
+    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
 @dataclass
 class CustomerPolicy:
     policy_id: str = "customer_policy_c0"
@@ -47,6 +51,24 @@ class CustomerPolicy:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def semantic_dict(self) -> Dict[str, Any]:
+        """Return only fields consumed by the customer behavior/prompt path."""
+        return {
+            "strategy_tags": list(self.strategy_tags),
+            "disclosure_strategy": self.disclosure_strategy,
+            "claim_strategy": self.claim_strategy,
+            "pressure_strategy": self.pressure_strategy,
+            "contradiction_strategy": self.contradiction_strategy,
+            "timing_strategy": self.timing_strategy,
+            "response_to_verification": self.response_to_verification,
+            "response_to_rejection": self.response_to_rejection,
+            "escalation_strategy": self.escalation_strategy,
+        }
+
+    def semantic_fingerprint(self) -> str:
+        """Stable identity for episode-cache compatibility, excluding provenance."""
+        return _semantic_fingerprint(self.semantic_dict())
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CustomerPolicy":
@@ -183,6 +205,49 @@ class ServicePolicy:
         value = asdict(self)
         value["rules"] = [rule.to_dict() for rule in self.rules]
         return value
+
+    def semantic_dict(self) -> Dict[str, Any]:
+        """Return the ordered active rule behavior shown to the service Agent."""
+        from .service_policy import ServicePolicyCompiler
+
+        return {
+            "active_rules": [
+                {
+                    "category": rule.category,
+                    "rule_schema_version": rule.rule_schema_version,
+                    "compiled_behavior": self._compiled_rule_semantics(
+                        ServicePolicyCompiler, rule
+                    ),
+                }
+                for rule in self.rules
+                if rule.active
+            ]
+        }
+
+    @staticmethod
+    def _compiled_rule_semantics(compiler, rule: ServiceRule) -> Dict[str, Any]:
+        try:
+            return {"text": compiler.compile_rule_text(rule)}
+        except ValueError:
+            # Invalid rules still need a stable cache identity so the evaluator
+            # can report the same invalid outcome instead of failing while
+            # constructing the cache key. The outer policy fingerprint hashes
+            # this payload before it is persisted in the cache key.
+            return {
+                "invalid_rule_fingerprint": _semantic_fingerprint({
+                    "text": rule.text,
+                    "trigger": rule.trigger,
+                    "obligations": rule.obligations,
+                    "prohibitions": rule.prohibitions,
+                    "ordering_constraints": rule.ordering_constraints,
+                    "recovery": rule.recovery,
+                    "rule_schema_version": rule.rule_schema_version,
+                })
+            }
+
+    def semantic_fingerprint(self) -> str:
+        """Stable identity for episode-cache compatibility, excluding provenance."""
+        return _semantic_fingerprint(self.semantic_dict())
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ServicePolicy":

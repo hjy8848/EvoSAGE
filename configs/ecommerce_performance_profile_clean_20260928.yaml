@@ -1,0 +1,67 @@
+{
+  "scenario": "ecommerce_refund",
+  "experiment_mode": "coevolution",
+  "seed": 7,
+  "max_generations": 1,
+  "customer": {
+    "candidate_count": 1,
+    "elite_count": 0,
+    "cases_per_candidate": 1,
+    "adversary_access": "black_box"
+  },
+  "service": {
+    "candidate_count": 1,
+    "replay_attack_count": 0,
+    "exact_replay_instance_count": 0,
+    "transfer_replay_policy_count": 0
+  },
+  "splits": {
+    "strategy": "instance_holdout",
+    "seed": 7,
+    "evolution_ratio": 0.5,
+    "validation_ratio": 0.25,
+    "heldout_ratio": 0.25,
+    "instances_per_path": 1,
+    "max_cases": 3,
+    "customer_disclosure_variants": ["opening"]
+  },
+  "evaluation": {
+    "repetitions": 1,
+    "max_turns": 2,
+    "max_tool_steps": 3,
+    "concurrency": 1,
+    "api_timeout": 45,
+    "judge_in_evolution": false,
+    "customer_thinking_mode": "disabled",
+    "agent_thinking_mode": "disabled",
+    "evolver_thinking_mode": "disabled",
+    "agent_max_retries": 1,
+    "customer_transport_max_retries": 1,
+    "evolver_max_retries": 1,
+    "judge_max_retries": 1,
+    "judge_validation_retries": 0,
+    "customer_protocol_retries": 1,
+    "evolver_protocol_retries": 1,
+    "rate_limit_backoff_seconds": 0,
+    "invalid_evaluation_retries": 0,
+    "max_api_requests_per_generation": 50,
+    "max_api_requests_per_run": 50,
+    "token_budget": {
+      "user": 256,
+      "agent": 1024,
+      "judge": 512,
+      "customer_evolver": 2048,
+      "service_evolver": 2048
+    },
+    "summary_limit": 3
+  },
+  "persistence": {
+    "output_dir": "results/performance_profile_clean_20260928",
+    "resume": true
+  },
+  "fresh_adversary": {
+    "enabled": false,
+    "rounds": 1,
+    "candidate_count": 1
+  }
+}

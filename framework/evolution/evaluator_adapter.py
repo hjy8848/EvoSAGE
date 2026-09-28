@@ -354,12 +354,19 @@ class EvoSAGEEpisodeEvaluator:
 
     def _cache_key(self, customer_policy, service_policy, case, split, generation, judge_enabled):
         payload = {
-            "version": "episode-cache-v3-exact-case",
+            "version": "episode-cache-v4-semantic-policy",
             "namespace": self.cache_namespace,
-            "customer_policy_id": customer_policy.policy_id,
-            "service_policy_id": service_policy.policy_id,
-            "customer_policy": self._fingerprint(customer_policy),
-            "service_policy": self._fingerprint(service_policy),
+            # IDs remain available on the cached EpisodeResult for provenance,
+            # but only executable policy semantics determine compatibility.
+            "customer_policy": customer_policy.semantic_fingerprint(),
+            # CustomerPolicyValidator also gates episode validity. Track its
+            # case-specific outcome separately so metadata that embeds hidden
+            # facts cannot borrow a valid cached episode while harmless IDs do
+            # not force a miss.
+            "customer_policy_validation": self._customer_policy_validation_contract(
+                customer_policy, case
+            ),
+            "service_policy": service_policy.semantic_fingerprint(),
             "case_id": getattr(case, "case_id", None),
             "intent": getattr(case, "intent", None),
             # Do not persist path_config itself: it can contain hidden
@@ -371,6 +378,36 @@ class EvoSAGEEpisodeEvaluator:
             "judge_enabled": judge_enabled,
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+    @staticmethod
+    def _customer_policy_validation_contract(customer_policy, case) -> dict[str, Any]:
+        case_spec = getattr(case, "case_spec", None)
+        try:
+            if isinstance(case_spec, dict):
+                from ..backend.types import CaseSpec
+                case_spec = CaseSpec(**case_spec)
+            from .customer_policy import CustomerPolicyValidator
+            CustomerPolicyValidator().validate(customer_policy, case_spec)
+            return {"valid": True}
+        except Exception as exc:
+            message = str(exc).lower()
+            if "evaluator-only" in message:
+                reason = "evaluator_reference"
+            elif "sample-specific" in message:
+                reason = "sample_specific_value"
+            elif "backend value" in message or "unobserved" in message:
+                reason = "hidden_value"
+            elif "stable id" in message:
+                reason = "missing_identity"
+            elif "protocol" in message or "manipulation" in message:
+                reason = "protocol_manipulation"
+            elif "strategy tag" in message:
+                reason = "strategy_tag"
+            else:
+                reason = "validation_error"
+            # Keep exception messages out of the cache key: a validator message
+            # can include a hidden backend value.
+            return {"valid": False, "reason": reason}
 
     @staticmethod
     def _fingerprint(value) -> str:
@@ -433,11 +470,23 @@ class EvoSAGEEpisodeEvaluator:
             return
 
     @staticmethod
-    def _with_phase(episode, phase, cache_hit):
+    def _with_phase(
+        episode, phase, cache_hit,
+        customer_policy_id: str | None = None,
+        service_policy_id: str | None = None,
+    ):
         result = copy.deepcopy(episode)
         result.metadata = dict(result.metadata or {})
         result.metadata["phase"] = phase
         result.metadata["cache_hit"] = cache_hit
+        if customer_policy_id is not None and result.customer_policy_id != customer_policy_id:
+            result.metadata["cache_source_customer_policy_id"] = result.customer_policy_id
+            result.customer_policy_id = customer_policy_id
+            result.metadata["customer_policy_id"] = customer_policy_id
+        if service_policy_id is not None and result.service_policy_id != service_policy_id:
+            result.metadata["cache_source_service_policy_id"] = result.service_policy_id
+            result.service_policy_id = service_policy_id
+            result.metadata["service_policy_id"] = service_policy_id
         return result
 
     @staticmethod
@@ -574,7 +623,13 @@ class EvoSAGEEpisodeEvaluator:
                 missing.append((index, case, key))
                 self.cache_misses += 1
             else:
-                outputs[index] = self._with_phase(cached, phase, cache_hit=True)
+                outputs[index] = self._with_phase(
+                    cached,
+                    phase,
+                    cache_hit=True,
+                    customer_policy_id=customer_policy.policy_id,
+                    service_policy_id=service_policy.policy_id,
+                )
                 self.cache_hits += 1
 
         if not missing:

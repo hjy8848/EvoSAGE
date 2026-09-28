@@ -16,7 +16,7 @@ from .archives import AttackArchive, DefenseArchive
 from .config import EvolutionConfig
 from .customer_evolver import CustomerEvolver
 from .customer_policy import CustomerPolicyValidator
-from .customer_selector import CustomerSelector
+from .customer_selector import CandidateScore, CustomerSelector
 from .evaluator_adapter import BudgetedEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
 from .generation_protocol import GenerationProtocolError
 from .persistence import RunStore
@@ -25,11 +25,13 @@ from .schemas import (
     CustomerPolicy,
     DefenseRecord,
     FailureOccurrence,
+    ServicePatch,
     ServicePolicy,
 )
 from .service_evolver import ServiceEvolver
 from .service_policy import ServicePolicySanitizer
 from .service_gate import ServiceGate
+from .service_gate import GateDecision
 from .split_manager import SplitManager
 from .weakness_frontier import WeaknessFrontier
 from .request_budget import APIRequestBudgetExceeded
@@ -86,6 +88,68 @@ class EvolutionRunner:
         self.frontier = WeaknessFrontier()
         self._generation_wall_times: dict[str, float] = {}
         self._active_generation: Optional[int] = None
+        self._active_stage = "initializing"
+        self._completed_phases: set[str] = set()
+        self._resume_checkpoint: Optional[dict[str, Any]] = None
+        self._generation_baseline_customer_policy: Optional[CustomerPolicy] = None
+        self._generation_baseline_service_policy: Optional[ServicePolicy] = None
+
+    def _checkpoint_path(self, generation: int) -> Path:
+        return self.store.run_dir / "generations" / f"gen_{generation:03d}" / "CHECKPOINT.json"
+
+    def _load_incomplete_checkpoint(self, generation: int) -> Optional[dict[str, Any]]:
+        if not self.config.persistence.resume or generation in self.store.completed_generations():
+            return None
+        path = self._checkpoint_path(generation)
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if int(value.get("generation", -1)) != generation or str(value.get("status", "")).startswith("complete"):
+            return None
+        return value
+
+    def _write_incomplete_checkpoint(self, status: str = "incomplete", **details) -> None:
+        generation = self._active_generation
+        if generation is None:
+            return
+        customer = getattr(self, "_active_customer_policy", None)
+        service = getattr(self, "_active_service_policy", None)
+        checkpoint = {
+            "generation": generation,
+            "status": status,
+            "stage": self._active_stage,
+            "completed_phases": sorted(self._completed_phases),
+            "completed_generations": self.store.completed_generations(),
+            "active_customer_policy": customer.to_dict() if customer is not None else None,
+            "active_service_policy": service.to_dict() if service is not None else None,
+            "generation_baseline_customer_policy": (
+                self._generation_baseline_customer_policy.to_dict()
+                if self._generation_baseline_customer_policy is not None else None
+            ),
+            "generation_baseline_service_policy": (
+                self._generation_baseline_service_policy.to_dict()
+                if self._generation_baseline_service_policy is not None else None
+            ),
+            # Keep these aliases readable by tooling created before this checkpoint schema.
+            "customer_policy": customer.to_dict() if customer is not None else None,
+            "service_policy": service.to_dict() if service is not None else None,
+            "episode_cache": (
+                "environment/episode_cache.jsonl"
+                if (self.store.run_dir / "environment/episode_cache.jsonl").exists()
+                else None
+            ),
+        }
+        checkpoint.update(details)
+        self.store.write_json(
+            f"generations/gen_{generation:03d}/CHECKPOINT.json", checkpoint
+        )
+
+    def _mark_phase_complete(self, phase: str, stage: Optional[str] = None) -> None:
+        self._completed_phases.add(phase)
+        if stage:
+            self._active_stage = stage
+        self._write_incomplete_checkpoint()
 
     def _persist_evolver_record(self, generation: int, kind: str, **extra) -> None:
         """Persist structured-generation provenance in the authoritative run dir."""
@@ -426,30 +490,25 @@ class EvolutionRunner:
                 self._persist_pending_evolver_records()
                 self._update_effective_thinking_provenance()
                 metrics = self._runtime_stats()
+                checkpoint_status = (
+                    "incomplete_budget_exhausted"
+                    if isinstance(exc, APIRequestBudgetExceeded)
+                    else "incomplete_inconclusive" if (
+                        isinstance(exc, GenerationProtocolError)
+                        or bool(getattr(exc, "inconclusive", False))
+                    ) else "incomplete_failed"
+                )
+                checkpoint_details = {"reason": str(exc), "failure_type": type(exc).__name__}
+                if isinstance(exc, APIRequestBudgetExceeded):
+                    checkpoint_details.update({
+                        "reason": "api_request_budget_exceeded",
+                        "budget_scope": exc.scope,
+                        "limit": exc.limit,
+                        "used": exc.used,
+                    })
+                self._write_incomplete_checkpoint(checkpoint_status, **checkpoint_details)
                 if isinstance(exc, APIRequestBudgetExceeded):
                     generation = self._active_generation
-                    if generation is not None:
-                        checkpoint = {
-                            "generation": generation,
-                            "status": "incomplete_budget_exhausted",
-                            "reason": "api_request_budget_exceeded",
-                            "budget_scope": exc.scope,
-                            "limit": exc.limit,
-                            "used": exc.used,
-                            "completed_generations": self.store.completed_generations(),
-                            "customer_policy": getattr(self, "_active_customer_policy", None).to_dict()
-                            if getattr(self, "_active_customer_policy", None) is not None else None,
-                            "service_policy": getattr(self, "_active_service_policy", None).to_dict()
-                            if getattr(self, "_active_service_policy", None) is not None else None,
-                            "episode_cache": (
-                                "environment/episode_cache.jsonl"
-                                if (self.store.run_dir / "environment/episode_cache.jsonl").exists()
-                                else None
-                            ),
-                        }
-                        self.store.write_json(
-                            f"generations/gen_{generation:03d}/CHECKPOINT.json", checkpoint
-                        )
                     metrics.update({
                         "run_status": "budget_exhausted",
                         "inconclusive_reason": "api_request_budget_exceeded",
@@ -572,21 +631,60 @@ class EvolutionRunner:
         })
         completed = self.store.completed_generations()
         start = (max(completed) + 1) if self.config.persistence.resume and completed else 0
-        customer = self._load_policy("customer_policy", CustomerPolicy())
-        service = self._load_policy("service_policy", ServicePolicy())
-        self._active_customer_policy = customer
-        self._active_service_policy = service
+        self._resume_checkpoint = self._load_incomplete_checkpoint(start)
+        checkpoint_customer = (self._resume_checkpoint or {}).get(
+            "active_customer_policy", (self._resume_checkpoint or {}).get("customer_policy")
+        )
+        checkpoint_service = (self._resume_checkpoint or {}).get(
+            "active_service_policy", (self._resume_checkpoint or {}).get("service_policy")
+        )
+        baseline_customer = (
+            (self._resume_checkpoint or {}).get("generation_baseline_customer_policy")
+            or checkpoint_customer
+        )
+        baseline_service = (
+            (self._resume_checkpoint or {}).get("generation_baseline_service_policy")
+            or checkpoint_service
+        )
+        customer = (
+            CustomerPolicy.from_dict(baseline_customer)
+            if baseline_customer else self._load_policy("customer_policy", CustomerPolicy())
+        )
+        service = (
+            ServicePolicy.from_dict(baseline_service)
+            if baseline_service else self._load_policy("service_policy", ServicePolicy())
+        )
+        self._active_customer_policy = (
+            CustomerPolicy.from_dict(checkpoint_customer) if checkpoint_customer else customer
+        )
+        self._active_service_policy = (
+            ServicePolicy.from_dict(checkpoint_service) if checkpoint_service else service
+        )
         if not self.config.persistence.resume or not (self.store.run_dir / "environment/initial_service_policy.json").exists():
             self.store.write_json("environment/initial_customer_policy.json", CustomerPolicy().to_dict())
             self.store.write_json("environment/initial_service_policy.json", ServicePolicy().to_dict())
         history = []
         for generation in range(start, self.config.max_generations):
             self._active_generation = generation
-            generation_started = time.monotonic()
-            gen_dir = self.store.generation_dir(generation)
+            self._completed_phases = set(
+                (self._resume_checkpoint or {}).get("completed_phases", [])
+                if int((self._resume_checkpoint or {}).get("generation", -1)) == generation
+                else []
+            )
+            self._active_stage = (
+                str((self._resume_checkpoint or {}).get("stage") or "generation_started")
+                if int((self._resume_checkpoint or {}).get("generation", -1)) == generation
+                else "generation_started"
+            )
             baseline_customer = customer
             baseline_service = service
+            self._generation_baseline_customer_policy = baseline_customer
+            self._generation_baseline_service_policy = baseline_service
+            self._write_incomplete_checkpoint()
+            generation_started = time.monotonic()
+            gen_dir = self.store.generation_dir(generation)
             if self.config.experiment_mode in {"customer_only", "coevolution"} and self.config.experiment_mode != "static":
+                self._active_stage = "customer_failure_scan"
                 prior_customer_episodes = self.evaluator.evaluate(
                     customer, service, splits.evolution, "evolution", generation, "customer_failure_scan"
                 )
@@ -597,15 +695,33 @@ class EvolutionRunner:
                     signature = item.vulnerability_signature_v2()
                     if signature is not None:
                         prior_failures.append(FailureOccurrence.from_episode(item, signature))
-                customer, candidate_records, scores = self.customer_evolver.evolve(
-                    customer, service, splits.evolution, self.evaluator, self.attack_archive, generation,
-                    self.config.customer.candidate_count,
-                    cases_per_candidate=self.config.customer.cases_per_candidate,
-                    elite_count=self.config.customer.elite_count,
-                    source_failures=prior_failures,
-                    frontier=self.frontier.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
-                    archive_summary=self.attack_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
-                )
+                self._mark_phase_complete("customer_failure_scan_completed", "customer_failure_scan_completed")
+                candidates_path = gen_dir / "customer_candidates.json"
+                if (
+                    "customer_candidate_selection_completed" in self._completed_phases
+                    and candidates_path.exists()
+                ):
+                    # A selected Customer candidate is a generation artifact, not an
+                    # episode-cache entry. Reuse it after restart instead of paying
+                    # for a fresh stochastic Evolver proposal.
+                    candidate_payload = json.loads(candidates_path.read_text(encoding="utf-8"))
+                    selected_data = candidate_payload.get("selected_policy") or checkpoint_customer
+                    if not isinstance(selected_data, dict):
+                        raise RuntimeError("checkpoint marks Customer selection complete but selected policy is missing")
+                    customer = CustomerPolicy.from_dict(selected_data)
+                    scores = [CandidateScore(**item) for item in candidate_payload.get("scores", [])]
+                    candidate_records = []
+                else:
+                    self._active_stage = "customer_candidate_generation_and_evaluation"
+                    customer, candidate_records, scores = self.customer_evolver.evolve(
+                        customer, service, splits.evolution, self.evaluator, self.attack_archive, generation,
+                        self.config.customer.candidate_count,
+                        cases_per_candidate=self.config.customer.cases_per_candidate,
+                        elite_count=self.config.customer.elite_count,
+                        source_failures=prior_failures,
+                        frontier=self.frontier.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
+                        archive_summary=self.attack_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
+                    )
                 self._active_customer_policy = customer
                 customer_evaluation_inconclusive = bool(scores) and not any(
                     score.episodes > 0 for score in scores
@@ -613,39 +729,45 @@ class EvolutionRunner:
                 customer_evaluation_status = (
                     "inconclusive" if customer_evaluation_inconclusive else "valid"
                 )
-                self.store.write_json(f"generations/gen_{generation:03d}/customer_candidates.json", {
-                    "selected_policy": customer.to_dict(), "scores": [score.to_dict() for score in scores],
-                    "candidate_episode_counts": [len(items) for _, items in candidate_records],
-                    "candidate_valid_episode_counts": [
-                        sum(item.is_substantively_evaluable() for item in items)
-                        for _, items in candidate_records
-                    ],
-                    "candidate_invalid_episode_counts": [
-                        sum(not item.is_substantively_evaluable() for item in items)
-                        for _, items in candidate_records
-                    ],
-                    "rejections": list(getattr(self.customer_evolver, "last_rejections", [])),
-                    "source_failures": [failure.to_dict() for failure in prior_failures],
-                    "evaluation_status": customer_evaluation_status,
-                    "selection_status": customer_evaluation_status,
-                    "reason": (
-                        "customer_candidate_evaluation_invalid:no_valid_episode_evidence"
-                        if customer_evaluation_inconclusive else None
-                    ),
-                })
-                self._persist_evolver_record(
-                    generation,
-                    "customer",
-                    selected_policy=customer.to_dict(),
-                    selected_policy_id=customer.policy_id,
-                    scores=[score.to_dict() for score in scores],
-                    evaluation_status=customer_evaluation_status,
-                    selection_status=customer_evaluation_status,
-                )
+                if "customer_candidate_selection_completed" not in self._completed_phases:
+                    self.store.write_json(f"generations/gen_{generation:03d}/customer_candidates.json", {
+                        "selected_policy": customer.to_dict(), "scores": [score.to_dict() for score in scores],
+                        "candidate_episode_counts": [len(items) for _, items in candidate_records],
+                        "candidate_valid_episode_counts": [
+                            sum(item.is_substantively_evaluable() for item in items)
+                            for _, items in candidate_records
+                        ],
+                        "candidate_invalid_episode_counts": [
+                            sum(not item.is_substantively_evaluable() for item in items)
+                            for _, items in candidate_records
+                        ],
+                        "rejections": list(getattr(self.customer_evolver, "last_rejections", [])),
+                        "source_failures": [failure.to_dict() for failure in prior_failures],
+                        "evaluation_status": customer_evaluation_status,
+                        "selection_status": customer_evaluation_status,
+                        "reason": (
+                            "customer_candidate_evaluation_invalid:no_valid_episode_evidence"
+                            if customer_evaluation_inconclusive else None
+                        ),
+                    })
+                    self._persist_evolver_record(
+                        generation,
+                        "customer",
+                        selected_policy=customer.to_dict(),
+                        selected_policy_id=customer.policy_id,
+                        scores=[score.to_dict() for score in scores],
+                        evaluation_status=customer_evaluation_status,
+                        selection_status=customer_evaluation_status,
+                    )
+                    self._active_customer_policy = customer
+                    self._mark_phase_complete(
+                        "customer_candidate_selection_completed", "customer_candidate_selection_completed"
+                    )
                 if customer_evaluation_inconclusive:
                     raise GenerationEvaluationInconclusive(
                         "customer_candidate_evaluation_invalid:no_valid_episode_evidence"
                     )
+                self._active_stage = "selected_customer_evaluation"
                 selected_episodes = self.evaluator.evaluate(customer, service, splits.evolution, "evolution", generation, "selected_customer")
                 signatures = [
                     signature
@@ -673,7 +795,11 @@ class EvolutionRunner:
                     reproduction_seed=self.config.seed,
                 )
                 self.frontier.add(selected_episodes)
+                self._mark_phase_complete(
+                    "selected_customer_evaluation_completed", "selected_customer_evaluation_completed"
+                )
             if self.config.experiment_mode in {"service_only", "coevolution"} and self.config.experiment_mode != "static":
+                self._active_stage = "service_failure_scan"
                 service_failure_episodes = self.evaluator.evaluate(
                     customer, service, splits.evolution, "evolution", generation, "service_failures"
                 )
@@ -684,37 +810,79 @@ class EvolutionRunner:
                     signature = item.vulnerability_signature_v2()
                     if signature is not None:
                         failures.append(FailureOccurrence.from_episode(item, signature))
-                service, decision, patch = self.service_evolver.evolve(
-                    service, failures, splits.validation, splits.validation, self.evaluator, generation,
-                    self.config.service.candidate_count,
-                    customer_policy=customer,
-                    exact_replay_instances=self.attack_archive.exact_instances(
-                        self.config.service.exact_replay_instance_count
-                    ),
-                    transfer_replay_policies=self._replay_policies(
-                        self.config.service.transfer_replay_policy_count or 0
-                    ),
-                    replay_attack_count=self.config.service.transfer_replay_policy_count or 0,
-                    defense_summary=self.defense_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
-                    historical_summary=self.service_evolver.last_candidate_records[-max(1, self.config.evaluation.summary_limit):],
-                )
-                self._active_service_policy = service
-                self.store.write_json(f"generations/gen_{generation:03d}/service_gate.json", {
-                    "accepted": decision.accepted, "reason": decision.reason, "delta": decision.delta,
-                    "patch": patch.to_dict() if patch else None,
-                    "candidates": list(getattr(self.service_evolver, "last_candidate_records", [])),
-                })
-                self._persist_evolver_record(
-                    generation,
-                    "service",
-                    selected_policy=service.to_dict(),
-                    selected_policy_id=service.policy_id,
-                    gate={
-                        "accepted": decision.accepted,
-                        "reason": decision.reason,
-                        "delta": decision.delta,
-                    },
-                )
+                self._mark_phase_complete("service_failure_scan_completed", "service_failure_scan_completed")
+                service_gate_path = gen_dir / "service_gate.json"
+                if (
+                    "service_candidate_gate_completed" in self._completed_phases
+                    and service_gate_path.exists()
+                ):
+                    # The gate artifact contains the selected/rejected patch and
+                    # candidate provenance. Rehydrate it instead of regenerating
+                    # a stochastic Service proposal after a restart.
+                    gate_payload = json.loads(service_gate_path.read_text(encoding="utf-8"))
+                    service_record_path = gen_dir / "service_generation.json"
+                    service_record = (
+                        json.loads(service_record_path.read_text(encoding="utf-8"))
+                        if service_record_path.exists() else {}
+                    )
+                    selected_service = (
+                        checkpoint_service
+                        or service_record.get("selected_policy")
+                        or service_record.get("candidate_policy")
+                    )
+                    if not isinstance(selected_service, dict):
+                        raise RuntimeError("checkpoint marks Service gate complete but selected policy is missing")
+                    service = ServicePolicy.from_dict(selected_service)
+                    decision = GateDecision(
+                        accepted=bool(gate_payload.get("accepted")),
+                        reason=str(gate_payload.get("reason") or "unknown"),
+                        delta=float(gate_payload.get("delta") or 0.0),
+                        metrics=dict(gate_payload.get("decision_metrics") or {}),
+                    )
+                    patch = ServicePatch.from_dict(gate_payload["patch"]) if gate_payload.get("patch") else None
+                    self.service_evolver.last_candidate_records = list(gate_payload.get("candidates") or [])
+                    self.service_evolver.last_baseline_metrics = dict(gate_payload.get("baseline_metrics") or {})
+                    self.service_evolver.last_selected_metrics = dict(gate_payload.get("selected_metrics") or {})
+                else:
+                    self._active_stage = "service_candidate_generation_and_gate"
+                    service, decision, patch = self.service_evolver.evolve(
+                        service, failures, splits.validation, splits.validation, self.evaluator, generation,
+                        self.config.service.candidate_count,
+                        customer_policy=customer,
+                        exact_replay_instances=self.attack_archive.exact_instances(
+                            self.config.service.exact_replay_instance_count
+                        ),
+                        transfer_replay_policies=self._replay_policies(
+                            self.config.service.transfer_replay_policy_count or 0
+                        ),
+                        replay_attack_count=self.config.service.transfer_replay_policy_count or 0,
+                        defense_summary=self.defense_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
+                        historical_summary=self.service_evolver.last_candidate_records[-max(1, self.config.evaluation.summary_limit):],
+                    )
+                    self._active_service_policy = service
+                    self.store.write_json(f"generations/gen_{generation:03d}/service_gate.json", {
+                        "accepted": decision.accepted, "reason": decision.reason, "delta": decision.delta,
+                        "patch": patch.to_dict() if patch else None,
+                        "decision_metrics": decision.metrics,
+                        "baseline_metrics": getattr(self.service_evolver, "last_baseline_metrics", {}),
+                        "selected_metrics": getattr(self.service_evolver, "last_selected_metrics", {}),
+                        "candidates": list(getattr(self.service_evolver, "last_candidate_records", [])),
+                    })
+                    self._persist_evolver_record(
+                        generation,
+                        "service",
+                        selected_policy=service.to_dict(),
+                        selected_policy_id=service.policy_id,
+                        gate={
+                            "accepted": decision.accepted,
+                            "reason": decision.reason,
+                            "delta": decision.delta,
+                        },
+                    )
+                    self._active_service_policy = service
+                    self._mark_phase_complete(
+                        "service_candidate_gate_completed", "service_candidate_gate_completed"
+                    )
                 if decision.accepted and patch:
                     before = getattr(self.service_evolver, "last_baseline_metrics", {})
                     after = getattr(self.service_evolver, "last_selected_metrics", {})
@@ -739,6 +907,7 @@ class EvolutionRunner:
                         robust_delta={"task_success": decision.metrics.get("robust_task_success", 0.0) - before.get("robust_task_success", 0.0)},
                         regression_cases=[case for item in getattr(self.service_evolver, "last_candidate_records", []) if item.get("accepted") and item.get("patch_id") == patch.patch_id for case in item.get("normal_regression_cases", [])],
                     ))
+            self._active_stage = "generation_summary"
             episodes = self.evaluator.evaluate(customer, service, splits.validation, "validation", generation, "generation_summary")
             self.store.append_jsonl(f"generations/gen_{generation:03d}/episodes.jsonl", [item.to_dict() for item in episodes])
             self.store.write_json(f"generations/gen_{generation:03d}/customer_policy.json", customer.to_dict())
@@ -755,6 +924,9 @@ class EvolutionRunner:
                 "customer_policy_id": customer.policy_id,
                 "orchestration": self._runtime_stats(),
             })
+            self._completed_phases.add("generation_summary_completed")
+            self._active_stage = "generation_completed"
+            self._write_incomplete_checkpoint("complete")
             if self.request_budget is not None:
                 gen_stats = self.request_budget.snapshot().get("generations", {}).get(str(generation), {})
                 used = gen_stats.get("provider_attempts", 0)

@@ -642,6 +642,247 @@ def test_real_adapter_caches_episode_but_separates_judge_modes(tmp_path):
     assert fresh_calls == [True]
 
 
+def test_policy_semantic_fingerprints_ignore_provenance_but_track_behavior():
+    customer_a = CustomerPolicy(
+        policy_id="customer-a", generation=0, created_at="2026-01-01T00:00:00Z",
+        strategy_tags=["truthful", "cooperative"],
+    )
+    customer_b = CustomerPolicy(
+        policy_id="customer-b", generation=9, created_at="2026-02-01T00:00:00Z",
+        parent_policy_ids=["old-parent"], source_failure_ids=["old-failure"],
+        strategy_tags=["truthful", "cooperative"],
+    )
+    assert customer_a.semantic_dict() == customer_b.semantic_dict()
+    assert customer_a.semantic_fingerprint() == customer_b.semantic_fingerprint()
+
+    behavior_change = CustomerPolicy.from_dict(customer_b.to_dict())
+    behavior_change.strategy_tags = ["truthful", "withholding"]
+    assert customer_a.semantic_fingerprint() != behavior_change.semantic_fingerprint()
+
+
+def test_service_semantic_fingerprint_tracks_compiled_rules_not_provenance():
+    service_a = ServicePolicy(
+        policy_id="service-a", generation=0, created_at="2026-01-01T00:00:00Z",
+        rules=[ServiceRule(
+            "rule-a", "VERIFICATION", "Verify order status before action.",
+            rule_schema_version=1,
+        )],
+    )
+    service_b = ServicePolicy(
+        policy_id="service-b", generation=8, created_at="2026-02-01T00:00:00Z",
+        parent_policy_id="old-parent",
+        mutation_history=[{"patch_id": "old-patch"}],
+        rules=[ServiceRule(
+            "rule-b", "VERIFICATION", "Verify order status before action.",
+            generation_added=8, rule_schema_version=1,
+        )],
+    )
+    assert service_a.semantic_dict() == service_b.semantic_dict()
+    assert service_a.semantic_fingerprint() == service_b.semantic_fingerprint()
+
+    changed_rule = ServicePolicy.from_dict(service_b.to_dict())
+    changed_rule.rules[0].text = "Ask for the order ID before querying."
+    assert service_a.semantic_fingerprint() != changed_rule.semantic_fingerprint()
+
+
+def test_persistent_episode_cache_hits_after_restart_with_equivalent_policy_timestamps(tmp_path):
+    from datetime import datetime, timezone
+
+    calls = []
+
+    class Pipeline:
+        def run_single_simulation(self, intent, **kwargs):
+            calls.append(intent)
+            return _fake_real_simulation(), _fake_real_report()
+
+    cache_path = tmp_path / "episode_cache.jsonl"
+    first = EvoSAGEEpisodeEvaluator(
+        lambda *_args, **_kwargs: Pipeline(),
+        cache_namespace="semantic-resume-test", cache_path=cache_path,
+    )
+    first_customer = CustomerPolicy(
+        policy_id="customer-before-restart", created_at="2026-01-01T00:00:00Z"
+    )
+    first_service = ServicePolicy(
+        policy_id="service-before-restart", created_at="2026-01-01T00:00:00Z"
+    )
+    case = SplitManager().build().evolution[0]
+    first.evaluate(first_customer, first_service, [case], "evolution", 0, "profile")
+    assert len(calls) == 1
+
+    restarted_calls = []
+
+    class RestartedPipeline(Pipeline):
+        def run_single_simulation(self, intent, **kwargs):
+            restarted_calls.append(intent)
+            return _fake_real_simulation(), _fake_real_report()
+
+    restarted = EvoSAGEEpisodeEvaluator(
+        lambda *_args, **_kwargs: RestartedPipeline(),
+        cache_namespace="semantic-resume-test", cache_path=cache_path,
+    )
+    second_customer = CustomerPolicy(
+        policy_id="customer-after-restart",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    second_service = ServicePolicy(
+        policy_id="service-after-restart",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    restored = restarted.evaluate(
+        second_customer, second_service, [case], "evolution", 0, "profile"
+    )
+    assert restored[0].metadata["cache_hit"] is True
+    assert restarted.cache_hits == 1
+    assert restarted.cache_misses == 0
+    assert restarted_calls == []
+    assert restored[0].customer_policy_id == second_customer.policy_id
+    assert restored[0].service_policy_id == second_service.policy_id
+    assert restored[0].metadata["cache_source_customer_policy_id"] == first_customer.policy_id
+    assert restored[0].metadata["cache_source_service_policy_id"] == first_service.policy_id
+
+    metadata_only_change = CustomerPolicy(
+        policy_id="customer-with-leak-metadata",
+        created_at=second_customer.created_at,
+        mutation_rationale="mentions expected_action and is rejected by the validity contract",
+    )
+    assert metadata_only_change.semantic_fingerprint() == second_customer.semantic_fingerprint()
+    assert restarted._cache_key(
+        metadata_only_change, second_service, case, "evolution", 0, False
+    ) != restarted._cache_key(
+        second_customer, second_service, case, "evolution", 0, False
+    )
+    assert "expected_action" not in restarted._cache_key(
+        metadata_only_change, second_service, case, "evolution", 0, False
+    )
+
+    # Generation is retained because the evaluator derives user_id from it;
+    # this can affect the pipeline's user/profile context.
+    assert restarted._cache_key(second_customer, second_service, case, "evolution", 0, False) != (
+        restarted._cache_key(second_customer, second_service, case, "evolution", 1, False)
+    )
+
+
+def test_resume_reuses_checkpointed_customer_selection_without_regenerating(tmp_path):
+    from framework.evolution.customer_selector import CandidateScore
+
+    selected = CustomerPolicy(
+        policy_id="selected-customer-g0", generation=0,
+        strategy_tags=["truthful", "cooperative"],
+    )
+
+    class MustNotRegenerateCustomer:
+        last_generation_record = None
+        last_rejections = []
+
+        def evolve(self, *args, **kwargs):
+            raise AssertionError("resume regenerated a persisted Customer candidate")
+
+    config = EvolutionConfig.from_dict({
+        "experiment_mode": "customer_only",
+        "max_generations": 1,
+        "splits": {
+            "strategy": "instance_holdout", "seed": 7,
+            "evolution_ratio": 0.5, "validation_ratio": 0.25,
+            "heldout_ratio": 0.25, "max_cases": 3,
+        },
+        "persistence": {"output_dir": str(tmp_path / "resume-run"), "resume": True},
+    })
+    runner = EvolutionRunner(
+        config,
+        evaluator=MockEpisodeEvaluator(vulnerability_tags=()),
+        customer_evolver=MustNotRegenerateCustomer(),
+    )
+    score = CandidateScore(
+        policy_id=selected.policy_id, attack_success=0.0, novelty=0.0,
+        node_diversity=0.0, fitness=0.0, episodes=1,
+    )
+    runner.store.write_json("generations/gen_000/customer_candidates.json", {
+        "selected_policy": selected.to_dict(),
+        "scores": [score.to_dict()],
+        "evaluation_status": "valid",
+        "selection_status": "valid",
+    })
+    runner._active_generation = 0
+    runner._active_stage = "customer_candidate_selection_completed"
+    runner._completed_phases = {
+        "customer_failure_scan_completed", "customer_candidate_selection_completed"
+    }
+    runner._active_customer_policy = selected
+    runner._active_service_policy = ServicePolicy()
+    runner._generation_baseline_customer_policy = CustomerPolicy()
+    runner._generation_baseline_service_policy = ServicePolicy()
+    runner._write_incomplete_checkpoint(
+        "incomplete_budget_exhausted", reason="test interrupted after selection"
+    )
+
+    result = runner.run()
+    assert result["completed_generations"] == [0]
+    checkpoint = json.loads(
+        (runner.store.run_dir / "generations/gen_000/CHECKPOINT.json").read_text()
+    )
+    assert checkpoint["status"] == "complete"
+    assert checkpoint["active_customer_policy"]["policy_id"] == selected.policy_id
+    assert "customer_candidate_selection_completed" in checkpoint["completed_phases"]
+
+
+def test_resume_reuses_checkpointed_service_gate_without_regenerating(tmp_path):
+    selected_service = ServicePolicy(policy_id="selected-service-g0", generation=0)
+
+    class MustNotRegenerateService:
+        last_candidate_records = []
+        last_baseline_metrics = {}
+        last_selected_metrics = {}
+
+        def evolve(self, *args, **kwargs):
+            raise AssertionError("resume regenerated a persisted Service candidate")
+
+    run_dir = tmp_path / "service-resume-run"
+    config = EvolutionConfig.from_dict({
+        "experiment_mode": "service_only",
+        "max_generations": 1,
+        "splits": {
+            "strategy": "instance_holdout", "seed": 7,
+            "evolution_ratio": 0.5, "validation_ratio": 0.25,
+            "heldout_ratio": 0.25, "max_cases": 3,
+        },
+        "persistence": {"output_dir": str(run_dir), "resume": True},
+    })
+    runner = EvolutionRunner(
+        config,
+        evaluator=MockEpisodeEvaluator(vulnerability_tags=()),
+        service_evolver=MustNotRegenerateService(),
+    )
+    runner.store.write_json("generations/gen_000/service_gate.json", {
+        "accepted": False, "reason": "insufficient_adversarial_improvement",
+        "delta": 0.0, "patch": None, "candidates": [],
+    })
+    runner.store.write_json("generations/gen_000/service_generation.json", {
+        "selected_policy": selected_service.to_dict(),
+    })
+    runner._active_generation = 0
+    runner._active_stage = "service_candidate_gate_completed"
+    runner._completed_phases = {
+        "service_failure_scan_completed", "service_candidate_gate_completed"
+    }
+    runner._active_customer_policy = CustomerPolicy()
+    runner._active_service_policy = selected_service
+    runner._generation_baseline_customer_policy = CustomerPolicy()
+    runner._generation_baseline_service_policy = ServicePolicy()
+    runner._write_incomplete_checkpoint(
+        "incomplete_budget_exhausted", reason="test interrupted after Service gate"
+    )
+
+    result = runner.run()
+    assert result["completed_generations"] == [0]
+    checkpoint = json.loads(
+        (run_dir / "generations/gen_000/CHECKPOINT.json").read_text()
+    )
+    assert checkpoint["status"] == "complete"
+    assert checkpoint["active_service_policy"]["policy_id"] == selected_service.policy_id
+    assert "service_candidate_gate_completed" in checkpoint["completed_phases"]
+
+
 def test_invalid_episode_is_retried_and_only_successful_result_is_cached(tmp_path):
     calls = []
 
