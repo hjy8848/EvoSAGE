@@ -1,69 +1,73 @@
-"""Adversarial customer--service co-evolution for EvoSAGE.
+"""Public API for EvoSAGE's open-ended Customer search core.
 
-The package deliberately sits above the existing benchmark.  It owns policy
-versions, candidate selection, dataset manifests and experiment artifacts; it
-does not redefine CaseSpec, BackendEnvironment or evaluator semantics.
+Combined Service/co-evolution code stays available through its existing
+submodules and is imported lazily only when a legacy API is explicitly used.
 """
 
-from .schemas import (
-    AttackInstance,
-    CustomerPolicy,
-    DefenseRecord,
-    EpisodeResult,
-    FailureOccurrence,
-    FailureSignature,
-    ServicePatch,
-    ServicePolicy,
-    ServiceRule,
-    VulnerabilitySignature,
-    VulnerabilityArchiveEntry,
-    signature_from_dict,
-)
 from .config import EvolutionConfig, load_config
-from .archives import AttackArchive, DefenseArchive
+from .customer.policy import AdversaryPolicy
+from .customer.runner import CustomerEvolutionRunner
+from .customer_evolver import CustomerEvolver, LLMCustomerPolicyGenerator
+from .customer_selector import CandidateScore, CustomerSelector
+from .evaluator_adapter import BudgetedEpisodeEvaluator, EvoSAGEEpisodeEvaluator, MockEpisodeEvaluator
+from .schemas import EpisodeResult
 from .split_manager import DatasetSplits, SplitManager
-from .runner import EvolutionRunner
-from .customer_policy import CustomerPolicyCompiler, CustomerPolicyValidator, PolicyCustomerModel
-from .service_policy import ServicePolicyCompiler, ServicePolicySanitizer, ServicePolicyValidator
-from .service_gate import GateDecision, ServiceGate
-from .evaluator_adapter import BudgetedEpisodeEvaluator, EvoSAGEEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
-from .weakness_frontier import WeaknessFrontier
-from .attribution import FailureAttribution, infer_failure_attribution, infer_failure_location
 
 __all__ = [
-    "AttackArchive",
-    "AttackInstance",
-    "CustomerPolicy",
+    "AdversaryPolicy",
+    "CandidateScore",
+    "CustomerEvolver",
+    "CustomerEvolutionRunner",
+    "CustomerSelector",
     "DatasetSplits",
-    "DefenseArchive",
-    "DefenseRecord",
     "EpisodeResult",
-    "FailureAttribution",
-    "FailureOccurrence",
     "EvolutionConfig",
-    "EvolutionRunner",
-    "CustomerPolicyCompiler",
-    "CustomerPolicyValidator",
-    "PolicyCustomerModel",
-    "FailureSignature",
-    "VulnerabilitySignature",
-    "VulnerabilityArchiveEntry",
-    "ServicePatch",
-    "ServicePolicy",
-    "ServiceRule",
+    "LLMCustomerPolicyGenerator",
     "SplitManager",
-    "ServicePolicyCompiler",
-    "ServicePolicySanitizer",
-    "ServicePolicyValidator",
-    "GateDecision",
-    "ServiceGate",
-    "EvoSAGEEpisodeEvaluator",
     "BudgetedEpisodeEvaluator",
+    "EvoSAGEEpisodeEvaluator",
     "MockEpisodeEvaluator",
-    "aggregate_episode_metrics",
-    "WeaknessFrontier",
-    "infer_failure_location",
-    "infer_failure_attribution",
-    "signature_from_dict",
     "load_config",
 ]
+
+
+_LEGACY_EXPORTS = {
+    "AttackArchive": (".archives", "AttackArchive"),
+    "AttackInstance": (".schemas", "AttackInstance"),
+    "CustomerPolicy": (".schemas", "CustomerPolicy"),
+    "DefenseArchive": (".archives", "DefenseArchive"),
+    "DefenseRecord": (".schemas", "DefenseRecord"),
+    "EvolutionRunner": (".runner", "EvolutionRunner"),
+    "FailureAttribution": (".attribution", "FailureAttribution"),
+    "FailureOccurrence": (".schemas", "FailureOccurrence"),
+    "FailureSignature": (".schemas", "FailureSignature"),
+    "ServicePatch": (".schemas", "ServicePatch"),
+    "ServicePolicy": (".schemas", "ServicePolicy"),
+    "ServiceRule": (".schemas", "ServiceRule"),
+    "VulnerabilitySignature": (".schemas", "VulnerabilitySignature"),
+    "VulnerabilityArchiveEntry": (".schemas", "VulnerabilityArchiveEntry"),
+    "CustomerPolicyCompiler": (".customer_policy", "CustomerPolicyCompiler"),
+    "CustomerPolicyValidator": (".customer_policy", "CustomerPolicyValidator"),
+    "PolicyCustomerModel": (".customer_policy", "PolicyCustomerModel"),
+    "ServicePolicyCompiler": (".service_policy", "ServicePolicyCompiler"),
+    "ServicePolicySanitizer": (".service_policy", "ServicePolicySanitizer"),
+    "ServicePolicyValidator": (".service_policy", "ServicePolicyValidator"),
+    "GateDecision": (".service_gate", "GateDecision"),
+    "ServiceGate": (".service_gate", "ServiceGate"),
+    "WeaknessFrontier": (".weakness_frontier", "WeaknessFrontier"),
+    "infer_failure_location": (".attribution", "infer_failure_location"),
+    "infer_failure_attribution": (".attribution", "infer_failure_attribution"),
+    "signature_from_dict": (".schemas", "signature_from_dict"),
+    "aggregate_episode_metrics": (".evaluator_adapter", "aggregate_episode_metrics"),
+}
+
+
+def __getattr__(name):
+    target = _LEGACY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(name)
+    from importlib import import_module
+    module = import_module(target[0], __name__)
+    value = getattr(module, target[1])
+    globals()[name] = value
+    return value

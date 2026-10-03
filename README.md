@@ -31,6 +31,30 @@ This evaluation framework is a production-grade multi-turn dialogue evaluation s
 
 **Core Script**: `run.sh`
 
+## EvoSAGE Customer search
+
+The first-stage research question is whether open-ended Customer strategies can
+reduce a fixed Service's official benchmark performance. Customer behavior is
+not required to be truthful, cooperative, realistic, or goal-preserving; only
+runtime validity and benchmark integrity are hard boundaries.
+
+```text
+Customer strategy C_t
+        ↓ free-form proposal
+C_t + candidate strategies
+        ↓ same E cases / fixed Service S0
+official evaluator
+        ↓ fitness = 1 - mean(task_success) on runtime-valid episodes
+strict elitist selection
+        ↓
+C_t+1
+```
+
+Service/co-evolution remains a separate later-stage path. The Customer-only
+runner does not run failure attribution, service repair, archives, or a
+selected-policy rerun. See [`docs/ADVERSARIAL_COEVOLUTION.md`](docs/ADVERSARIAL_COEVOLUTION.md)
+for the current research contract.
+
 ---
 
 ## GPU Resource Allocation Strategy
@@ -947,14 +971,14 @@ export AGENT_MODEL_PATH="Qwen/Qwen2.5-32B-Instruct"
 - [ ] Logs error-free (`tail vllm_logs/*.log`)
 - [ ] Services accessible (`curl localhost:8000/v1/models`)
 
-### Adversarial co-evolution (Ecommerce MVP)
+### Legacy Service/co-evolution modes
 
-The research-grade co-evolution layer is documented in
-[`docs/ADVERSARIAL_COEVOLUTION.md`](docs/ADVERSARIAL_COEVOLUTION.md). It is
-currently limited to `ecommerce_refund`, preserves the existing evaluator, and
-uses immutable evolution/validation/held-out manifests, reusable customer
-policies, structured service patches, archives, gates, and cross-generation
-analysis. The default CLI is offline and deterministic:
+The older combined Service/co-evolution runner and its archives, gates, and
+attribution remain available for historical experiments. The current first
+research stage is the isolated Customer-only runner described in
+[`docs/ADVERSARIAL_COEVOLUTION.md`](docs/ADVERSARIAL_COEVOLUTION.md): fixed
+Service S0, open-ended Customer strategies, and official-score-only selection.
+For legacy runs, the default CLI remains offline and deterministic:
 
 ```bash
 ./.venv/bin/python scripts/run_adversarial_coevolution.py \
@@ -965,15 +989,9 @@ Use `--evaluator real --model MODEL` only when the OpenAI-compatible API and
 `OPENAI_API_KEY` are configured in the calling environment. The key is never
 stored in the repository or result artifacts.
 
-### EvoSAGE Adversarial Evolution Research Mode
-
-The first research stage studies a **fixed-world, goal-preserving, fact-unconstrained Customer adversary** against a fixed Service baseline (`S0`). The Customer may lie, invent claims, conceal information, contradict itself, challenge an official lookup, or apply pressure. Customer claims are not world truth: the backend, official tools, and evaluator remain authoritative. The Customer policy and simulator receive only the Customer-visible case projection and public interaction results, never hidden backend state, gold actions, expected paths, or evaluator internals.
-
-The Customer must continue pursuing its originally assigned business goal. Abandoning or replacing that goal, deliberately stalling, refusing all participation, exploiting termination, or manipulating the benchmark is invalid and excluded from attack fitness. Fitness is the official attributable Service-failure rate over valid episodes; provider/protocol/environment failures are not attack success. Customer-only evolution evaluates the incumbent and proposals on the same evolution panel against fixed `S0`; it does not evolve the Service. Later Service co-evolution is a separate research stage and is not implied by this first-stage smoke profile.
-
-New runs identify the open strategy contract with `customer.strategy_schema: deceptive_free_text_v1`; obsolete tactic-tag fields remain readable for old configs but do not constrain the real LLM strategy path. The deterministic `PolicyCustomerModel` is a test/fixture path, not the real adversary executor. The older `rewrite` mode preserves its non-adversarial paraphrase behavior when no adversary policy is attached; with a policy attached, the free-text deceptive Customer contract takes precedence.
-
-A bounded InferAI customer-only smoke profile is available at [`configs/ecommerce_deceptive_customer_only_smoke_20261003.yaml`](configs/ecommerce_deceptive_customer_only_smoke_20261003.yaml). It uses two generations, two candidates, a small fixed evolution panel, explicit request caps, and `OPENAI_API_KEY`; it is a smoke configuration, not a statistical experiment.
+The historical `configs/ecommerce_deceptive_customer_only_smoke_20261003.yaml`
+is retained as an old configuration/artifact reference. It is not the canonical
+protocol for the current Customer-only research stage.
 
 ---
 

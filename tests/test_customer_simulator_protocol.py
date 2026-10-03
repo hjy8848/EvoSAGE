@@ -16,6 +16,7 @@ from framework.evolution.config import (
     SplitConfig,
 )
 from framework.evolution.customer_selector import CustomerSelector
+from framework.evolution.customer.runner import CustomerEvolutionInconclusive, CustomerEvolutionRunner
 from framework.evolution.customer_policy import CustomerPolicyCompiler
 from framework.evolution.customer_behavior_validity import assess_customer_behavior
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator, aggregate_episode_metrics
@@ -25,6 +26,7 @@ from framework.evolution.service_gate import GateDecision
 from framework.evolution.split_manager import SplitManager
 from framework.llm_integration.llm_client import LLMResponse, OpenAIAPIClient
 from framework.llm_integration.llm_user_model import (
+    AdversarialCustomerModel,
     CustomerSimulatorProtocolError,
     LLMUserModel,
 )
@@ -181,6 +183,24 @@ def test_customer_policy_is_injected_in_opening_and_followup_requests():
     assert all(record["customer_policy_id"] == policy.policy_id for record in provenance)
 
 
+def test_adversarial_customer_model_allows_goal_abandonment_without_changing_legacy_prompt():
+    from framework.evolution.customer.policy import AdversaryPolicy
+
+    profile = _profile()
+    policy = AdversaryPolicy(
+        policy_id="free-adversary",
+        strategy="Refuse to cooperate and abandon the refund request.",
+    )
+    adversarial = AdversarialCustomerModel(profile, case_spec=_case(), customer_policy=policy)
+    adversarial_prompt = adversarial._build_initial_message_prompt()
+    assert "There is no required Customer behavior style" in adversarial_prompt
+    assert "change or abandon the request" in adversarial_prompt
+    assert policy.strategy in adversarial_prompt
+
+    legacy = LLMUserModel(profile, case_spec=_case())
+    assert "You must keep pursuing the originally assigned Customer goal" in legacy._build_initial_message_prompt()
+
+
 def test_non_mandatory_opening_without_identifier_remains_valid():
     case = _case(show_order_id_initially=False)
     client = _SequenceClient([_response("I want to return my earbuds.")])
@@ -301,7 +321,7 @@ def test_private_identifier_prompt_keeps_order_and_customer_id_roles_distinct():
     prompt = client.prompts[0]
     assert '"order_id": "ORD-123456"' in prompt
     assert '"customer_id": "CUS-123"' in prompt
-    assert "You may lie" not in prompt  # no policy means no generated deception strategy
+    assert "You must keep pursuing the originally assigned Customer goal" in prompt
 
 
 def test_legacy_disclosure_flags_do_not_change_customer_prompt_or_knowledge():
@@ -663,15 +683,12 @@ def test_persistent_empty_customer_generation_is_invalid_and_excluded_everywhere
 
     aggregate = aggregate_episode_metrics([episode])
     assert aggregate["episodes"] == 0
-    score = CustomerSelector().score(policy, [episode], set())
-    assert score.attack_success is None
-    assert score.novelty is None
-    assert score.coverage is None
+    score = CustomerSelector().score(policy, [episode])
     assert score.fitness is None
     assert score.evaluation_status == "inconclusive"
     assert score.invalid_episode_count == 1
-    assert score.episodes == 0
-    selected, _ = CustomerSelector().select([(policy, [episode])], set())
+    assert score.valid_episode_count == 0
+    selected, _ = CustomerSelector().select([(policy, [episode])])
     assert selected is None
 
     signature = FailureSignature.from_episode(episode)
@@ -765,23 +782,23 @@ def test_all_invalid_customer_candidate_evaluations_are_inconclusive_without_com
         splits=SplitConfig(max_cases=3),
         persistence=PersistenceConfig(output_dir=str(tmp_path / "customer-only")),
     )
-    runner = EvolutionRunner(config, evaluator=InvalidEvaluator())
-    with pytest.raises(GenerationEvaluationInconclusive, match="customer_candidate_evaluation_invalid"):
+    runner = CustomerEvolutionRunner(config, evaluator=InvalidEvaluator())
+    with pytest.raises(CustomerEvolutionInconclusive, match="incumbent_has_no_runtime_valid_official_score"):
         runner.run()
 
-    candidates = json.loads(
-        (tmp_path / "customer-only/generations/gen_000/customer_candidates.json").read_text()
+    selection = json.loads(
+        (tmp_path / "customer-only/generations/gen_000/selection.json").read_text()
     )
-    assert candidates["evaluation_status"] == "inconclusive"
-    assert candidates["selection_status"] == "inconclusive"
-    assert all(score["fitness"] is None for score in candidates["scores"])
-    assert all(score["episodes"] == 0 for score in candidates["scores"])
+    assert selection["selection_status"] == "inconclusive"
+    assert selection["reason"] == "incumbent_has_no_runtime_valid_official_score"
+    assert all(score["fitness"] is None for score in selection["candidate_scores"])
     assert not (tmp_path / "customer-only/generations/gen_000/COMPLETE.json").exists()
     metrics = json.loads(
         (tmp_path / "customer-only/analysis/orchestration_metrics.json").read_text()
     )
     assert metrics["run_status"] == "inconclusive"
-    assert metrics["inconclusive_reason"] == "customer_candidate_evaluation_invalid:no_valid_episode_evidence"
+    assert metrics["inconclusive_reason"] == "incumbent_has_no_runtime_valid_official_score"
+    assert json.loads((tmp_path / "customer-only/analysis/run_status.json").read_text())["status"] == "inconclusive"
 
 
 def test_customer_score_uses_only_valid_episodes_when_invalids_are_mixed():
@@ -815,11 +832,11 @@ def test_customer_score_uses_only_valid_episodes_when_invalids_are_mixed():
         invalid_reason="customer_simulator_invalid:empty_message",
     )
 
-    score = CustomerSelector().score(policy, [valid_failure, invalid], set())
+    score = CustomerSelector().score(policy, [valid_failure, invalid])
     assert score.evaluation_status == "valid"
-    assert score.episodes == 1
+    assert score.valid_episode_count == 1
     assert score.invalid_episode_count == 1
-    assert score.attack_success == 1.0
+    assert score.fitness == 1.0
 
 
 def test_nonmandatory_opening_without_order_id_remains_valid_business_failure():

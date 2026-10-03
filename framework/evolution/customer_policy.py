@@ -26,6 +26,13 @@ class CustomerPolicyValidator:
         self.allowed_tags = None
 
     def validate(self, policy: CustomerPolicy, case_spec: Optional[CaseSpec] = None) -> None:
+        # The new Customer-only core uses a compact schema with its own
+        # integrity validator. This branch keeps the legacy combined runner
+        # able to execute compact policies without restoring business checks.
+        from .customer.policy import AdversaryPolicy
+        if isinstance(policy, AdversaryPolicy):
+            policy.validate_integrity()
+            return
         policy.validate_for_case(case_spec)
         if not policy.policy_id:
             raise PolicyValidationError("adversarial strategy needs a stable id")

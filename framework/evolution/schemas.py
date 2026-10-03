@@ -27,12 +27,11 @@ def _semantic_fingerprint(value: Any) -> str:
 
 
 @dataclass(init=False)
-class AdversaryPolicy:
-    """Free-text adversarial strategy with compact, auditable lineage.
+class LegacyCustomerPolicy:
+    """Compatibility reader/model for historical tag-based customer policies.
 
-    Old tag-based policy dictionaries remain loadable at the boundary, but
-    new records contain only the strategy, hypothesis, lineage and provenance.
-    Legacy fields are compatibility properties and never drive the LLM path.
+    New adversarial-search code uses the compact ``customer.policy.AdversaryPolicy``.
+    This class remains solely for old configs, tests, and co-evolution artifacts.
     """
 
     policy_id: str
@@ -256,7 +255,11 @@ class AdversaryPolicy:
     )
 
 
-CustomerPolicy = AdversaryPolicy
+CustomerPolicy = LegacyCustomerPolicy
+
+# Keep the public schema import pointed at the new compact contract. Historical
+# ``CustomerPolicy`` remains a separate adapter-compatible type above.
+from .customer.policy import AdversaryPolicy  # noqa: E402
 
 
 @dataclass
@@ -718,7 +721,7 @@ class AttackInstance:
             service_policy_id_when_discovered=episode.service_policy_id,
             primary_error=signature.failure_type,
             failure_stage=signature.failure_stage,
-            strategy_tags=list(policy.strategy_tags),
+            strategy_tags=list(getattr(policy, "strategy_tags", []) or []),
             dataset_case=dict(dataset_case) if dataset_case is not None else None,
         )
 
@@ -822,13 +825,35 @@ class EpisodeResult:
     _occurrence_artifact_payload: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
 
     def is_evaluation_invalid(self) -> bool:
+        runtime_error_markers = {
+            "protocol_failure", "json_parse_failed", "provider_error", "timeout",
+            "llm_timeout", "transport_error", "tls_error", "output_truncated",
+            "no_valid_agent_decision", "empty_output", "empty_message",
+            "missing_official_score",
+        }
         return (
             self.evaluation_status != "valid"
             or bool(self.invalid_reason)
             or bool((self.metadata or {}).get("evaluation_status") == "invalid")
             or bool((self.metadata or {}).get("protocol_failure", False))
-            or "protocol_failure" in (self.error_types or [])
-            or "json_parse_failed" in (self.error_types or [])
+            or bool(runtime_error_markers.intersection(self.error_types or []))
+            or bool((self.metadata or {}).get("provider_error"))
+            or bool((self.metadata or {}).get("timeout"))
+            or bool((self.metadata or {}).get("output_truncated"))
+            or bool((self.metadata or {}).get("no_valid_agent_decision"))
+        )
+
+    def is_runtime_evaluable(self) -> bool:
+        """Whether the benchmark ran and produced an official decision.
+
+        Customer behavior, business truthfulness, and failure attribution are
+        deliberately excluded: only provider/protocol and environment validity
+        determine whether an official score can enter Customer fitness.
+        """
+        return (
+            not self.is_evaluation_invalid()
+            and self.protocol_valid
+            and self.environment_valid
         )
 
     def is_substantively_evaluable(self) -> bool:
@@ -851,11 +876,18 @@ class EpisodeResult:
             and self.service_failure_attributable
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, include_analysis_artifacts: bool = True) -> Dict[str, Any]:
         value = asdict(self)
         value.pop("_signature_artifact_version", None)
         value.pop("_signature_artifact_payload", None)
         value.pop("_occurrence_artifact_payload", None)
+        if not include_analysis_artifacts:
+            value.pop("vulnerability_signature", None)
+            value.pop("failure_occurrence", None)
+            value.pop("failure_signature", None)
+            value.pop("customer_behavior_valid", None)
+            value.pop("service_failure_attributable", None)
+            return value
         if not self.customer_behavior_valid or not self.environment_valid:
             value["vulnerability_signature"] = None
             value["failure_occurrence"] = None

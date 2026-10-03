@@ -19,7 +19,8 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
                         agent_max_retries: int = 1, judge_max_retries: int = 1,
                         judge_validation_retries: int = 2,
                         customer_protocol_retries: int = 1,
-                        rate_limit_backoff_seconds: float = 0.0):
+                        rate_limit_backoff_seconds: float = 0.0,
+                        include_failure_analysis: bool = True):
     from run_evaluation_with_llm import LLMEvaluationPipeline
     tool_contract_config = ToolContractConfig.from_value(tool_contract_config)
 
@@ -82,9 +83,11 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
             f"|judge-retries={judge_max_retries}:{judge_validation_retries}"
             f"|tool-contract={tool_contract_config.provider_schema_strict}:"
             f"{tool_contract_config.runtime_schema_validation}"
+            f"|failure-analysis={include_failure_analysis}"
         ),
         cache_path=Path(output_dir) / "environment" / "episode_cache.jsonl",
         reset_cache=not resume,
         invalid_evaluation_retries=invalid_evaluation_retries,
         request_budget=request_budget,
+        include_failure_analysis=include_failure_analysis,
     )

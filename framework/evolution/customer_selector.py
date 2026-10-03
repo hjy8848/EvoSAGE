@@ -1,180 +1,171 @@
-"""Deterministic customer candidate scoring and selection."""
+"""Official-score-only selection for open-ended Customer search."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
-import warnings
-from .evaluator_adapter import aggregate_episode_metrics
-from .schemas import CustomerPolicy, EpisodeResult
+from typing import Iterable
 
-
-def _is_fitness_eligible(episode: EpisodeResult) -> bool:
-    """Only protocol-, environment-, and Customer-valid evidence may score."""
-    return episode.is_substantively_evaluable()
+from .customer.policy import AdversaryPolicy
+from .schemas import EpisodeResult
 
 
 @dataclass
 class CandidateScore:
     policy_id: str
-    attack_success: Optional[float]
-    novelty: Optional[float]
-    node_diversity: Optional[float]
-    fitness: Optional[float]
-    episodes: int
-    evaluation_status: str = "valid"
-    invalid_episode_count: int = 0
-    invalid_reasons: Optional[List[str]] = None
+    fitness: float | None
+    official_task_success: float | None
+    valid_episode_count: int
+    invalid_episode_count: int
+    evaluation_status: str
+    invalid_reasons: list[str] | None = None
 
     @property
-    def coverage(self) -> Optional[float]:
-        """Deprecated API alias; this is case-normalized failure-node diversity."""
-        return self.node_diversity
+    def episodes(self) -> int:
+        """Legacy runner compatibility; counts runtime-valid score evidence."""
+        return self.valid_episode_count
 
-    def to_dict(self):
-        value = self.__dict__.copy()
+    def to_dict(self) -> dict:
+        value = dict(self.__dict__)
         value["invalid_reasons"] = list(self.invalid_reasons or [])
         return value
 
+    @classmethod
+    def from_dict(cls, value: dict) -> "CandidateScore":
+        """Load both compact scores and pre-refactor persisted score rows."""
+        valid_count = value.get("valid_episode_count", value.get("episodes", 0))
+        fitness = value.get("fitness")
+        official_success = value.get("official_task_success")
+        if official_success is None and fitness is not None:
+            official_success = 1.0 - float(fitness)
+        return cls(
+            policy_id=str(value.get("policy_id", "")),
+            fitness=float(fitness) if fitness is not None else None,
+            official_task_success=(
+                float(official_success) if official_success is not None else None
+            ),
+            valid_episode_count=int(valid_count or 0),
+            invalid_episode_count=int(value.get("invalid_episode_count", 0) or 0),
+            evaluation_status=value.get(
+                "evaluation_status", "valid" if valid_count else "inconclusive"
+            ),
+            invalid_reasons=list(value.get("invalid_reasons") or []),
+        )
+
 
 class CustomerSelector:
-    def __init__(self, weights=None, tie_tolerance: float = 1e-12):
-        # ``weights`` is accepted only for old configs; official Customer
-        # fitness is exactly the valid-episode Service failure rate.
-        self.weights = {"attack_success": 1.0}
-        self.tie_tolerance = max(0.0, float(tie_tolerance))
-        self.last_selection_record = None
+    """Score only runtime-evaluable official outcomes; retain incumbents on ties."""
 
-    def score(self, policy: CustomerPolicy, episodes: Iterable[EpisodeResult], known_signatures: set[str], total_nodes: Optional[int] = None, allow_heldout: bool = False) -> CandidateScore:
-        episodes = list(episodes)
-        if total_nodes is not None:
-            warnings.warn(
-                "CustomerSelector.total_nodes is deprecated and ignored; node_diversity uses evaluated case count",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        if not allow_heldout and any(item.split == "heldout_test" for item in episodes):
+    def score(
+        self,
+        policy: AdversaryPolicy,
+        episodes: Iterable[EpisodeResult],
+        *,
+        allow_heldout: bool = False,
+    ) -> CandidateScore:
+        values = list(episodes)
+        if not allow_heldout and any(item.split == "heldout_test" for item in values):
             raise AssertionError("CustomerSelector cannot score heldout episodes")
-        valid_episodes = [item for item in episodes if _is_fitness_eligible(item)]
-        invalid_episodes = [item for item in episodes if not _is_fitness_eligible(item)]
-        invalid_reasons = sorted({
+        valid = [
+            item for item in values
+            if item.is_runtime_evaluable() and isinstance(item.task_success, bool)
+        ]
+        invalid = [item for item in values if item not in valid]
+        reasons = sorted({
             str(reason)
-            for item in invalid_episodes
-            for reason in ([item.invalid_reason] if item.invalid_reason else []) + list(item.validity_reasons or [])
+            for item in invalid
+            for reason in ([item.invalid_reason] if item.invalid_reason else [])
+            + list(item.validity_reasons or [])
+            + list((item.metadata or {}).get("invalid_reasons", []) or [])
         })
-        if not valid_episodes:
+        if any(
+            item.is_runtime_evaluable() and not isinstance(item.task_success, bool)
+            for item in invalid
+        ):
+            reasons = sorted(set(reasons) | {"missing_official_score"})
+        if not valid:
             return CandidateScore(
                 policy_id=policy.policy_id,
-                attack_success=None,
-                novelty=None,
-                node_diversity=None,
                 fitness=None,
-                episodes=0,
+                official_task_success=None,
+                valid_episode_count=0,
+                invalid_episode_count=len(invalid),
                 evaluation_status="inconclusive",
-                invalid_episode_count=len(invalid_episodes),
-                invalid_reasons=invalid_reasons or (["no_valid_episode_evidence"] if not episodes else []),
+                invalid_reasons=reasons or (["no_episode_evidence"] if not values else []),
             )
-        # Business claims are not Customer-invalid. Integrity/protocol checks
-        # are separated upstream; fitness is the official attributable Service
-        # failure rate on the valid episodes.
-        attack_success = aggregate_episode_metrics(valid_episodes)["attributable_service_failure_rate"]
-        signatures = {
-            signature.signature_id
-            for episode in valid_episodes
-            if episode.is_attributable_service_failure()
-            for signature in [episode.vulnerability_signature_v2()]
-            if signature is not None
-        }
-        novelty = len(signatures - known_signatures) / max(1, len(signatures))
-        candidate_case_count = len({episode.case_id for episode in valid_episodes})
-        failure_nodes = {
-            episode.sop_node
-            for episode in valid_episodes
-            if episode.is_attributable_service_failure() and episode.sop_node
-        }
-        node_diversity = min(1.0, len(failure_nodes) / max(1, candidate_case_count))
-        fitness = attack_success
+        official_success = sum(bool(item.task_success) for item in valid) / len(valid)
         return CandidateScore(
-            policy.policy_id, attack_success, novelty, node_diversity, fitness,
-            len(valid_episodes), "valid", len(invalid_episodes), invalid_reasons,
+            policy_id=policy.policy_id,
+            fitness=1.0 - official_success,
+            official_task_success=official_success,
+            valid_episode_count=len(valid),
+            invalid_episode_count=len(invalid),
+            evaluation_status="valid",
+            invalid_reasons=reasons,
         )
 
     def select(
         self,
-        candidates: list[tuple[CustomerPolicy, list[EpisodeResult]]],
-        known_signatures: set[str],
-        total_nodes: Optional[int] = None,
+        candidates: list[tuple[AdversaryPolicy, list[EpisodeResult]]],
+        *,
+        incumbent_policy_id: str | None = None,
         allow_heldout: bool = False,
-        incumbent_policy_id: Optional[str] = None,
     ):
-        scores = [self.score(policy, episodes, known_signatures, total_nodes, allow_heldout=allow_heldout) for policy, episodes in candidates]
-        eligible = [index for index, score in enumerate(scores) if score.episodes > 0]
+        scores = [
+            self.score(policy, episodes, allow_heldout=allow_heldout)
+            for policy, episodes in candidates
+        ]
         incumbent_index = next((
             index for index, (policy, _) in enumerate(candidates)
             if incumbent_policy_id is not None and policy.policy_id == incumbent_policy_id
         ), None)
-        order = sorted(
-            eligible,
-            key=lambda i: (
-                -float(scores[i].fitness),
-                -float(scores[i].attack_success),
-                -float(scores[i].novelty),
-                candidates[i][0].policy_id,
-            ),
-        )
+        eligible = [index for index, score in enumerate(scores) if score.valid_episode_count]
 
-        selected_index = order[0] if order else None
-        reason = "best_valid_candidate" if selected_index is not None else "no_valid_candidate"
         if incumbent_index is not None:
-            incumbent = candidates[incumbent_index][0]
-            incumbent_score = scores[incumbent_index]
-            child_order = [
-                index for index in order
-                if index != incumbent_index
-                and candidates[index][0].semantic_fingerprint() != incumbent.semantic_fingerprint()
-            ]
-            best_child_index = next((
-                index for index in child_order
-                if incumbent_score.fitness is not None
-                and scores[index].fitness > incumbent_score.fitness + self.tie_tolerance
-            ), None)
             selected_index = incumbent_index
-            if not incumbent_score.episodes:
-                reason = "incumbent_unscored"
-            elif best_child_index is None:
-                if not child_order and any(index != incumbent_index for index in eligible):
-                    reason = "no_behavioral_change"
-                elif not child_order and not any(index != incumbent_index for index in eligible):
-                    reason = "all_candidates_invalid" if len(candidates) > 1 else "no_valid_candidate"
-                else:
-                    reason = "no_fitness_improvement"
-            else:
-                selected_index = best_child_index
-                reason = "strict_fitness_improvement"
+            reason = "incumbent_unscored"
+            incumbent_fitness = scores[incumbent_index].fitness
+            if incumbent_fitness is not None:
+                reason = "no_fitness_improvement"
+                improved = [
+                    index for index in eligible
+                    if index != incumbent_index
+                    and scores[index].fitness is not None
+                    and scores[index].fitness > incumbent_fitness
+                ]
+                if improved:
+                    selected_index = max(improved, key=lambda index: float(scores[index].fitness))
+                    reason = "strict_official_fitness_improvement"
+                elif not any(index != incumbent_index for index in eligible):
+                    reason = "all_children_inconclusive"
             selected = candidates[selected_index][0]
             self.last_selection_record = {
-                "incumbent_policy_id": incumbent.policy_id,
-                "incumbent_score": incumbent_score.to_dict(),
+                "incumbent_policy_id": candidates[incumbent_index][0].policy_id,
+                "incumbent_score": scores[incumbent_index].to_dict(),
                 "candidate_scores": [
-                    score.to_dict() for index, score in enumerate(scores)
+                    scores[index].to_dict() for index in range(len(scores))
                     if index != incumbent_index
                 ],
                 "selected_policy_id": selected.policy_id,
-                "customer_changed": (
-                    selected.semantic_fingerprint() != incumbent.semantic_fingerprint()
-                ),
+                "customer_changed": selected_index != incumbent_index,
                 "selection_reason": reason,
-                "tie_tolerance": self.tie_tolerance,
+                "objective": "1 - mean(official task_success over runtime-evaluable episodes)",
             }
             return selected, scores
 
+        if eligible:
+            selected_index = max(eligible, key=lambda index: float(scores[index].fitness))
+            selected = candidates[selected_index][0]
+            reason = "highest_official_fitness"
+        else:
+            selected = None
+            reason = "no_runtime_evaluable_candidate"
         self.last_selection_record = {
             "incumbent_policy_id": incumbent_policy_id,
             "incumbent_score": None,
-            "candidate_scores": [score.to_dict() for score in scores],
-            "selected_policy_id": candidates[selected_index][0].policy_id if selected_index is not None else None,
-            "customer_changed": selected_index is not None,
+            "candidate_scores": [item.to_dict() for item in scores],
+            "selected_policy_id": selected.policy_id if selected else None,
+            "customer_changed": selected is not None,
             "selection_reason": reason,
-            "tie_tolerance": self.tie_tolerance,
+            "objective": "1 - mean(official task_success over runtime-evaluable episodes)",
         }
-        return (candidates[selected_index][0] if selected_index is not None else None), scores
+        return selected, scores

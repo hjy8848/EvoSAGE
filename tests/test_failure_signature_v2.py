@@ -218,11 +218,11 @@ def test_v1_episode_is_excluded_from_v2_novelty_and_archive(tmp_path):
     legacy_episode = EpisodeResult.from_dict(data)
     v2_signature = VulnerabilitySignature.from_episode(_episode(), _attribution())
 
-    score = CustomerSelector().score(CustomerPolicy(), [legacy_episode], set())
+    score = CustomerSelector().score(CustomerPolicy(), [legacy_episode])
     archive = AttackArchive(tmp_path / "legacy-attacks.jsonl")
 
-    assert score.attack_success == 1.0
-    assert score.novelty == 0.0
+    assert score.fitness == 1.0
+    assert score.official_task_success == 0.0
     assert archive.add(CustomerPolicy(), [v2_signature], [legacy_episode]) == 0
     assert archive.signatures() == []
 

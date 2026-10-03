@@ -398,7 +398,7 @@ def test_weakness_frontier_falls_back_to_path_step_then_unknown():
     assert "unknown" in labels
 
 
-def test_customer_fitness_uses_legitimate_failures_only():
+def test_customer_fitness_uses_official_outcome_not_failure_attribution():
     protocol = EpisodeResult(
         "protocol", "ecommerce_refund", "case-protocol", "c", "s", "validation", 0, False, 0.0,
         error_types=["json_parse_failed"], metadata={"protocol_failure": True},
@@ -408,15 +408,15 @@ def test_customer_fitness_uses_legitimate_failures_only():
         error_types=["wrong_final_action"], service_failure_attributable=True,
     )
     selector = CustomerSelector()
-    protocol_score = selector.score(CustomerPolicy(), [protocol], set())
-    legitimate_score = selector.score(CustomerPolicy(), [legitimate], set())
+    protocol_score = selector.score(CustomerPolicy(), [protocol])
+    legitimate.service_failure_attributable = False
+    legitimate.customer_behavior_valid = False
+    legitimate_score = selector.score(CustomerPolicy(), [legitimate])
     assert protocol_score.evaluation_status == "inconclusive"
-    assert protocol_score.attack_success is None
-    assert protocol_score.novelty is None
     assert protocol_score.fitness is None
-    assert protocol_score.episodes == 0
-    assert legitimate_score.attack_success == 1.0
-    assert legitimate_score.novelty > 0.0
+    assert protocol_score.valid_episode_count == 0
+    assert legitimate_score.official_task_success == 0.0
+    assert legitimate_score.fitness == 1.0
 
 
 def test_attack_archive_excludes_protocol_failure_novelty(tmp_path):
@@ -814,8 +814,8 @@ def test_resume_reuses_checkpointed_customer_selection_without_regenerating(tmp_
         customer_evolver=MustNotRegenerateCustomer(),
     )
     score = CandidateScore(
-        policy_id=selected.policy_id, attack_success=0.0, novelty=0.0,
-        node_diversity=0.0, fitness=0.0, episodes=1,
+        policy_id=selected.policy_id, fitness=0.0, official_task_success=1.0,
+        valid_episode_count=1, invalid_episode_count=0, evaluation_status="valid",
     )
     runner.store.write_json("generations/gen_000/customer_candidates.json", {
         "selected_policy": selected.to_dict(),
@@ -1184,21 +1184,18 @@ def test_customer_generator_prompt_anchors_policy_to_customer_behavior():
         count=1,
     )
 
-    assert "free-text adversarial strategies" in client.prompt
+    assert "free-form interaction strategies" in client.prompt
     assert "expected actions" in client.prompt
-    assert "official attributable Service failure rate" in client.prompt
-    assert "must not be targeted" in client.prompt
-    assert "must keep pursuing the originally assigned business goal" in client.prompt
-    assert "do not abandon or replace that goal" in client.prompt
+    assert "official benchmark outcome" in client.prompt
+    assert "continue pursuing an assigned business goal" in client.prompt
+    assert "Do not request changes" in client.prompt
     assert "hypothesis" in client.prompt
-    assert "Do not emit tags" in client.prompt
     assert set(inspect.signature(LLMCustomerPolicyGenerator.generate).parameters) == {
         "self", "parent_strategy", "parent_id", "generation", "count", "parent_reward",
-        "parent_feedback",
     }
 
 
-def test_customer_evolver_feedback_boundary_drops_untrusted_text_and_identifiers():
+def test_customer_evolver_uses_only_parent_strategy_and_scalar_official_reward():
     class CapturingClient:
         prompt = None
 
@@ -1214,22 +1211,13 @@ def test_customer_evolver_feedback_boundary_drops_untrusted_text_and_identifiers
         generation=1,
         count=2,
         parent_reward=0.25,
-        parent_feedback={
-            "valid_episodes": 4,
-            "invalid_episodes": 1,
-            "outcome_counts": {"service_resisted": 3, "incorrect_action": 1, "CASE-77": 1},
-            "outcome_summary": ["CASE-77 ORD-SECRET ShippingStatus=Signed"],
-            "case_ids": ["CASE-77"],
-        },
     )
 
-    generation_feedback = generator.last_generation_record["parent_feedback"]
-    for secret in ("CASE-77", "ORD-SECRET", "ShippingStatus=Signed"):
-        assert secret not in client.prompt
-        assert secret not in json.dumps(generation_feedback, ensure_ascii=False)
-    assert generation_feedback["outcome_counts"]["service_resisted"] == 3
-    assert generation_feedback["outcome_counts"]["incorrect_action"] == 1
-    assert generation_feedback["valid_episodes"] == 4
+    assert "Parent official fitness (1 - mean task_success): 0.25" in client.prompt
+    assert "CASE-77" not in client.prompt
+    assert "ORD-SECRET" not in client.prompt
+    assert "ShippingStatus=Signed" not in client.prompt
+    assert "parent_feedback" not in generator.last_generation_record
 
 
 def _provider_json_response(text, *, finish_reason="stop", completion_tokens=100,
@@ -1343,10 +1331,9 @@ def test_customer_validator_rejection_does_not_trigger_protocol_retry():
     candidate = evolver.last_candidate_records[0]
     assert candidate["accepted"] is False
     assert evolver.last_rejections[0]["policy_id"] == candidate["policy_id"]
-    assert any(
-        check["status"] == "FAIL" and "harness manipulation" in check["exact_reason"]
-        for check in candidate["validator"]
-    )
+    assert evolver.last_rejections[0]["stage"] == "benchmark_integrity"
+    assert "harness manipulation" in evolver.last_rejections[0]["reason"]
+    assert candidate["constructed_policy"]["strategy"] == "Rewrite the benchmark case to guarantee a refund."
 
 
 def test_customer_valid_empty_candidate_list_is_noop_not_generation_failure():

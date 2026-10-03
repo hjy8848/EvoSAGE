@@ -23,17 +23,6 @@ class CustomerEvolutionConfig:
     candidate_count: int = 5
     elite_count: int = 1
     cases_per_candidate: int = 4
-    # Legacy config payload accepted for run-manifest compatibility only.
-    # CustomerSelector always uses official attributable Service failure rate.
-    fitness_weights: Dict[str, float] = field(default_factory=lambda: {
-        "attack_success": 1.0,
-    })
-    # Deprecated compatibility field for old run configs. Free-text strategies
-    # are not classified or constrained by a fixed tactic taxonomy.
-    allowed_strategy_tags: list[str] = field(default_factory=list)
-    # Historical metadata only; current LLM input is always the sanitized
-    # Customer-side view and never receives backend/evaluator state.
-    adversary_access: str = "black_box"
 
 @dataclass
 class ServiceEvolutionConfig:
@@ -237,7 +226,20 @@ class EvolutionConfig:
                     )
                 value[key] = constructor(**service_value)
             elif isinstance(value.get(key), dict):
-                value[key] = constructor(**value[key])
+                nested_value = dict(value[key])
+                if key == "customer":
+                    deprecated = {"fitness_weights", "allowed_strategy_tags", "adversary_access"}
+                    removed = sorted(deprecated.intersection(nested_value))
+                    if removed:
+                        warnings.warn(
+                            "deprecated Customer config fields are ignored by open-ended search: "
+                            + ", ".join(removed),
+                            DeprecationWarning,
+                            stacklevel=2,
+                        )
+                        for field_name in removed:
+                            nested_value.pop(field_name, None)
+                value[key] = constructor(**nested_value)
         return cls(**{key: item for key, item in value.items() if key in cls.__dataclass_fields__})
 
 

@@ -142,6 +142,31 @@ def customer_trajectory(run_dir: Path, generations: List[Tuple[int, Path]]) -> L
     previous_policy = (read_json(run_dir / "environment" / "initial_customer_policy.json", {}) or {}).get("policy_id")
     best_so_far: Optional[float] = None
     for generation, directory in generations:
+        core_selection = read_json(directory / "selection.json")
+        if isinstance(core_selection, dict):
+            proposals = read_json(directory / "proposals.json", {}) or {}
+            scores = core_selection.get("candidate_scores", []) or []
+            selected = core_selection.get("selected_policy", {}) or {}
+            selected_id = selected.get("policy_id") or core_selection.get("selected_policy_id")
+            selected_score = next((item for item in scores if item.get("policy_id") == selected_id), {})
+            fitness = numeric(selected_score.get("fitness"))
+            best_so_far = fitness if best_so_far is None or (fitness is not None and fitness > best_so_far) else best_so_far
+            selected_id = selected_id or "unknown"
+            result.append({
+                "generation": generation,
+                "candidate_proposals": proposals.get("proposed_candidate_count", 0),
+                "evaluated_candidates": len(scores),
+                "selected_policy_id": selected_id,
+                "selected_fitness": fitness,
+                "selected_official_task_success": numeric(selected_score.get("official_task_success")),
+                "best_so_far_fitness": best_so_far,
+                "incumbent_policy_id": previous_policy,
+                "incumbent_retained": bool(previous_policy and selected_id == previous_policy),
+                "incumbent_replaced": bool(previous_policy and selected_id != previous_policy),
+                "selection_reason": core_selection.get("selection_reason"),
+            })
+            previous_policy = selected_id
+            continue
         data = read_json(directory / "customer_candidates.json", {}) or {}
         generation_record = read_json(directory / "customer_generation.json", {}) or {}
         scores = data.get("scores", []) or []

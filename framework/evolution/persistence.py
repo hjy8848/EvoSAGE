@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Iterable
+import uuid
 
 
 def _now():
@@ -13,9 +14,12 @@ def _now():
 
 
 class RunStore:
-    def __init__(self, run_dir: str | Path):
+    def __init__(self, run_dir: str | Path, *, create_archives: bool = True):
         self.run_dir = Path(run_dir)
-        for name in ("config", "environment", "split_manifest", "generations", "archives", "traces", "analysis"):
+        names = ["config", "environment", "split_manifest", "generations", "traces", "analysis"]
+        if create_archives:
+            names.append("archives")
+        for name in names:
             (self.run_dir / name).mkdir(parents=True, exist_ok=True)
 
     def write_json(self, relative: str, value: Any) -> Path:
@@ -66,3 +70,25 @@ class RunStore:
 
     def latest_policy_at(self, generation: int, name: str) -> dict:
         return self.read_generation(generation, name)
+
+
+def has_prior_run_state(run_dir: str | Path) -> bool:
+    root = Path(run_dir)
+    return any((root / marker).exists() for marker in (
+        "config/evolution.json",
+        "environment/provenance.json",
+        "environment/episode_cache.jsonl",
+        "split_manifest/evolution_cases.json",
+        "archives/attacks.jsonl",
+        "archives/defenses.jsonl",
+    ))
+
+
+def resolve_run_dir(config) -> tuple[Path, bool]:
+    """Resolve one authoritative run directory before constructing evaluators."""
+    requested = Path(config.persistence.output_dir)
+    if config.persistence.resume or not has_prior_run_state(requested):
+        return requested, False
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    resolved = requested.parent / f"{requested.name}_fresh_{stamp}_{uuid.uuid4().hex[:6]}"
+    return resolved, True

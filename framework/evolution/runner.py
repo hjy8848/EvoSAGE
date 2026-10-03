@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime
 import copy
 import hashlib
 import json
@@ -11,7 +10,6 @@ from pathlib import Path
 import subprocess
 import time
 from typing import Any, Optional
-import uuid
 
 from .archives import AttackArchive, DefenseArchive
 from .config import EvolutionConfig
@@ -20,7 +18,7 @@ from .customer_policy import CustomerPolicyValidator
 from .customer_selector import CandidateScore, CustomerSelector
 from .evaluator_adapter import BudgetedEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
 from .generation_protocol import GenerationProtocolError
-from .persistence import RunStore
+from .persistence import RunStore, has_prior_run_state, resolve_run_dir
 from .reporting import generate_report
 from .schemas import (
     CustomerPolicy,
@@ -316,27 +314,12 @@ class EvolutionRunner:
         provenance without re-resolving and accidentally creating a second
         ``*_fresh_*`` directory.
         """
-        requested_output_dir = Path(config.persistence.output_dir)
-        if config.persistence.resume or not cls._has_prior_run_state(requested_output_dir):
-            return requested_output_dir, False
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        resolved = requested_output_dir.parent / (
-            f"{requested_output_dir.name}_fresh_{stamp}_{uuid.uuid4().hex[:6]}"
-        )
-        return resolved, True
+        return resolve_run_dir(config)
 
     @staticmethod
     def _has_prior_run_state(run_dir: Path) -> bool:
         """Detect an existing experiment without treating an empty directory as a run."""
-        markers = (
-            "config/evolution.json",
-            "environment/provenance.json",
-            "environment/episode_cache.jsonl",
-            "split_manifest/evolution_cases.json",
-            "archives/attacks.jsonl",
-            "archives/defenses.jsonl",
-        )
-        return any((run_dir / marker).exists() for marker in markers)
+        return has_prior_run_state(run_dir)
 
     @staticmethod
     def _client_request_stats(client) -> dict[str, Any]:
@@ -727,7 +710,7 @@ class EvolutionRunner:
                     if not isinstance(selected_data, dict):
                         raise RuntimeError("checkpoint marks Customer selection complete but selected policy is missing")
                     customer = CustomerPolicy.from_dict(selected_data)
-                    scores = [CandidateScore(**item) for item in candidate_payload.get("scores", [])]
+                    scores = [CandidateScore.from_dict(item) for item in candidate_payload.get("scores", [])]
                     candidate_records = []
                 else:
                     self._active_stage = "customer_candidate_generation_and_evaluation"
@@ -1160,7 +1143,7 @@ class EvolutionRunner:
                 adaptation_results.extend(episodes)
                 evaluated.append((policy, episodes))
             known_before = set(known_signatures)
-            selected, scores = selector.select(evaluated, known_signatures)
+            selected, scores = selector.select(evaluated)
             incumbent = selected or incumbent
             selected_validation = next(
                 (episodes for policy, episodes in evaluated if selected is not None and policy.policy_id == selected.policy_id),

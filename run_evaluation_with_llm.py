@@ -72,6 +72,7 @@ from framework.backend import build_case_spec, create_backend
 from framework.backend.types import CaseSpec
 
 from framework.llm_integration import (
+    AdversarialCustomerModel,
     get_llm_client,
     LLMUserModel,
     LLMUserMessageGenerator,
@@ -600,9 +601,20 @@ class LLMEvaluationPipeline:
             backend_environment.reset(case_spec)
 
         if self.customer_policy is not None:
-            from framework.evolution.customer_policy import CustomerPolicyCompiler, PolicyCustomerModel
-            compiled_policy = CustomerPolicyCompiler().compile(self.customer_policy, case_spec)
-            if self.user_simulator_mode == "rule":
+            from framework.evolution.customer.policy import AdversaryPolicy
+            if isinstance(self.customer_policy, AdversaryPolicy):
+                from framework.evolution.customer.integrity import AdversaryPolicyValidator
+                AdversaryPolicyValidator().validate(self.customer_policy)
+                compiled_policy = self.customer_policy
+                open_ended_policy = True
+                if self.user_simulator_mode == "rule":
+                    raise ValueError("open-ended Customer search requires an LLM simulator, not the rule fixture")
+            else:
+                from framework.evolution.customer_policy import CustomerPolicyCompiler
+                compiled_policy = CustomerPolicyCompiler().compile(self.customer_policy, case_spec)
+                open_ended_policy = False
+            if self.user_simulator_mode == "rule" and not open_ended_policy:
+                from framework.evolution.customer_policy import PolicyCustomerModel
                 user_system_prompt += compiled_policy.runtime_guidance()
                 user_model = PolicyCustomerModel(user_profile, user_system_prompt, case_spec, compiled_policy)
             elif self.user_simulator_mode == "rewrite":
@@ -621,7 +633,8 @@ class LLMEvaluationPipeline:
                 # Real co-evolution uses the LLM customer with a validated,
                 # open adversarial strategy. Static prompt templates and
                 # deterministic tag rules are intentionally bypassed here.
-                user_model = LLMUserModel(
+                customer_model = AdversarialCustomerModel if open_ended_policy else LLMUserModel
+                user_model = customer_model(
                     profile=user_profile,
                     system_prompt="",
                     llm_client=self.user_llm_client,

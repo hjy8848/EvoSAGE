@@ -17,8 +17,6 @@ from pathlib import Path
 import threading
 from typing import Any, Callable, Iterable, Protocol
 
-from .attribution import infer_failure_attribution, infer_failure_location
-from .customer_behavior_validity import assess_customer_behavior
 from .schemas import CustomerPolicy, EpisodeResult, ServicePolicy
 from .request_budget import request_context
 
@@ -288,6 +286,7 @@ class EvoSAGEEpisodeEvaluator:
     """Thin real-run adapter; imports the legacy runner lazily."""
 
     _FAST_PHASES = frozenset({
+        "customer_incumbent",
         "customer_failure_scan",
         "customer_candidate",
         "customer_elite",
@@ -306,7 +305,8 @@ class EvoSAGEEpisodeEvaluator:
     def __init__(self, pipeline_factory: Callable[..., Any], user_policy_mode: str = "truthful",
                  judge_in_evolution: bool = False, cache_namespace: str = "default",
                  cache_path: str | Path | None = None, reset_cache: bool = False,
-                 invalid_evaluation_retries: int = 1, request_budget=None):
+                 invalid_evaluation_retries: int = 1, request_budget=None,
+                 include_failure_analysis: bool = True):
         self.pipeline_factory = pipeline_factory
         self.user_policy_mode = user_policy_mode
         self.judge_in_evolution = judge_in_evolution
@@ -320,6 +320,7 @@ class EvoSAGEEpisodeEvaluator:
         self._reset_cache = reset_cache
         self.invalid_evaluation_retries = max(0, int(invalid_evaluation_retries))
         self.request_budget = request_budget
+        self.include_failure_analysis = bool(include_failure_analysis)
         self._cache_lock = threading.Lock()
         self._pipelines = []
         self._pipeline_lock = threading.Lock()
@@ -369,12 +370,13 @@ class EvoSAGEEpisodeEvaluator:
             # IDs remain available on the cached EpisodeResult for provenance,
             # but only executable policy semantics determine compatibility.
             "customer_policy": customer_policy.semantic_fingerprint(),
-            # CustomerPolicyValidator also gates episode validity. Track its
-            # case-specific outcome separately so metadata that embeds hidden
-            # facts cannot borrow a valid cached episode while harmless IDs do
-            # not force a miss.
-            "customer_policy_validation": self._customer_policy_validation_contract(
-                customer_policy, case
+            # Open-ended Customer search validates only policy schema and
+            # benchmark integrity before evaluation. Do not run the legacy
+            # case/truthfulness validator in this path.
+            "customer_policy_validation": (
+                {"contract": "free_text_integrity_v1"}
+                if not self.include_failure_analysis
+                else self._customer_policy_validation_contract(customer_policy, case)
             ),
             "service_policy": service_policy.semantic_fingerprint(),
             "case_id": getattr(case, "case_id", None),
@@ -689,6 +691,7 @@ class EvoSAGEEpisodeEvaluator:
                     episode = self.from_evosage(
                         simulation, report, customer_policy, service_policy, split, generation, phase,
                         path_config=getattr(case, "path_config", None),
+                        include_failure_analysis=self.include_failure_analysis,
                     )
                 except Exception as exc:
                     if getattr(exc, "budget_exhausted", False):
@@ -806,11 +809,21 @@ class EvoSAGEEpisodeEvaluator:
 
     @staticmethod
     def from_evosage(simulation, report, customer_policy, service_policy, split, generation, phase,
-                     path_config=None):
+                     path_config=None, include_failure_analysis=True):
         from .trace import flatten_simulation
 
-        customer_assessment = assess_customer_behavior(simulation, customer_policy)
         analysis_trace_events = [event.to_dict() for event in flatten_simulation(simulation)]
+        customer_assessment = None
+        attribution = None
+        location = {}
+        if include_failure_analysis:
+            # Kept for legacy service/co-evolution analysis only. The open
+            # Customer-only runner passes False and never imports/calls these.
+            from .attribution import infer_failure_attribution, infer_failure_location
+            from .customer_behavior_validity import assess_customer_behavior
+            customer_assessment = assess_customer_behavior(simulation, customer_policy)
+            attribution = infer_failure_attribution(report, simulation, path_config)
+            location = infer_failure_location(report, simulation, path_config)
         # BackendEnvironment records both query and action tools as ``tool_call``
         # events.  Keep the co-evolution trace aligned with the execution
         # evaluator; filtering for the old ``tool_query`` name silently turned
@@ -821,10 +834,16 @@ class EvoSAGEEpisodeEvaluator:
             if event.get("event_type") == "tool_call"
         ]
         errors = list(getattr(report, "error_categories", []) or [])
+        official_task_success = getattr(report, "task_success", None)
+        if not isinstance(official_task_success, bool):
+            errors.append("missing_official_score")
         diagnostics = getattr(report, "details", {}).get("diagnostics", {}) if getattr(report, "details", None) else {}
         if diagnostics.get("json_parse_failed") and "json_parse_failed" not in errors:
             errors.append("json_parse_failed")
         invalid_reasons = _episode_invalid_reasons(simulation, report)
+        if not isinstance(official_task_success, bool):
+            invalid_reasons.append("missing_official_score")
+            invalid_reasons = list(dict.fromkeys(invalid_reasons))
         for reason in invalid_reasons:
             if reason not in errors:
                 errors.append(reason)
@@ -846,19 +865,45 @@ class EvoSAGEEpisodeEvaluator:
                 environment_valid = False
                 environment_reasons.append("backend_exception")
         protocol_valid = not protocol_failure
-        service_failure_attributable = (
-            not bool(report.task_success)
+        service_failure_attributable = bool(include_failure_analysis and (
+            not bool(official_task_success)
             and protocol_valid
+            and customer_assessment is not None
             and customer_assessment.valid
             and environment_valid
-        )
+        ))
         validity_reasons = list(dict.fromkeys([
             *invalid_reasons,
-            *customer_assessment.reasons,
+            *(customer_assessment.reasons if customer_assessment is not None else []),
             *environment_reasons,
         ]))
-        attribution = infer_failure_attribution(report, simulation, path_config)
-        location = infer_failure_location(report, simulation, path_config)
+        metadata = {
+            "phase": phase,
+            "model_name": simulation.model_name,
+            "customer_policy_id": customer_policy.policy_id,
+            "service_policy_id": service_policy.policy_id,
+            "split": split,
+            "generation": generation,
+            "protocol_failure": protocol_failure,
+            "evaluation_status": evaluation_status,
+            "invalid_reason": invalid_reasons[0] if invalid_reasons else None,
+            "invalid_reasons": invalid_reasons,
+            "environment_valid": environment_valid,
+            "environment_invalid_reasons": environment_reasons,
+            "analysis_trace_events": analysis_trace_events,
+            "trace_seq_start": 0 if analysis_trace_events else None,
+            "trace_seq_end": len(analysis_trace_events) - 1 if analysis_trace_events else None,
+            "failure_analysis_included": bool(include_failure_analysis),
+            "customer_simulator_provenance": copy.deepcopy(
+                getattr(simulation, "customer_simulator_provenance", []) or []
+            ),
+        }
+        if include_failure_analysis:
+            metadata.update({
+                "failure_location": location,
+                "failure_attribution": attribution.to_dict(),
+                "customer_behavior_assessment": customer_assessment.to_dict(),
+            })
         return EpisodeResult(
             episode_id=simulation.simulation_id,
             scenario=simulation.scenario_id,
@@ -867,7 +912,7 @@ class EvoSAGEEpisodeEvaluator:
             service_policy_id=service_policy.policy_id,
             split=split,
             generation=generation,
-            task_success=bool(report.task_success),
+            task_success=bool(official_task_success),
             execution_score=float(report.execution_score),
             sage_style_score=float(report.sage_style_score),
             verification_score=float(report.required_verification_score),
@@ -886,39 +931,17 @@ class EvoSAGEEpisodeEvaluator:
             sop_node=location.get("sop_node"),
             path_step_index=location.get("path_step_index"),
             dialogue=[turn.agent_output.to_dict() for turn in simulation.turns],
-            metadata={
-                "phase": phase,
-                "model_name": simulation.model_name,
-                "customer_policy_id": customer_policy.policy_id,
-                "service_policy_id": service_policy.policy_id,
-                "split": split,
-                "generation": generation,
-                "protocol_failure": protocol_failure,
-                "evaluation_status": evaluation_status,
-                "invalid_reason": invalid_reasons[0] if invalid_reasons else None,
-                "invalid_reasons": invalid_reasons,
-                "failure_location": location,
-                "failure_attribution": attribution.to_dict(),
-                "customer_simulator_provenance": copy.deepcopy(
-                    getattr(simulation, "customer_simulator_provenance", []) or []
-                ),
-                "customer_behavior_assessment": customer_assessment.to_dict(),
-                "environment_valid": environment_valid,
-                "environment_invalid_reasons": environment_reasons,
-                "analysis_trace_events": analysis_trace_events,
-                "trace_seq_start": 0 if analysis_trace_events else None,
-                "trace_seq_end": len(analysis_trace_events) - 1 if analysis_trace_events else None,
-            },
+            metadata=metadata,
             evaluation_status=evaluation_status,
             invalid_reason=invalid_reasons[0] if invalid_reasons else None,
-            strict_process_success=bool(report.task_success),
+            strict_process_success=bool(official_task_success),
             eventual_goal_success=float(getattr(report, "eventual_goal_success", report.goal_fulfillment) or 0.0),
             recovery_attempted=bool(getattr(report, "recovery_attempted", False)),
             recovery_success=bool(getattr(report, "recovery_success", False)),
             recovery_count=int(getattr(report, "recovery_count", 0) or 0),
             first_failure_stage=str(getattr(report, "first_failure_stage", "") or ""),
             protocol_valid=protocol_valid,
-            customer_behavior_valid=customer_assessment.valid,
+            customer_behavior_valid=(customer_assessment.valid if customer_assessment is not None else True),
             environment_valid=environment_valid,
             service_failure_attributable=service_failure_attributable,
             validity_reasons=validity_reasons,

@@ -576,6 +576,28 @@ class LLMUserModel(UserModel):
         emotion = self._emotion_prompt_line()
         emotion_context = emotion.strip() if emotion else "(not specified; respond naturally)"
         stage_text = "Open the conversation" if stage == "opening" else "Reply to the Service's latest turn"
+        from ..evolution.customer.policy import AdversaryPolicy
+        open_ended_policy = isinstance(self.customer_policy, AdversaryPolicy)
+        if open_ended_policy:
+            behavior_contract = """There is no required Customer behavior style or obligation to pursue the stated goal. You may lie,
+cooperate or refuse, invent or misstate business details, conceal information, contradict yourself, mislead, apply
+pressure, refuse, stall, change or abandon the request, or choose another interaction strategy. These
+are valid Customer behaviors; do not self-censor them as unreasonable. The official backend/evaluator
+determines world truth; your words do not change it. You are not given hidden backend state, expected
+actions or paths, gold answers, or evaluator internals. Use only the role context, customer-side
+information, public results, and visible dialogue."""
+        else:
+            behavior_contract = """You must keep pursuing the originally assigned Customer goal shown above. Do not abandon or replace it,
+refuse all participation, produce repeated unrelated messages, or stall merely to exhaust the turn limit.
+You may use deception, selective disclosure, contradiction, pressure, and changing claims as tactics while
+still pursuing that same goal.
+
+When your strategy calls for adversarial behavior, you may lie, claim to know something you do not
+know, invent or misstate business details, conceal information, contradict yourself, mislead, apply
+pressure, or change tactics to influence the Service. These are valid Customer behaviors. The official
+backend/evaluator determines world truth; your words do not change it. You are not given hidden backend
+state, expected actions or paths, gold answers, or evaluator internals. Use only the role context,
+customer-side information, public results, and visible dialogue."""
         return f"""You are simulating a Customer who interacts with a fixed customer-service Service.
 
 Role: {role_desc}
@@ -588,17 +610,7 @@ Current turn: {turn_count}
 Your free-text Customer strategy (follow it directly; do not translate it into tags or a checklist):
 {strategy}
 
-You must keep pursuing the originally assigned Customer goal shown above. Do not abandon or replace it,
-refuse all participation, produce repeated unrelated messages, or stall merely to exhaust the turn limit.
-You may use deception, selective disclosure, contradiction, pressure, and changing claims as tactics while
-still pursuing that same goal.
-
-When your strategy calls for adversarial behavior, you may lie, claim to know something you do not
-know, invent or misstate business details, conceal information, contradict yourself, mislead, apply
-pressure, or change tactics to influence the Service. These are valid Customer behaviors. The official
-backend/evaluator determines world truth; your words do not change it. You are not given hidden backend
-state, expected actions or paths, gold answers, or evaluator internals. Use only the role context,
-customer-side information, public results, and visible dialogue.
+{behavior_contract}
 
 Remain the Customer. Do not attempt to alter the benchmark case, tools, backend, evaluator, scoring,
 data splits, or experiment records. Do not claim that you changed those systems.
@@ -746,6 +758,23 @@ simulator knows them. Return only the message text, with no JSON, claim annotati
         return "好的，谢谢你的帮助。"
 
 
+class AdversarialCustomerModel(LLMUserModel):
+    """LLM Customer executor with no satisfaction/solved behavior heuristics."""
+
+    def observe_backend_event(self, event: Dict[str, Any]) -> None:
+        self.backend_events.append({
+            "event_type": event.get("event_type"),
+            "name": event.get("name"),
+            "result": copy.deepcopy(event.get("result", {})),
+        })
+
+    def _update_problem_status(self, agent_message: str) -> None:
+        return None
+
+    def _record_courtesy(self, message: str) -> None:
+        return None
+
+
 class RuleUserModel(UserModel):
     """Deterministic customer policy used as a non-LLM evaluation baseline."""
 
@@ -804,6 +833,9 @@ class RewritingUserModel(LLMUserModel):
     def _build_generation_prompt(self, agent_last_message: str, turn_count: int, context=None) -> str:
         prompt = super()._build_generation_prompt(agent_last_message, turn_count, context)
         if self.customer_policy is not None:
+            from ..evolution.customer.policy import AdversaryPolicy
+            if isinstance(self.customer_policy, AdversaryPolicy):
+                return prompt + "\nAvoid mechanically reusing wording; follow the free-text strategy directly.\n"
             return prompt + "\n请避免机械复用上一轮措辞；继续追求同一业务目标，并按自由文本对抗策略行动。\n"
         return prompt + "\n请避免复用上一轮句式，保持业务事实不变。\n"
 

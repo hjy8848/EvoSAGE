@@ -147,7 +147,7 @@ class AttackArchive:
                 "generation_discovered": policy.generation if generation is None else generation,
                 "customer_policy": policy.to_dict(),
                 "generation": policy.generation if generation is None else generation,
-                "strategy_tags": list(policy.strategy_tags),
+                "strategy_tags": list(getattr(policy, "strategy_tags", []) or []),
                 "target_sop_node": signature.sop_node,
                 "target_path_step_index": episode.path_step_index,
                 "induced_error_types": list(occurrence.error_types),

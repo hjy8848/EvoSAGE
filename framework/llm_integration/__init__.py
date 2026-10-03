@@ -25,6 +25,7 @@ from .llm_client import (
 )
 
 from .llm_user_model import (
+    AdversarialCustomerModel,
     LLMUserModel,
     LLMUserMessageGenerator,
     RuleUserModel,
@@ -47,6 +48,7 @@ __all__ = [
     "get_llm_client",
     "EXAMPLE_CONFIG",
     "LLMUserModel",
+    "AdversarialCustomerModel",
     "LLMUserMessageGenerator",
     "RuleUserModel",
     "RewritingUserModel",
