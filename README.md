@@ -965,6 +965,16 @@ Use `--evaluator real --model MODEL` only when the OpenAI-compatible API and
 `OPENAI_API_KEY` are configured in the calling environment. The key is never
 stored in the repository or result artifacts.
 
+### EvoSAGE Adversarial Evolution Research Mode
+
+The first research stage studies a **fixed-world, goal-preserving, fact-unconstrained Customer adversary** against a fixed Service baseline (`S0`). The Customer may lie, invent claims, conceal information, contradict itself, challenge an official lookup, or apply pressure. Customer claims are not world truth: the backend, official tools, and evaluator remain authoritative. The Customer policy and simulator receive only the Customer-visible case projection and public interaction results, never hidden backend state, gold actions, expected paths, or evaluator internals.
+
+The Customer must continue pursuing its originally assigned business goal. Abandoning or replacing that goal, deliberately stalling, refusing all participation, exploiting termination, or manipulating the benchmark is invalid and excluded from attack fitness. Fitness is the official attributable Service-failure rate over valid episodes; provider/protocol/environment failures are not attack success. Customer-only evolution evaluates the incumbent and proposals on the same evolution panel against fixed `S0`; it does not evolve the Service. Later Service co-evolution is a separate research stage and is not implied by this first-stage smoke profile.
+
+New runs identify the open strategy contract with `customer.strategy_schema: deceptive_free_text_v1`; obsolete tactic-tag fields remain readable for old configs but do not constrain the real LLM strategy path. The deterministic `PolicyCustomerModel` is a test/fixture path, not the real adversary executor. The older `rewrite` mode preserves its non-adversarial paraphrase behavior when no adversary policy is attached; with a policy attached, the free-text deceptive Customer contract takes precedence.
+
+A bounded InferAI customer-only smoke profile is available at [`configs/ecommerce_deceptive_customer_only_smoke_20261003.yaml`](configs/ecommerce_deceptive_customer_only_smoke_20261003.yaml). It uses two generations, two candidates, a small fixed evolution panel, explicit request caps, and `OPENAI_API_KEY`; it is a smoke configuration, not a statistical experiment.
+
 ---
 
 ## Technical Support

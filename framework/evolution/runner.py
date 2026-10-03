@@ -763,14 +763,49 @@ class EvolutionRunner:
                             "episode_ids": [item.episode_id for item in items],
                             "valid_episode_count": sum(item.is_substantively_evaluable() for item in items),
                             "invalid_episode_count": sum(not item.is_substantively_evaluable() for item in items),
+                            "protocol_invalid_count": sum(
+                                item.is_evaluation_invalid() or not item.protocol_valid
+                                for item in items
+                            ),
+                            "attributable_service_failure_count": sum(
+                                item.is_attributable_service_failure() for item in items
+                            ),
                         }
                         for policy, items in candidate_records
                         if policy.policy_id != baseline_customer.policy_id
                     ]
+                    customer_generation_record = copy.deepcopy(
+                        getattr(self.customer_evolver, "last_generation_record", None)
+                    )
+                    generation_attempts = list(
+                        (customer_generation_record or {}).get("attempts", [])
+                    )
+                    evolver_request_usage = {
+                        "provider_attempts": len(generation_attempts),
+                        "input_tokens": sum(int(item.get("input_tokens") or 0) for item in generation_attempts),
+                        "completion_tokens": sum(int(item.get("completion_tokens") or 0) for item in generation_attempts),
+                        "reasoning_tokens": sum(int(item.get("reasoning_tokens") or 0) for item in generation_attempts),
+                        "timeouts": sum(bool(item.get("timeout")) for item in generation_attempts),
+                        "provider_failures": sum(bool(item.get("provider_error")) for item in generation_attempts),
+                        "latency_seconds": sum(float(item.get("latency_seconds") or 0.0) for item in generation_attempts),
+                    }
                     self.store.write_json(f"generations/gen_{generation:03d}/customer_candidates.json", {
+                        "strategy_schema": self.config.customer.strategy_schema,
+                        "parent_policy": baseline_customer.to_dict(),
+                        "parent_score": score_by_id.get(baseline_customer.policy_id),
+                        "parent_feedback": copy.deepcopy(
+                            (customer_generation_record or {}).get("parent_feedback", {})
+                        ),
+                        "generation_status": (customer_generation_record or {}).get("status"),
+                        "generation_reason": (customer_generation_record or {}).get("reason"),
+                        "generation_record": customer_generation_record,
+                        "evolver_request_usage": evolver_request_usage,
                         "selected_policy": customer.to_dict(), "scores": [score.to_dict() for score in scores],
                         "candidate_count": len(proposals),
                         "candidate_policies": proposals,
+                        "proposal_candidates": copy.deepcopy(
+                            (customer_generation_record or {}).get("candidates", [])
+                        ),
                         "fixed_service_policy_id": service.policy_id,
                         "evaluation_case_ids": list(
                             getattr(self.customer_evolver, "last_evaluation_case_ids", [])

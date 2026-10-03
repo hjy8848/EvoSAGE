@@ -14,6 +14,9 @@ from .customer_policy import CustomerPolicyCompiler
 class CustomerBehaviorAssessment:
     valid: bool
     hard_violation: bool
+    # Natural-language goal preservation is prompt-guided, not inferred by
+    # brittle lexical rules. None means it was deliberately not adjudicated.
+    goal_preserving: bool | None = None
     reasons: list[str] = field(default_factory=list)
     checks: dict[str, Any] = field(default_factory=dict)
 
@@ -89,6 +92,10 @@ def assess_customer_behavior(simulation: Any, customer_policy: Any) -> CustomerB
         checks["customer_goal_unchanged"] = goal_unchanged
         if not goal_unchanged:
             reasons.append("customer_task_mutation")
+    # Goal preservation is instruction-followed, not post-hoc classified from
+    # natural-language keywords. Keep the assigned goal in both Evolver and
+    # Customer prompts, but do not use utterance text to invalidate an episode.
+    checks["goal_preservation_checked"] = False
 
     transcript = "\n".join(messages)
     harness_tampering = bool(_HARNESS_MANIPULATION.search(transcript))
@@ -104,6 +111,7 @@ def assess_customer_behavior(simulation: Any, customer_policy: Any) -> CustomerB
     return CustomerBehaviorAssessment(
         valid=not reasons,
         hard_violation=bool(reasons),
+        goal_preserving=None,
         reasons=reasons,
         checks=checks,
     )

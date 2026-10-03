@@ -17,6 +17,9 @@ from ..backend.tool_contract import ToolContractConfig
 
 @dataclass
 class CustomerEvolutionConfig:
+    # Identifies the free-text adversary contract written into run manifests.
+    # Older configs can omit it; the runtime no longer uses a tactic allowlist.
+    strategy_schema: str = "deceptive_free_text_v1"
     candidate_count: int = 5
     elite_count: int = 1
     cases_per_candidate: int = 4

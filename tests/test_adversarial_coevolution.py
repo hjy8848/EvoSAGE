@@ -1188,11 +1188,48 @@ def test_customer_generator_prompt_anchors_policy_to_customer_behavior():
     assert "expected actions" in client.prompt
     assert "official attributable Service failure rate" in client.prompt
     assert "must not be targeted" in client.prompt
+    assert "must keep pursuing the originally assigned business goal" in client.prompt
+    assert "do not abandon or replace that goal" in client.prompt
     assert "hypothesis" in client.prompt
     assert "Do not emit tags" in client.prompt
     assert set(inspect.signature(LLMCustomerPolicyGenerator.generate).parameters) == {
         "self", "parent_strategy", "parent_id", "generation", "count", "parent_reward",
+        "parent_feedback",
     }
+
+
+def test_customer_evolver_feedback_boundary_drops_untrusted_text_and_identifiers():
+    class CapturingClient:
+        prompt = None
+
+        def generate(self, **kwargs):
+            self.prompt = kwargs["prompt"]
+            return _provider_json_response("[]")
+
+    client = CapturingClient()
+    generator = LLMCustomerPolicyGenerator(client)
+    generator.generate(
+        parent_strategy="Use a generic delayed contradiction while pursuing the refund.",
+        parent_id="parent-policy",
+        generation=1,
+        count=2,
+        parent_reward=0.25,
+        parent_feedback={
+            "valid_episodes": 4,
+            "invalid_episodes": 1,
+            "outcome_counts": {"service_resisted": 3, "incorrect_action": 1, "CASE-77": 1},
+            "outcome_summary": ["CASE-77 ORD-SECRET ShippingStatus=Signed"],
+            "case_ids": ["CASE-77"],
+        },
+    )
+
+    generation_feedback = generator.last_generation_record["parent_feedback"]
+    for secret in ("CASE-77", "ORD-SECRET", "ShippingStatus=Signed"):
+        assert secret not in client.prompt
+        assert secret not in json.dumps(generation_feedback, ensure_ascii=False)
+    assert generation_feedback["outcome_counts"]["service_resisted"] == 3
+    assert generation_feedback["outcome_counts"]["incorrect_action"] == 1
+    assert generation_feedback["valid_episodes"] == 4
 
 
 def _provider_json_response(text, *, finish_reason="stop", completion_tokens=100,

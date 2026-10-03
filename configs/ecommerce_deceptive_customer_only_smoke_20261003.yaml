@@ -1,0 +1,76 @@
+{
+  "scenario": "ecommerce_refund",
+  "experiment_mode": "customer_only",
+  "seed": 7,
+  "max_generations": 2,
+  "model_metadata": {
+    "provider": "InferAI",
+    "model": "deepseek-v4-flash",
+    "api_url": "https://inferaiapi.com/v1",
+    "client": "openai_api",
+    "api_key_env": "OPENAI_API_KEY",
+    "run_kind": "real_deceptive_customer_smoke"
+  },
+  "customer": {
+    "strategy_schema": "deceptive_free_text_v1",
+    "candidate_count": 2,
+    "elite_count": 1,
+    "cases_per_candidate": 0,
+    "adversary_access": "black_box"
+  },
+  "service": {
+    "candidate_count": 1,
+    "replay_attack_count": 0,
+    "exact_replay_instance_count": 0,
+    "transfer_replay_policy_count": 0
+  },
+  "splits": {
+    "strategy": "instance_holdout",
+    "seed": 7,
+    "evolution_ratio": 0.6,
+    "validation_ratio": 0.2,
+    "heldout_ratio": 0.2,
+    "instances_per_path": 1,
+    "max_cases": 6,
+    "customer_disclosure_variants": ["opening", "on_request"]
+  },
+  "evaluation": {
+    "repetitions": 1,
+    "max_turns": 4,
+    "max_tool_steps": 4,
+    "concurrency": 1,
+    "api_timeout": 120,
+    "judge_in_evolution": false,
+    "customer_thinking_mode": "disabled",
+    "agent_thinking_mode": "disabled",
+    "evolver_thinking_mode": "disabled",
+    "agent_max_retries": 1,
+    "customer_transport_max_retries": 1,
+    "evolver_max_retries": 1,
+    "judge_max_retries": 1,
+    "judge_validation_retries": 0,
+    "customer_protocol_retries": 1,
+    "evolver_protocol_retries": 1,
+    "rate_limit_backoff_seconds": 0,
+    "invalid_evaluation_retries": 0,
+    "max_api_requests_per_generation": 400,
+    "max_api_requests_per_run": 800,
+    "token_budget": {
+      "user": 512,
+      "agent": 4096,
+      "judge": 1024,
+      "customer_evolver": 8192,
+      "service_evolver": 8192
+    },
+    "summary_limit": 5
+  },
+  "persistence": {
+    "output_dir": "results/deceptive_customer_only_smoke_20261003",
+    "resume": false
+  },
+  "fresh_adversary": {
+    "enabled": false,
+    "rounds": 1,
+    "candidate_count": 1
+  }
+}
