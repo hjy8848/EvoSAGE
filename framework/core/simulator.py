@@ -48,7 +48,6 @@ class SimulationTurn:
     predicted_action: str = ""
     executed_path: List[str] = field(default_factory=list)
     executed_action: str = ""
-    customer_claim_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -135,7 +134,6 @@ class SimulationResult:
                     "predicted_action": turn.predicted_action,
                     "executed_path": turn.executed_path,
                     "executed_action": turn.executed_action,
-                    "customer_claim_metadata": turn.customer_claim_metadata,
                 }
                 for turn in self.turns
             ],
@@ -351,15 +349,10 @@ class DialogueSimulator:
             context_data: 上下文数据
             turn_id: 轮次ID
         """
-        # Keep same-call claim metadata alongside the customer turn only. The
-        # Agent receives the plain utterance below, never this private payload.
-        claims_getter = getattr(self.user_model, "get_last_customer_claim_metadata", None)
-        customer_claim_metadata = claims_getter() if callable(claims_getter) else None
-        turn_metadata = (
-            {"customer_claim_metadata": customer_claim_metadata}
-            if isinstance(customer_claim_metadata, dict) else {}
-        )
-        self.user_model.add_user_message(user_message, metadata=turn_metadata)
+        # Customer messages are evaluated as ordinary user input. There is no
+        # claim annotation or truthfulness side channel; backend/evaluator
+        # outcomes remain authoritative.
+        self.user_model.add_user_message(user_message)
         
         if self.verbose:
             print(f"\n[轮次 {turn_id}]")
@@ -476,7 +469,6 @@ class DialogueSimulator:
             predicted_action=predicted_action,
             executed_path=executed_path,
             executed_action=executed_action,
-            customer_claim_metadata=customer_claim_metadata or {},
         )
         result.turns.append(turn)
         

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import re
 from typing import Any, Dict, Optional
 
 from ..backend.types import CaseSpec
@@ -14,30 +13,24 @@ from .schemas import CustomerPolicy, PolicyValidationError
 
 
 class CustomerPolicyValidator:
-    """Hard validity gate for reusable customer strategies."""
+    """Validate strategy executability and benchmark integrity only.
 
-    _protocol_attack = re.compile(r"(ignore\s+(the|all)\s+instructions|prompt\s+injection|parser|json\s*hack|evaluator\s+manipulat)", re.I)
-
-    DEFAULT_TAGS = {
-        "truthful", "cooperative", "withholding", "pressure", "contradiction",
-        "delayed_disclosure", "authority_challenge", "delayed_contradiction",
-        "escalation", "paraphrase", "mistaken_belief", "deceptive_claim",
-    }
+    Business-claim truthfulness, hidden-value matching, and tactic allowlists
+    are deliberately not validity criteria: misleading the Service is the
+    adversarial task, while backend/evaluator truth remains authoritative.
+    """
 
     def __init__(self, allowed_tags=None):
-        self.allowed_tags = set(allowed_tags) if allowed_tags is not None else set(self.DEFAULT_TAGS)
+        # Accept the obsolete constructor argument so old configs remain
+        # readable; it no longer constrains the open strategy space.
+        self.allowed_tags = None
 
     def validate(self, policy: CustomerPolicy, case_spec: Optional[CaseSpec] = None) -> None:
         policy.validate_for_case(case_spec)
-        if not policy.policy_id or not policy.name:
-            raise PolicyValidationError("customer policy needs a stable id and name")
-        serialized = str(policy.to_dict())
-        if self._protocol_attack.search(serialized):
-            raise PolicyValidationError("customer policy attempts protocol or evaluator manipulation")
-        if any(not isinstance(tag, str) or not tag.strip() for tag in policy.strategy_tags):
-            raise PolicyValidationError("strategy tags must be non-empty strings")
-        if self.allowed_tags and any(tag not in self.allowed_tags for tag in policy.strategy_tags):
-            raise PolicyValidationError("customer policy uses an unapproved strategy tag")
+        if not policy.policy_id:
+            raise PolicyValidationError("adversarial strategy needs a stable id")
+        if not isinstance(policy.strategy, str) or not policy.strategy.strip():
+            raise PolicyValidationError("adversarial strategy must be non-empty text")
 
 
 class CustomerPolicyCompiler:
@@ -57,10 +50,11 @@ class CustomerPolicyCompiler:
 
 
 class PolicyCustomerModel(RuleUserModel):
-    """Rule customer whose behavior is controlled by a reusable policy.
+    """Deterministic legacy fixture; never used for REAL evolution runs.
 
-    It reads only ``CaseSpec.user_knowledge`` and public backend events.  The
-    parent RuleUserModel already receives sanitized event projections.
+    It remains to support unit tests and reproducible fixtures. The production
+    LLM Customer path consumes the free-text strategy directly and does not
+    interpret tags through Python branches.
     """
 
     def __init__(self, profile: UserProfile, system_prompt: str = "", case_spec: Optional[CaseSpec] = None,

@@ -20,29 +20,17 @@ class CustomerEvolutionConfig:
     candidate_count: int = 5
     elite_count: int = 1
     cases_per_candidate: int = 4
+    # Legacy config payload accepted for run-manifest compatibility only.
+    # CustomerSelector always uses official attributable Service failure rate.
     fitness_weights: Dict[str, float] = field(default_factory=lambda: {
-        "attack_success": 0.70,
-        "novelty": 0.15,
-        "node_diversity": 0.15,
+        "attack_success": 1.0,
     })
-    allowed_strategy_tags: list[str] = field(default_factory=lambda: [
-        "truthful", "cooperative", "withholding", "pressure", "contradiction",
-        "delayed_disclosure", "authority_challenge", "delayed_contradiction", "escalation", "paraphrase",
-        "mistaken_belief", "deceptive_claim",
-    ])
+    # Deprecated compatibility field for old run configs. Free-text strategies
+    # are not classified or constrained by a fixed tactic taxonomy.
+    allowed_strategy_tags: list[str] = field(default_factory=list)
+    # Historical metadata only; current LLM input is always the sanitized
+    # Customer-side view and never receives backend/evaluator state.
     adversary_access: str = "black_box"
-
-    def __post_init__(self) -> None:
-        if "coverage" in self.fitness_weights:
-            if "node_diversity" not in self.fitness_weights:
-                self.fitness_weights["node_diversity"] = self.fitness_weights["coverage"]
-            self.fitness_weights.pop("coverage", None)
-            warnings.warn(
-                "customer fitness weight 'coverage' is deprecated; interpreted as 'node_diversity'",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
 
 @dataclass
 class ServiceEvolutionConfig:

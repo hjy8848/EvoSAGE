@@ -106,39 +106,38 @@ def main() -> int:
             request_role="evolver",
             rate_limit_backoff_seconds=config.evaluation.rate_limit_backoff_seconds,
         )
-        customer_evolver = CustomerEvolver(
-            config.seed,
-            validator=CustomerPolicyValidator(config.customer.allowed_strategy_tags),
-            selector=CustomerSelector(config.customer.fitness_weights),
-            strategy_generator=LLMCustomerPolicyGenerator(
-                evolution_client,
-                config.customer.adversary_access,
-                max_tokens=config.evaluation.token_budget.customer_evolver,
-                summary_limit=config.evaluation.summary_limit,
-                allowed_strategy_tags=config.customer.allowed_strategy_tags,
-                thinking_mode=config.evaluation.evolver_thinking_mode,
-                protocol_retries=config.evaluation.evolver_protocol_retries,
-            ),
-            require_strategy_generator=True,
-        )
-        service_evolver = ServiceEvolver(
-            config.seed,
-            sanitizer=ServicePolicySanitizer(config.service.allowed_rule_categories),
-            gate=ServiceGate(
-                config.service.min_delta,
-                config.service.normal_regression_tolerance,
-                config.service.gate_min_paired_wins,
-                config.service.max_normal_paired_losses,
-            ),
-            patch_generator=LLMServicePatchGenerator(
-                evolution_client,
-                max_tokens=config.evaluation.token_budget.service_evolver,
-                summary_limit=config.evaluation.summary_limit,
-                thinking_mode=config.evaluation.evolver_thinking_mode,
-                protocol_retries=config.evaluation.evolver_protocol_retries,
-            ),
-            require_patch_generator=True,
-        )
+        if config.experiment_mode in {"customer_only", "coevolution"}:
+            customer_evolver = CustomerEvolver(
+                config.seed,
+                validator=CustomerPolicyValidator(),
+                selector=CustomerSelector(),
+                strategy_generator=LLMCustomerPolicyGenerator(
+                    evolution_client,
+                    max_tokens=config.evaluation.token_budget.customer_evolver,
+                    thinking_mode=config.evaluation.evolver_thinking_mode,
+                    protocol_retries=config.evaluation.evolver_protocol_retries,
+                ),
+                require_strategy_generator=True,
+            )
+        if config.experiment_mode in {"service_only", "coevolution"}:
+            service_evolver = ServiceEvolver(
+                config.seed,
+                sanitizer=ServicePolicySanitizer(config.service.allowed_rule_categories),
+                gate=ServiceGate(
+                    config.service.min_delta,
+                    config.service.normal_regression_tolerance,
+                    config.service.gate_min_paired_wins,
+                    config.service.max_normal_paired_losses,
+                ),
+                patch_generator=LLMServicePatchGenerator(
+                    evolution_client,
+                    max_tokens=config.evaluation.token_budget.service_evolver,
+                    summary_limit=config.evaluation.summary_limit,
+                    thinking_mode=config.evaluation.evolver_thinking_mode,
+                    protocol_retries=config.evaluation.evolver_protocol_retries,
+                ),
+                require_patch_generator=True,
+            )
     result = EvolutionRunner(
         config, evaluator=evaluator, customer_evolver=customer_evolver,
         service_evolver=service_evolver, run_dir=run_dir,

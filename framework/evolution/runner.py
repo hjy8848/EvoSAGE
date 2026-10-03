@@ -71,8 +71,8 @@ class EvolutionRunner:
         )
         self.customer_evolver = customer_evolver or CustomerEvolver(
             self.config.seed,
-            validator=CustomerPolicyValidator(self.config.customer.allowed_strategy_tags),
-            selector=CustomerSelector(self.config.customer.fitness_weights),
+            validator=CustomerPolicyValidator(),
+            selector=CustomerSelector(),
         )
         self.service_evolver = service_evolver or ServiceEvolver(
             self.config.seed,
@@ -84,8 +84,17 @@ class EvolutionRunner:
                 self.config.service.max_normal_paired_losses,
             ),
         )
-        self.attack_archive = AttackArchive(self.store.run_dir / "archives" / "attacks.jsonl")
-        self.defense_archive = DefenseArchive(self.store.run_dir / "archives" / "defenses.jsonl")
+        # Stage 1 deliberately avoids cross-generation archives: Customer
+        # candidates compete on official outcomes against the fixed Service S0.
+        customer_only = self.config.experiment_mode == "customer_only"
+        self.attack_archive = (
+            None if customer_only
+            else AttackArchive(self.store.run_dir / "archives" / "attacks.jsonl")
+        )
+        self.defense_archive = (
+            None if customer_only
+            else DefenseArchive(self.store.run_dir / "archives" / "defenses.jsonl")
+        )
         self.frontier = WeaknessFrontier()
         self._generation_wall_times: dict[str, float] = {}
         self._active_generation: Optional[int] = None
@@ -253,10 +262,12 @@ class EvolutionRunner:
         episode_runs = validation_count  # generation summary
         evolver_calls = 0
         if mode in {"customer_only", "coevolution"}:
-            candidate_cases = min(evolution_count, max(1, cfg.customer.cases_per_candidate))
+            candidate_cases = (
+                evolution_count if mode == "customer_only"
+                else min(evolution_count, max(1, cfg.customer.cases_per_candidate))
+            )
             episode_runs += evolution_count  # baseline failure scan
             episode_runs += cfg.customer.candidate_count * candidate_cases
-            episode_runs += cfg.customer.elite_count * candidate_cases
             episode_runs += evolution_count  # selected customer confirmation
             evolver_calls += 1
         if mode in {"service_only", "coevolution"}:
@@ -588,7 +599,7 @@ class EvolutionRunner:
                 getattr(self.customer_evolver, "require_strategy_generator", False)
                 or getattr(self.service_evolver, "require_patch_generator", False)
             ),
-            "customer_adversary_access": self.config.customer.adversary_access,
+            "customer_adversary_access": "black_box",
             "customer_thinking_mode": self.config.evaluation.customer_thinking_mode or "default",
             "requested_thinking_modes": {
                 "customer": self.config.evaluation.customer_thinking_mode or "default",
@@ -721,13 +732,19 @@ class EvolutionRunner:
                 else:
                     self._active_stage = "customer_candidate_generation_and_evaluation"
                     customer, candidate_records, scores = self.customer_evolver.evolve(
-                        customer, service, splits.evolution, self.evaluator, self.attack_archive, generation,
+                        customer, service, splits.evolution, self.evaluator,
+                        None if self.config.experiment_mode == "customer_only" else self.attack_archive,
+                        generation,
                         self.config.customer.candidate_count,
-                        cases_per_candidate=self.config.customer.cases_per_candidate,
+                        # Stage 1 compares every proposal on the same complete
+                        # evolution panel. Legacy subsampling remains available
+                        # only to the older coevolution mode.
+                        cases_per_candidate=(
+                            None if self.config.experiment_mode == "customer_only"
+                            else self.config.customer.cases_per_candidate
+                        ),
                         elite_count=self.config.customer.elite_count,
                         source_failures=prior_failures,
-                        frontier=self.frontier.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
-                        archive_summary=self.attack_archive.to_dicts()[-max(1, self.config.evaluation.summary_limit):],
                         incumbent_episodes=prior_customer_episodes,
                     )
                 self._active_customer_policy = customer
@@ -738,19 +755,38 @@ class EvolutionRunner:
                     "inconclusive" if customer_evaluation_inconclusive else "valid"
                 )
                 if "customer_candidate_selection_completed" not in self._completed_phases:
+                    score_by_id = {score.policy_id: score.to_dict() for score in scores}
+                    proposals = [
+                        {
+                            "policy": policy.to_dict(),
+                            "score": score_by_id.get(policy.policy_id),
+                            "episode_ids": [item.episode_id for item in items],
+                            "valid_episode_count": sum(item.is_substantively_evaluable() for item in items),
+                            "invalid_episode_count": sum(not item.is_substantively_evaluable() for item in items),
+                        }
+                        for policy, items in candidate_records
+                        if policy.policy_id != baseline_customer.policy_id
+                    ]
                     self.store.write_json(f"generations/gen_{generation:03d}/customer_candidates.json", {
                         "selected_policy": customer.to_dict(), "scores": [score.to_dict() for score in scores],
+                        "candidate_count": len(proposals),
+                        "candidate_policies": proposals,
+                        "fixed_service_policy_id": service.policy_id,
+                        "evaluation_case_ids": list(
+                            getattr(self.customer_evolver, "last_evaluation_case_ids", [])
+                            or [case.case_id for case in splits.evolution]
+                        ),
                         "selection": copy.deepcopy(
                             getattr(self.customer_evolver, "last_selection_record", None)
                         ),
-                        "candidate_episode_counts": [len(items) for _, items in candidate_records],
+                        "candidate_episode_counts": [len(items) for policy, items in candidate_records if policy.policy_id != baseline_customer.policy_id],
                         "candidate_valid_episode_counts": [
                             sum(item.is_substantively_evaluable() for item in items)
-                            for _, items in candidate_records
+                            for policy, items in candidate_records if policy.policy_id != baseline_customer.policy_id
                         ],
                         "candidate_invalid_episode_counts": [
                             sum(not item.is_substantively_evaluable() for item in items)
-                            for _, items in candidate_records
+                            for policy, items in candidate_records if policy.policy_id != baseline_customer.policy_id
                         ],
                         "rejections": list(getattr(self.customer_evolver, "last_rejections", [])),
                         "source_failures": [failure.to_dict() for failure in prior_failures],
@@ -799,16 +835,17 @@ class EvolutionRunner:
                 case_specs_by_id = {
                     case.case_id: case for case in splits.evolution + splits.validation
                 }
-                self.attack_archive.add(
-                    customer,
-                    signatures,
-                    selected_episodes,
-                    generation,
-                    case_specs_by_id=case_specs_by_id,
-                    occurrences=occurrence_values,
-                    reproduction_seed=self.config.seed,
-                )
-                self.frontier.add(selected_episodes)
+                if self.config.experiment_mode != "customer_only":
+                    self.attack_archive.add(
+                        customer,
+                        signatures,
+                        selected_episodes,
+                        generation,
+                        case_specs_by_id=case_specs_by_id,
+                        occurrences=occurrence_values,
+                        reproduction_seed=self.config.seed,
+                    )
+                    self.frontier.add(selected_episodes)
                 self._mark_phase_complete(
                     "selected_customer_evaluation_completed", "selected_customer_evaluation_completed"
                 )
@@ -964,7 +1001,8 @@ class EvolutionRunner:
                 raise GenerationEvaluationInconclusive(
                     "generation_summary_invalid:no_valid_episode_evidence"
                 )
-            self.frontier.add(episodes)
+            if self.config.experiment_mode != "customer_only":
+                self.frontier.add(episodes)
             self._generation_wall_times[str(generation)] = time.monotonic() - generation_started
             self.store.mark_generation_complete(generation, {
                 "episode_count": len(episodes),
@@ -991,8 +1029,9 @@ class EvolutionRunner:
                 "task_success": generation_metrics["task_success"],
                 "invalid_episodes": generation_metrics["invalid_episodes"],
             })
-        self.frontier.save(self.store.run_dir / "analysis" / "weakness_frontier.json", self.store.run_dir / "analysis" / "weakness_frontier.csv")
-        if self.config.fresh_adversary.enabled:
+        if self.config.experiment_mode != "customer_only":
+            self.frontier.save(self.store.run_dir / "analysis" / "weakness_frontier.json", self.store.run_dir / "analysis" / "weakness_frontier.csv")
+        if self.config.fresh_adversary.enabled and self.config.experiment_mode != "customer_only":
             self.fresh_adversary_evaluation(
                 rounds=self.config.fresh_adversary.rounds,
                 candidate_count=self.config.fresh_adversary.candidate_count,
@@ -1063,7 +1102,7 @@ class EvolutionRunner:
         incumbent = CustomerPolicy()
         results = []
         adaptation_results = []
-        selector = CustomerSelector(self.config.customer.fitness_weights)
+        selector = CustomerSelector()
         fresh_evolver = CustomerEvolver(
             seed=self.config.seed + 10_000,
             validator=getattr(self.customer_evolver, "validator", None),

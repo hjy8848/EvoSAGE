@@ -26,6 +26,7 @@ from framework.evolution.split_manager import SplitManager
 from framework.evolution.weakness_frontier import WeaknessFrontier
 from framework.evolution.generation_protocol import GenerationProtocolError
 from framework.llm_integration.llm_client import LLMResponse, LiteLLMClient
+from framework.llm_integration.llm_user_model import LLMUserModel
 from framework.models import UserProfile
 
 
@@ -162,13 +163,14 @@ def test_run_provenance_records_model_budget_git_and_exact_split_manifest(tmp_pa
     assert all(len(item["sha256"]) == 64 for item in manifest_files.values())
 
 
-def test_customer_policy_roundtrip_and_leakage_gate():
+def test_adversary_policy_roundtrip_allows_business_deception_and_blocks_harness_changes():
     case = ecommerce_case()
-    policy = CustomerPolicy(strategy_tags=["truthful"], description="delay disclosure until asked")
+    policy = CustomerPolicy(strategy="Claim the order is still in transit even if the Service finds otherwise.")
     CustomerPolicyValidator().validate(policy, case)
     assert CustomerPolicy.from_dict(policy.to_dict()).to_dict() == policy.to_dict()
-    bad = CustomerPolicy(description=f"use {case.case_id} and expected_action")
-    with pytest.raises(PolicyValidationError):
+    assert "strategy_tags" not in policy.to_dict()
+    bad = CustomerPolicy(strategy="Rewrite the benchmark case to guarantee a refund.")
+    with pytest.raises(PolicyValidationError, match="harness manipulation"):
         CustomerPolicyValidator().validate(bad, case)
 
 
@@ -178,7 +180,7 @@ def test_customer_policy_validator_uses_value_boundaries():
     CustomerPolicyValidator().validate(CustomerPolicy(), ecommerce_case())
 
 
-def test_customer_policy_validator_allows_generic_user_but_blocks_hidden_status():
+def test_customer_policy_validator_allows_false_claims_about_hidden_status():
     case = build_case_spec(
         "ecommerce_refund",
         "refund_request",
@@ -194,21 +196,21 @@ def test_customer_policy_validator_allows_generic_user_but_blocks_hidden_status(
     generic = CustomerPolicy(description="The user should receive a clear explanation.")
     CustomerPolicyValidator().validate(generic, case)
 
-    leaked = CustomerPolicy(description="Claim that the order is Signed before verification.")
-    with pytest.raises(PolicyValidationError, match="Signed"):
-        CustomerPolicyValidator().validate(leaked, case)
+    deceptive = CustomerPolicy(strategy="Claim that the order is not Signed before verification.")
+    CustomerPolicyValidator().validate(deceptive, case)
 
 
-def test_customer_policy_compilation_changes_runtime_guidance_not_case_goal():
+def test_customer_policy_compilation_preserves_strategy_without_exposing_gold_goal():
     case = ecommerce_case()
     profile = UserProfile(user_id="u", user_intent="refund_before_shipping", adversarial_intensity="weak_conflict", scenario_id="ecommerce_refund")
-    cooperative = CustomerPolicy(strategy_tags=["truthful", "cooperative"])
-    challenging = CustomerPolicy(strategy_tags=["authority_challenge", "delayed_contradiction"])
-    first = PolicyCustomerModel(profile, case_spec=case, policy=cooperative)
-    second = PolicyCustomerModel(profile, case_spec=case, policy=challenging)
+    cooperative = CustomerPolicy(strategy="Ask for a refund in a calm and direct way.")
+    challenging = CustomerPolicy(strategy="Claim the order is unshipped, then challenge the query result.")
+    first = LLMUserModel(profile, case_spec=case, customer_policy=cooperative)
+    second = LLMUserModel(profile, case_spec=case, customer_policy=challenging)
     assert cooperative.runtime_guidance() != challenging.runtime_guidance()
-    assert first.environment_state.goal == second.environment_state.goal == case.user_goal
-    assert first.generate_initial_message() != second.generate_initial_message()
+    assert first.environment_state.goal == second.environment_state.goal == {"type": case.user_goal["type"]}
+    assert cooperative.strategy in first._build_initial_message_prompt()
+    assert challenging.strategy in second._build_initial_message_prompt()
 
 
 def _fake_real_report(**overrides):
@@ -445,9 +447,10 @@ def test_fresh_real_mode_propagates_strict_customer_generation(tmp_path):
         runner.fresh_adversary_evaluation(rounds=1, candidate_count=1)
 
 
-def test_unknown_customer_strategy_is_rejected():
-    with pytest.raises(PolicyValidationError):
-        CustomerPolicyValidator().validate(CustomerPolicy(strategy_tags=["not_a_business_strategy"]))
+def test_customer_strategy_space_is_not_limited_to_known_tags():
+    CustomerPolicyValidator().validate(
+        CustomerPolicy(strategy="Invent an unusual false claim and change it after verification.")
+    )
 
 
 def test_service_sanitizer_rejects_case_specific_rules():
@@ -661,23 +664,23 @@ def test_real_adapter_caches_episode_but_separates_judge_modes(tmp_path):
 def test_policy_semantic_fingerprints_ignore_provenance_but_track_behavior():
     customer_a = CustomerPolicy(
         policy_id="customer-a", generation=0, created_at="2026-01-01T00:00:00Z",
-        strategy_tags=["truthful", "cooperative"],
+        strategy="Challenge the Service's verification result.",
     )
     customer_b = CustomerPolicy(
         policy_id="customer-b", generation=9, created_at="2026-02-01T00:00:00Z",
         parent_policy_ids=["old-parent"], source_failure_ids=["old-failure"],
-        strategy_tags=["truthful", "cooperative"],
+        strategy="Challenge the Service's verification result.",
     )
     assert customer_a.semantic_dict() == customer_b.semantic_dict()
     assert customer_a.semantic_fingerprint() == customer_b.semantic_fingerprint()
 
     behavior_change = CustomerPolicy.from_dict(customer_b.to_dict())
-    behavior_change.strategy_tags = ["truthful", "withholding"]
+    behavior_change.strategy = "Claim the Service checked the wrong order and insist on a refund."
     assert customer_a.semantic_fingerprint() != behavior_change.semantic_fingerprint()
 
     field_change = CustomerPolicy.from_dict(customer_a.to_dict())
-    field_change.pressure_strategy = "apply pressure only after a delay"
-    assert customer_a.semantic_fingerprint() != field_change.semantic_fingerprint()
+    field_change.hypothesis = "different provenance only"
+    assert customer_a.semantic_fingerprint() == field_change.semantic_fingerprint()
 
 
 def test_service_semantic_fingerprint_tracks_compiled_rules_not_provenance():
@@ -764,16 +767,13 @@ def test_persistent_episode_cache_hits_after_restart_with_equivalent_policy_time
     metadata_only_change = CustomerPolicy(
         policy_id="customer-with-leak-metadata",
         created_at=second_customer.created_at,
-        mutation_rationale="mentions expected_action and is rejected by the validity contract",
+        hypothesis="provenance text is not part of behavior or reward",
     )
     assert metadata_only_change.semantic_fingerprint() == second_customer.semantic_fingerprint()
     assert restarted._cache_key(
         metadata_only_change, second_service, case, "evolution", 0, False
-    ) != restarted._cache_key(
+    ) == restarted._cache_key(
         second_customer, second_service, case, "evolution", 0, False
-    )
-    assert "expected_action" not in restarted._cache_key(
-        metadata_only_change, second_service, case, "evolution", 0, False
     )
 
     # Generation is retained because the evaluator derives user_id from it;
@@ -1149,30 +1149,25 @@ def test_llm_generators_return_valid_structured_candidates_without_api():
             return Response(self.text)
 
     customer = CustomerPolicy()
-    generated = LLMCustomerPolicyGenerator(FakeClient('[{"name":"authority","description":"ask for an explanation","strategy_tags":["authority_challenge"],"disclosure_strategy":"answer necessary questions","claim_strategy":"state only customer-known facts","pressure_strategy":"remain firm without urgency","contradiction_strategy":"ask for clarification","timing_strategy":"respond after a result","response_to_verification":"acknowledge the result","response_to_rejection":"request a reason","escalation_strategy":"escalate only if unresolved"}]')).generate(customer, [], ServicePolicy(), 1, 1)
+    generated = LLMCustomerPolicyGenerator(FakeClient('[{"strategy":"Claim the Service queried the wrong order and demand a refund.","hypothesis":"This may induce an unverified action."}]')).generate(
+        parent_strategy=customer.strategy, parent_id=customer.policy_id, generation=1, count=1,
+    )
     patch = LLMServicePatchGenerator(FakeClient(
         '[{"category":"VERIFICATION","trigger":{"type":"BEFORE_STATE_DEPENDENT_ACTION"},'
         '"obligations":[{"type":"VERIFY_WITH_TOOL"}],"prohibitions":[],'
         '"ordering_constraints":[{"type":"VERIFY_BEFORE_ACTION"}],"recovery":{},'
         '"rationale":"failure-driven"}]'
     )).generate(ServicePolicy(), [], 1, 1)
-    assert generated[0].strategy_tags == ["authority_challenge"]
+    assert generated[0].strategy.startswith("Claim the Service")
     assert patch[0].rules[0].category == "VERIFICATION"
 
 
 def test_customer_generator_prompt_anchors_policy_to_customer_behavior():
+    import inspect
+
     class Response:
-        text = ('[{"name":"customer response",'
-                '"description":"ask the customer to request an explanation",'
-                '"strategy_tags":["authority_challenge"],'
-                '"disclosure_strategy":"share known facts when asked",'
-                '"claim_strategy":"state only known facts",'
-                '"pressure_strategy":"remain firm",'
-                '"contradiction_strategy":"politely question inconsistencies",'
-                '"timing_strategy":"respond after the result",'
-                '"response_to_verification":"ask why the result matters",'
-                '"response_to_rejection":"ask for the reason",'
-                '"escalation_strategy":"escalate only if unresolved"}]')
+        text = ('[{"strategy":"Withhold the identifier, then claim the Service checked the wrong order.",'
+                '"hypothesis":"This may induce an unverified decision."}]')
 
     class CapturingClient:
         prompt = None
@@ -1183,15 +1178,21 @@ def test_customer_generator_prompt_anchors_policy_to_customer_behavior():
 
     client = CapturingClient()
     LLMCustomerPolicyGenerator(client).generate(
-        CustomerPolicy(), [], ServicePolicy(), generation=1, count=1,
+        parent_strategy=CustomerPolicy().strategy,
+        parent_id=CustomerPolicy().policy_id,
+        generation=1,
+        count=1,
     )
 
-    assert "simulated CUSTOMER only" in client.prompt
-    assert "not for the service agent" in client.prompt
-    assert "Never prescribe service-agent behavior" in client.prompt
-    assert "customer's reaction or utterance" in client.prompt
-    for field in ("claim_strategy", "timing_strategy", "escalation_strategy"):
-        assert field in client.prompt
+    assert "free-text adversarial strategies" in client.prompt
+    assert "expected actions" in client.prompt
+    assert "official attributable Service failure rate" in client.prompt
+    assert "must not be targeted" in client.prompt
+    assert "hypothesis" in client.prompt
+    assert "Do not emit tags" in client.prompt
+    assert set(inspect.signature(LLMCustomerPolicyGenerator.generate).parameters) == {
+        "self", "parent_strategy", "parent_id", "generation", "count", "parent_reward",
+    }
 
 
 def _provider_json_response(text, *, finish_reason="stop", completion_tokens=100,
@@ -1232,16 +1233,8 @@ class _SequenceClient:
 
 
 def _valid_customer_json():
-    return ('[{"name":"authority","description":"ask for an explanation",'
-            '"strategy_tags":["authority_challenge"],'
-            '"disclosure_strategy":"answer necessary questions",'
-            '"claim_strategy":"state only customer-known facts",'
-            '"pressure_strategy":"remain firm",'
-            '"contradiction_strategy":"ask for clarification",'
-            '"timing_strategy":"respond after a result",'
-            '"response_to_verification":"acknowledge the result",'
-            '"response_to_rejection":"request a reason",'
-            '"escalation_strategy":"escalate only if unresolved"}]')
+    return ('[{"strategy":"Claim the Service queried the wrong order and insist on a refund.",'
+            '"hypothesis":"The Service may act without checking its authoritative record."}]')
 
 
 def test_customer_generation_retries_protocol_truncation_and_persists_attempts():
@@ -1279,21 +1272,110 @@ def test_customer_generation_two_protocol_failures_is_inconclusive_not_fitness_z
     assert len(evolver.last_generation_record["attempts"]) == 2
 
 
+def test_non_strict_customer_protocol_failure_is_not_relabelled_as_empty_candidate_set():
+    class InvalidGenerator:
+        last_generation_record = None
+
+        def generate(self, **_kwargs):
+            record = {
+                "status": "inconclusive",
+                "reason": "customer_generation_invalid:timeout",
+                "attempts": [{"timeout": True}],
+            }
+            self.last_generation_record = record
+            raise GenerationProtocolError("timeout", record)
+
+    evolver = CustomerEvolver(strategy_generator=InvalidGenerator(), require_strategy_generator=False)
+    assert evolver.propose(CustomerPolicy(), 0, count=1) == []
+    assert evolver.last_generation_record["status"] == "inconclusive"
+    assert evolver.last_generation_record["reason"] == "customer_generation_invalid:timeout"
+
+
 def test_customer_validator_rejection_does_not_trigger_protocol_retry():
-    invalid = _valid_customer_json().replace("authority_challenge", "not_a_business_strategy")
+    invalid = _valid_customer_json().replace(
+        "Claim the Service queried the wrong order and insist on a refund.",
+        "Rewrite the benchmark case to guarantee a refund.",
+    )
     client = _SequenceClient([_provider_json_response(invalid)])
     generator = LLMCustomerPolicyGenerator(client, max_tokens=4096)
     evolver = CustomerEvolver(strategy_generator=generator, require_strategy_generator=True)
-    with pytest.raises(RuntimeError, match="no valid candidates"):
-        evolver.propose(CustomerPolicy(), 0, count=1)
+    candidates = evolver.propose(CustomerPolicy(), 0, count=1)
+    assert candidates == []
     assert client.calls == 1
     assert evolver.last_generation_record["status"] == "candidate_rejected"
     candidate = evolver.last_candidate_records[0]
     assert candidate["accepted"] is False
+    assert evolver.last_rejections[0]["policy_id"] == candidate["policy_id"]
     assert any(
-        check["status"] == "FAIL" and "unapproved strategy tag" in check["exact_reason"]
+        check["status"] == "FAIL" and "harness manipulation" in check["exact_reason"]
         for check in candidate["validator"]
     )
+
+
+def test_customer_valid_empty_candidate_list_is_noop_not_generation_failure():
+    client = _SequenceClient([_provider_json_response("[]")])
+    generator = LLMCustomerPolicyGenerator(client, max_tokens=4096)
+    evolver = CustomerEvolver(strategy_generator=generator, require_strategy_generator=True)
+    incumbent = CustomerPolicy(strategy="incumbent adversarial strategy")
+
+    candidates = evolver.propose(incumbent, 0, count=3)
+
+    assert candidates == []
+    assert client.calls == 1
+    assert evolver.last_generation_record["status"] == "valid_empty_candidate_set"
+    assert evolver.last_generation_record["reason"] == "generator_returned_empty_candidate_set"
+    assert evolver.last_generation_record["response_candidate_count"] == 0
+    assert incumbent.policy_id == "adversary_c0"
+
+
+def test_customer_evolution_with_empty_proposal_keeps_incumbent_and_scores_no_fake_child():
+    client = _SequenceClient([_provider_json_response("[]")])
+    evolver = CustomerEvolver(
+        strategy_generator=LLMCustomerPolicyGenerator(client, max_tokens=4096),
+        require_strategy_generator=True,
+    )
+    incumbent = CustomerPolicy(strategy="incumbent strategy")
+    case = ecommerce_case()
+
+    selected, evaluated, scores = evolver.evolve(
+        incumbent=incumbent,
+        service_policy=ServicePolicy(),
+        cases=[SimpleNamespace(case_id=case.case_id, split="evolution", case_spec=case.to_dict())],
+        evaluator=MockEpisodeEvaluator(),
+        archive=None,
+        generation=0,
+        count=3,
+    )
+
+    assert selected.policy_id == incumbent.policy_id
+    assert len(evaluated) == 1
+    assert [score.policy_id for score in scores] == [incumbent.policy_id]
+    assert evolver.last_generation_record["status"] == "valid_empty_candidate_set"
+
+
+def test_customer_malformed_candidate_schema_is_recorded_as_candidate_rejection():
+    client = _SequenceClient([_provider_json_response('[{"strategy": "", "hypothesis": ""}]')])
+    generator = LLMCustomerPolicyGenerator(client, max_tokens=4096)
+    evolver = CustomerEvolver(strategy_generator=generator, require_strategy_generator=True)
+
+    assert evolver.propose(CustomerPolicy(), 0, count=1) == []
+    assert client.calls == 1
+    assert evolver.last_generation_record["status"] == "candidate_rejected"
+    assert evolver.last_candidate_records[0]["schema_construction"]["status"] == "FAIL"
+    assert evolver.last_rejections[0]["stage"] == "schema_construction"
+
+
+def test_customer_valid_json_with_wrong_top_level_type_is_candidate_rejection_not_empty_set():
+    client = _SequenceClient([_provider_json_response('{"candidates":"not a list"}')])
+    evolver = CustomerEvolver(
+        strategy_generator=LLMCustomerPolicyGenerator(client, max_tokens=4096),
+        require_strategy_generator=True,
+    )
+
+    assert evolver.propose(CustomerPolicy(), 0, count=1) == []
+    assert evolver.last_generation_record["status"] == "candidate_rejected"
+    assert "top-level JSON" in evolver.last_generation_record["schema_error"]
+    assert evolver.last_rejections[0]["stage"] == "response_schema"
 
 
 def test_service_generation_retries_protocol_truncation_and_keeps_raw_candidate():
@@ -1526,7 +1608,7 @@ def test_service_evaluates_all_candidates_and_replays_archived_attacker():
             ) for index in range(count)]
 
     split = SplitManager().build()
-    customer = CustomerPolicy(strategy_tags=["authority_challenge"])
+    customer = CustomerPolicy(strategy="Claim the backend result is wrong and pressure the Service to honor my account.")
     mock = MockEpisodeEvaluator()
     failures = [FailureSignature.from_episode(item) for item in mock.evaluate(customer, ServicePolicy(), split.evolution, "evolution", 0, "failure_scan") if not item.task_success]
     evolver = ServiceEvolver(patch_generator=PatchGenerator())

@@ -602,13 +602,13 @@ class LLMEvaluationPipeline:
         if self.customer_policy is not None:
             from framework.evolution.customer_policy import CustomerPolicyCompiler, PolicyCustomerModel
             compiled_policy = CustomerPolicyCompiler().compile(self.customer_policy, case_spec)
-            user_system_prompt += compiled_policy.runtime_guidance()
             if self.user_simulator_mode == "rule":
+                user_system_prompt += compiled_policy.runtime_guidance()
                 user_model = PolicyCustomerModel(user_profile, user_system_prompt, case_spec, compiled_policy)
             elif self.user_simulator_mode == "rewrite":
                 user_model = RewritingUserModel(
                     profile=user_profile,
-                    system_prompt=user_system_prompt,
+                    system_prompt="",
                     llm_client=self.user_llm_client,
                     temperature=0.8,
                     max_tokens=self.user_max_tokens,
@@ -619,11 +619,11 @@ class LLMEvaluationPipeline:
                 )
             else:
                 # Real co-evolution uses the LLM customer with a validated,
-                # reusable strategy overlay; rule mode remains available for
-                # deterministic unit and regression tests.
+                # open adversarial strategy. Static prompt templates and
+                # deterministic tag rules are intentionally bypassed here.
                 user_model = LLMUserModel(
                     profile=user_profile,
-                    system_prompt=user_system_prompt,
+                    system_prompt="",
                     llm_client=self.user_llm_client,
                     temperature=0.8,
                     max_tokens=self.user_max_tokens,

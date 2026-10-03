@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 import warnings
-
-from .config import CustomerEvolutionConfig
 from .evaluator_adapter import aggregate_episode_metrics
 from .schemas import CustomerPolicy, EpisodeResult
 
@@ -41,20 +39,11 @@ class CandidateScore:
 
 class CustomerSelector:
     def __init__(self, weights=None, tie_tolerance: float = 1e-12):
-        self.weights = dict(CustomerEvolutionConfig().fitness_weights)
+        # ``weights`` is accepted only for old configs; official Customer
+        # fitness is exactly the valid-episode Service failure rate.
+        self.weights = {"attack_success": 1.0}
         self.tie_tolerance = max(0.0, float(tie_tolerance))
         self.last_selection_record = None
-        if weights:
-            weights = dict(weights)
-            if "coverage" in weights:
-                weights.setdefault("node_diversity", weights["coverage"])
-                weights.pop("coverage", None)
-                warnings.warn(
-                    "customer fitness weight 'coverage' is deprecated; interpreted as 'node_diversity'",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-            self.weights.update(weights)
 
     def score(self, policy: CustomerPolicy, episodes: Iterable[EpisodeResult], known_signatures: set[str], total_nodes: Optional[int] = None, allow_heldout: bool = False) -> CandidateScore:
         episodes = list(episodes)
@@ -85,8 +74,9 @@ class CustomerSelector:
                 invalid_episode_count=len(invalid_episodes),
                 invalid_reasons=invalid_reasons or (["no_valid_episode_evidence"] if not episodes else []),
             )
-        # Customer behavior that violates the fixed CaseSpec is diagnostic,
-        # not attack fitness. Only attributable service failures contribute.
+        # Business claims are not Customer-invalid. Integrity/protocol checks
+        # are separated upstream; fitness is the official attributable Service
+        # failure rate on the valid episodes.
         attack_success = aggregate_episode_metrics(valid_episodes)["attributable_service_failure_rate"]
         signatures = {
             signature.signature_id
@@ -103,11 +93,7 @@ class CustomerSelector:
             if episode.is_attributable_service_failure() and episode.sop_node
         }
         node_diversity = min(1.0, len(failure_nodes) / max(1, candidate_case_count))
-        fitness = sum(self.weights[key] * value for key, value in (
-            ("attack_success", attack_success),
-            ("novelty", novelty),
-            ("node_diversity", node_diversity),
-        ))
+        fitness = attack_success
         return CandidateScore(
             policy.policy_id, attack_success, novelty, node_diversity, fitness,
             len(valid_episodes), "valid", len(invalid_episodes), invalid_reasons,

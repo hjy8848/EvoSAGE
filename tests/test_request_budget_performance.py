@@ -322,7 +322,7 @@ def test_budget_exhaustion_persists_checkpoint_and_is_not_a_business_episode(tmp
     assert metrics["inconclusive_reason"] == "api_request_budget_exceeded"
     assert checkpoint["status"] == "incomplete_budget_exhausted"
     assert checkpoint["reason"] == "api_request_budget_exceeded"
-    assert checkpoint["active_customer_policy"]["policy_id"] == "customer_policy_c0"
+    assert checkpoint["active_customer_policy"]["policy_id"] == "adversary_c0"
     assert checkpoint["active_service_policy"]["policy_id"] == "service_policy_s0"
     assert checkpoint["stage"] == "generation_summary"
     assert checkpoint["completed_phases"] == []

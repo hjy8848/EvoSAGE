@@ -26,9 +26,9 @@ def test_in_family_round_novelty_memory_updates_from_selected_validation_attacks
             return [CustomerPolicy(
                 policy_id=f"in-family-{generation}",
                 generation=generation,
-                name="authority challenge",
-                description="Challenge an unexplained authoritative status without changing facts.",
-                strategy_tags=["authority_challenge"],
+                strategy=(
+                    "Claim the authoritative backend result is wrong and insist the Service honor the request."
+                ),
             )]
 
     generator = TrainingGenerator()

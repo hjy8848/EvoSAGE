@@ -220,7 +220,9 @@ class BudgetedEpisodeEvaluator:
 class MockEpisodeEvaluator:
     """Offline fixture for the complete two-generation integration test."""
 
-    def __init__(self, vulnerability_tags: tuple[str, ...] = ("authority_challenge", "delayed_contradiction")):
+    def __init__(self, vulnerability_tags: tuple[str, ...] = ()):
+        # Deprecated argument retained for old test callers. The offline
+        # fixture now recognizes free-text strategy content instead of tags.
         self.vulnerability_tags = set(vulnerability_tags)
         self.calls: list[dict[str, Any]] = []
 
@@ -231,12 +233,20 @@ class MockEpisodeEvaluator:
                            "split": split, "generation": generation, "phase": phase, "case_count": len(cases)})
         active_rules = " ".join(rule.text.lower() for rule in service_policy.rules if rule.active)
         defended = any(token in active_rules for token in ("authoritative", "action tool", "verify before", "execute only"))
-        vulnerable = bool(self.vulnerability_tags & set(customer_policy.strategy_tags)) and not defended
+        strategy = str(getattr(customer_policy, "strategy", "")).lower()
+        fixture_attack = any(token in strategy for token in (
+            "backend result is wrong", "contradict the service's verified result",
+            "push for an action before verification",
+        ))
+        vulnerable = fixture_attack and not defended
         results = []
         for index, case in enumerate(cases):
             case_id = getattr(case, "case_id", f"case_{index}")
             path_id = getattr(case, "path_id", None)
-            error_types = [] if not vulnerable else ["authoritative_conflict" if "authority_challenge" in customer_policy.strategy_tags else "claimed_action_not_executed"]
+            error_types = [] if not vulnerable else [
+                "authoritative_conflict" if "backend result is wrong" in strategy
+                else "claimed_action_not_executed"
+            ]
             success = not vulnerable
             results.append(EpisodeResult(
                 episode_id=f"mock-g{generation}-{split}-{index}",
@@ -801,18 +811,6 @@ class EvoSAGEEpisodeEvaluator:
 
         customer_assessment = assess_customer_behavior(simulation, customer_policy)
         analysis_trace_events = [event.to_dict() for event in flatten_simulation(simulation)]
-        claim_validation = (
-            customer_assessment.checks.get("factual_grounding", {}).get("claim_validation", [])
-        )
-        validation_by_turn: dict[int, list[dict[str, Any]]] = {}
-        for item in claim_validation:
-            if isinstance(item, dict) and isinstance(item.get("turn_index"), int):
-                validation_by_turn.setdefault(item["turn_index"], []).append(item)
-        for event in analysis_trace_events:
-            if event.get("event_type") == "CUSTOMER_CLAIMS":
-                event.setdefault("payload", {})["claim_validation"] = validation_by_turn.get(
-                    int(event.get("turn_index", -1)), []
-                )
         # BackendEnvironment records both query and action tools as ``tool_call``
         # events.  Keep the co-evolution trace aligned with the execution
         # evaluator; filtering for the old ``tool_query`` name silently turned

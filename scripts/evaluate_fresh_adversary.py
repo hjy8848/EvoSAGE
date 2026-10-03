@@ -63,9 +63,9 @@ def main() -> int:
         )
         customer_evolver = CustomerEvolver(
             seed=config.seed + 10_000,
-            validator=CustomerPolicyValidator(config.customer.allowed_strategy_tags),
-            selector=CustomerSelector(config.customer.fitness_weights),
-            strategy_generator=LLMCustomerPolicyGenerator(evolution_client, config.customer.adversary_access),
+            validator=CustomerPolicyValidator(),
+            selector=CustomerSelector(),
+            strategy_generator=LLMCustomerPolicyGenerator(evolution_client),
             require_strategy_generator=True,
         )
         if config.fresh_adversary.mode == "cross_generator":
@@ -83,10 +83,7 @@ def main() -> int:
             )
             fresh_strategy_generator = LLMCustomerPolicyGenerator(
                 fresh_client,
-                adversary_access=config.customer.adversary_access,
                 max_tokens=config.evaluation.token_budget.customer_evolver,
-                summary_limit=config.evaluation.summary_limit,
-                allowed_strategy_tags=config.customer.allowed_strategy_tags,
             )
     elif config.fresh_adversary.mode == "cross_generator":
         raise SystemExit("cross_generator fresh adversary evaluation requires --real and a separate configured model")

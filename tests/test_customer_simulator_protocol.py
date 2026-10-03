@@ -125,14 +125,13 @@ def _profile():
     )
 
 
-def test_mandatory_opening_contract_overrides_customer_withholding_policy():
+def test_adversarial_strategy_can_withhold_identifier_despite_legacy_opening_contract():
     case = _case(show_order_id_initially=True)
     policy = CustomerPolicy(
         policy_id="withholding-opening-test",
-        strategy_tags=["truthful", "withholding", "delayed_disclosure"],
-        disclosure_strategy="withhold optional known details until asked",
+        strategy="Do not disclose the order number in the opening; ask the Service to explain its need first.",
     )
-    client = _SequenceClient([_response("我想办理换货，订单号是 ORD-123456。")])
+    client = _SequenceClient([_response("我想办理换货，请先说明需要哪些信息。")])
     user = LLMUserModel(
         _profile(),
         "Customer prompt base.",
@@ -143,33 +142,20 @@ def test_mandatory_opening_contract_overrides_customer_withholding_policy():
     )
 
     prompt = user._build_initial_message_prompt()
-    contract = get_customer_opening_contract(case)
-    assert contract == [{
-        "field": "order_id",
-        "value": "ORD-123456",
-        "timing": "opening_turn",
-    }]
-    assert "强制首轮披露约定" in prompt
-    assert "ORD-123456" in prompt
-    assert "优先于 CustomerPolicy" in prompt
-    assert user._mandatory_opening_order_id() == contract[0]["value"]
+    assert "强制首轮披露约定" not in prompt
+    assert "ORD-123456" in prompt  # private Customer knowledge is visible, but is not forced into speech
+    assert policy.strategy in prompt
 
     message = user.generate_initial_message()
-    assert "ORD-123456" in message
+    assert "ORD-123456" not in message
     assert user.get_customer_simulator_provenance()[0]["status"] == "valid"
-    assert user.get_customer_simulator_provenance()[0]["policy_constraint_overrides"] == [{
-        "constraint": "mandatory_opening_disclosure",
-        "field": "order_id",
-        "reason": "policy_constraint_overridden_by_case_contract",
-    }]
 
 
 def test_customer_policy_is_injected_in_opening_and_followup_requests():
     case = _case(show_order_id_initially=False)
     policy = CustomerPolicy(
         policy_id="persistent-guidance",
-        strategy_tags=["truthful", "cooperative"],
-        pressure_strategy="do not pressure the agent",
+        strategy="Ask the Service to explain the query before deciding whether to disclose the order number.",
     )
     client = _SequenceClient([
         _response("我想申请退款，请帮我核实。"),
@@ -186,10 +172,9 @@ def test_customer_policy_is_injected_in_opening_and_followup_requests():
     ]
     user.generate_next_message("我正在查询。", turn_count=1)
 
-    guidance = policy.runtime_guidance()
     assert len(client.prompts) == 2
-    assert all(guidance in prompt for prompt in client.prompts)
-    assert all("策略优先级" in prompt for prompt in client.prompts)
+    assert all(policy.strategy in prompt for prompt in client.prompts)
+    assert all("Customer-side information available" in prompt for prompt in client.prompts)
     provenance = user.get_customer_simulator_provenance()
     assert [record["stage"] for record in provenance] == ["opening", "reply"]
     assert all(record["policy_guidance_injected"] for record in provenance)
@@ -202,18 +187,16 @@ def test_non_mandatory_opening_without_identifier_remains_valid():
     user = LLMUserModel(_profile(), "Customer prompt base.", client, max_tokens=1536, case_spec=case)
 
     assert get_customer_opening_contract(case) == []
-    assert user._mandatory_opening_order_id() is None
     prompt = user._build_initial_message_prompt()
     assert "强制首轮披露约定" not in prompt
     assert user.private_knowledge["order_id"] == "ORD-123456"
-    assert "你私下知道的信息" in prompt
+    assert "Customer-side information available" in prompt
     assert '"order_id": "ORD-123456"' in prompt
-    assert "不要主动说出订单号" in prompt
     assert user.generate_initial_message() == "I want to return my earbuds."
     assert user.get_customer_simulator_provenance()[0]["status"] == "valid"
 
 
-def test_same_call_customer_envelope_keeps_claims_internal_and_traceable():
+def test_legacy_customer_envelope_claim_fields_are_ignored_and_not_traced():
     from framework.evolution.trace import flatten_simulation
 
     client = _SequenceClient([_response(
@@ -228,27 +211,24 @@ def test_same_call_customer_envelope_keeps_claims_internal_and_traceable():
     case.user_knowledge["has_received"] = True
     user = LLMUserModel(_profile(), llm_client=client, case_spec=case)
     utterance = user.generate_initial_message()
-    claim_metadata = user.get_last_customer_claim_metadata()
 
     assert utterance == "I got my wireless earbuds."
     assert client.calls == 1
-    assert claim_metadata["parse_status"] == "valid"
-    assert [claim["field"] for claim in claim_metadata["claims"]] == ["product_name", "received"]
-    assert "claims" in client.prompts[0][-900:]
+    assert user.get_customer_simulator_provenance()[0]["message_parse_status"] == "valid_envelope"
+    assert "claims" not in client.prompts[0][-900:]
 
     agent = _CapturingAgent()
     result = DialogueSimulator(
         user_model=user, agent_model=agent, max_turns=1, case_spec=case,
     ).run(utterance)
     assert agent.messages == [utterance]
-    assert result.turns[0].customer_claim_metadata["claims"] == claim_metadata["claims"]
     claim_events = [event for event in flatten_simulation(result) if event.event_type == "CUSTOMER_CLAIMS"]
-    assert len(claim_events) == 1
-    assert claim_events[0].payload["claims"] == claim_metadata["claims"]
+    assert len(claim_events) == 0
+    assert "customer_claim_metadata" not in result.to_dict()["turns"][0]
     assert "FACT" not in agent.messages[0]
 
 
-def test_customer_envelope_parses_epistemic_basis_and_customer_state():
+def test_legacy_customer_envelope_ignores_claim_metadata():
     raw = json.dumps({
         "utterance": "My tracking shows it was signed for; I changed my mind.",
         "claims": [
@@ -259,21 +239,19 @@ def test_customer_envelope_parses_epistemic_basis_and_customer_state():
     }, ensure_ascii=False)
     utterance, metadata = LLMUserModel._parse_customer_response(raw)
     assert utterance == "My tracking shows it was signed for; I changed my mind."
-    assert metadata["parse_status"] == "valid"
-    assert [claim["basis"] for claim in metadata["claims"]] == [
-        "CUSTOMER_BELIEF", "CUSTOMER_STATE", "NOT_APPLICABLE",
-    ]
+    assert metadata["parse_status"] == "valid_envelope"
+    assert "claims" not in metadata
 
 
-def test_grounded_customer_claim_without_basis_is_protocol_invalid():
+def test_customer_claim_without_basis_is_still_valid_utterance():
     raw = json.dumps({
         "utterance": "The package was signed for.",
         "claims": [{"kind": "FACT", "field": "shipping_status", "value": "Signed"}],
     })
     utterance, metadata = LLMUserModel._parse_customer_response(raw)
     assert utterance == "The package was signed for."
-    assert metadata["parse_status"] == "invalid"
-    assert metadata["parse_error"] == "customer_response_claim_0_invalid_or_missing_basis"
+    assert metadata["parse_status"] == "valid_envelope"
+    assert "claims" not in metadata
 
 
 def test_malformed_claims_metadata_does_not_hide_or_validate_utterance():
@@ -281,17 +259,16 @@ def test_malformed_claims_metadata_does_not_hide_or_validate_utterance():
     client = _SequenceClient([_response(malformed, raw_response_text=True)])
     user = LLMUserModel(_profile(), llm_client=client, case_spec=_case(show_order_id_initially=False))
     assert user.generate_initial_message() == "I want to return the item."
-    metadata = user.get_last_customer_claim_metadata()
-    assert metadata["parse_status"] == "invalid"
-    assert metadata["parse_error"] == "customer_response_claims_missing_or_not_list"
-    assert user.get_customer_simulator_provenance()[0]["claim_metadata_status"] == "invalid"
+    metadata = user.get_customer_simulator_provenance()[0]
+    assert metadata["message_parse_status"] == "valid_envelope"
+    assert "claim_metadata_status" not in metadata
 
 
 def test_private_known_order_id_survives_opening_withholding_and_is_available_on_request():
     case = _case(show_order_id_initially=False)
     policy = CustomerPolicy(
         policy_id="truthful-private-order-id",
-        strategy_tags=["truthful", "cooperative"],
+        strategy="Withhold the order number initially; then decide whether to provide it or invent a claim.",
     )
     client = _SequenceClient([
         _response("我想申请退货，请帮我处理。"),
@@ -309,8 +286,8 @@ def test_private_known_order_id_survives_opening_withholding_and_is_available_on
     assert reply == "我的订单号是 ORD-123456，请帮我核实。"
     reply_prompt = client.prompts[1]
     assert '"order_id": "ORD-123456"' in reply_prompt
-    assert "客服本轮询问订单号" in reply_prompt
-    assert "必须使用私有知识中的准确值 ORD-123456" in reply_prompt
+    assert policy.strategy in reply_prompt
+    assert "Customer-side information available" in reply_prompt
 
 
 def test_private_identifier_prompt_keeps_order_and_customer_id_roles_distinct():
@@ -324,11 +301,10 @@ def test_private_identifier_prompt_keeps_order_and_customer_id_roles_distinct():
     prompt = client.prompts[0]
     assert '"order_id": "ORD-123456"' in prompt
     assert '"customer_id": "CUS-123"' in prompt
-    assert "不能猜测或替换成其他编号" in prompt
-    assert user._requested_identifier_field("请提供订单号。") == "order_id"
+    assert "You may lie" not in prompt  # no policy means no generated deception strategy
 
 
-def test_initial_visibility_changes_disclosure_instruction_not_private_knowledge():
+def test_legacy_disclosure_flags_do_not_change_customer_prompt_or_knowledge():
     hidden_at_opening = _case(show_order_id_initially=False)
     visible_at_opening = _case(show_order_id_initially=True)
     hidden_user = LLMUserModel(_profile(), case_spec=hidden_at_opening)
@@ -336,23 +312,22 @@ def test_initial_visibility_changes_disclosure_instruction_not_private_knowledge
 
     assert hidden_user.private_knowledge == visible_user.private_knowledge
     assert hidden_user._known_case_facts_text() == visible_user._known_case_facts_text()
-    assert "不要主动说出订单号" in hidden_user._disclosure_timing_text("opening")
-    assert "必须逐字使用该值" in visible_user._disclosure_timing_text("opening")
+    assert hidden_user._build_initial_message_prompt() == visible_user._build_initial_message_prompt()
 
 
 def test_withholding_changes_turn_disclosure_but_preserves_exact_private_identifier():
     case = _case(show_order_id_initially=False)
     policy = CustomerPolicy(
         policy_id="withhold-but-know",
-        strategy_tags=["truthful", "withholding"],
+        strategy="Withhold the real order number and, if useful, claim a different one.",
     )
     client = _SequenceClient([
         _response("可以先说明需要订单号核验什么吗？"),
         _response("订单号是 ORD-123456。"),
     ])
     user = LLMUserModel(_profile(), llm_client=client, case_spec=case, customer_policy=policy)
-    first_instruction = user._disclosure_timing_text("reply", "请提供订单号。")
-    assert "订单号" in first_instruction and "不要说出编号" in first_instruction
+    first_instruction = user._build_generation_prompt("请提供订单号。", turn_count=1)
+    assert "订单号" in first_instruction and policy.strategy in first_instruction
     assert user.private_knowledge["order_id"] == "ORD-123456"
 
     user.dialogue_history = [
@@ -364,7 +339,7 @@ def test_withholding_changes_turn_disclosure_but_preserves_exact_private_identif
         "需要订单号用于核验订单状态。", turn_count=2,
     )
     assert '"order_id": "ORD-123456"' in second_prompt
-    assert "必须使用私有知识中的准确值 ORD-123456" in second_prompt
+    assert policy.strategy in second_prompt
 
 
 def test_unknown_order_id_is_not_added_to_private_knowledge_or_guessed():
@@ -374,12 +349,12 @@ def test_unknown_order_id_is_not_added_to_private_knowledge_or_guessed():
 
     assert "order_id" not in user.private_knowledge
     assert "order_id" not in user.environment_state.known_facts
-    instruction = user._disclosure_timing_text("reply", "请提供订单号。")
-    assert "你并不知道该字段的值" in instruction
+    prompt = user._build_generation_prompt("请提供订单号。", turn_count=1)
     assert "ORD-123456" not in user._known_case_facts_text()
+    assert '"order_id"' not in prompt
 
 
-def test_unsupported_identifier_remains_customer_behavior_invalid():
+def test_fabricated_identifier_is_valid_adversarial_customer_behavior():
     case = _case(show_order_id_initially=False)
     simulation = SimpleNamespace(
         case_spec=case.to_dict(),
@@ -400,8 +375,8 @@ def test_unsupported_identifier_remains_customer_behavior_invalid():
         simulation, CustomerPolicy(strategy_tags=["truthful", "cooperative"]),
     )
 
-    assert assessment.valid is False
-    assert "unsupported_fact_generation:order_id" in assessment.reasons
+    assert assessment.valid is True
+    assert assessment.checks["business_claim_truth_checked"] is False
 
 
 def test_customer_thinking_mode_is_opt_in_and_saved_in_generation_provenance():
@@ -488,8 +463,7 @@ def test_pipeline_thinking_setting_is_customer_scoped(tmp_path, monkeypatch):
             created_users.append(self)
 
         def generate_initial_message(self):
-            order_id = self._mandatory_opening_order_id()
-            return f"我想咨询一下订单 {order_id or 'unknown'}。"
+            return "我想咨询一下退款。"
 
     class FakeAgent:
         def __init__(self, *_args, **kwargs):
@@ -575,9 +549,8 @@ def test_prompt_and_post_generation_guard_use_the_same_opening_contract():
     optional_user = LLMUserModel(_profile(), "base", case_spec=optional_case)
 
     contract = get_customer_opening_contract(mandatory_case)
-    assert mandatory_user._mandatory_opening_order_id() == contract[0]["value"]
-    assert contract[0]["value"] in mandatory_user._build_initial_message_prompt()
-    assert optional_user._mandatory_opening_order_id() is None
+    assert contract  # legacy benchmark metadata remains readable
+    assert "强制首轮披露约定" not in mandatory_user._build_initial_message_prompt()
     assert get_customer_opening_contract(optional_case) == []
     assert "强制首轮披露约定" not in optional_user._build_initial_message_prompt()
 
@@ -629,7 +602,7 @@ def test_empty_customer_opening_retries_and_only_valid_message_reaches_agent():
     provenance = user.get_customer_simulator_provenance()[0]
     assert provenance["status"] == "valid"
     assert provenance["retry_count"] == 1
-    assert provenance["attempts"][0]["invalid_reason"] == "empty_message"
+    assert provenance["attempts"][0]["invalid_reason"] == "empty_output"
     assert provenance["attempts"][1]["generation_status"] == "valid"
     assert provenance["attempts"][0]["provider_request_id"] == "empty-1"
     assert provenance["attempts"][1]["input_tokens"] == 23
@@ -674,7 +647,7 @@ def test_persistent_empty_customer_generation_is_invalid_and_excluded_everywhere
 
     assert client.calls == 2  # no second adapter-level retry
     assert episode.evaluation_status == "invalid"
-    assert episode.invalid_reason == "customer_simulator_invalid:empty_message"
+    assert episode.invalid_reason == "customer_simulator_invalid:empty_output"
     assert episode.termination_reason == "customer_simulator_invalid"
     assert episode.metadata["customer_simulator_protocol_invalid"] is True
     attempts = episode.metadata["customer_simulator_provenance"][0]["attempts"]
@@ -896,20 +869,15 @@ def test_nonmandatory_opening_without_order_id_remains_valid_business_failure():
     assert not episode.is_evaluation_invalid()
 
 
-def test_mandatory_opening_order_id_is_enforced_but_only_for_explicit_case_contract():
+def test_case_contract_no_longer_forces_opening_identifier_disclosure():
     client = _SequenceClient([
         _response("我要退货，请帮我处理。"),
         _response("我需要退货，请帮忙处理一下。", request_id="still-missing"),
     ])
     user = LLMUserModel(_profile(), llm_client=client, case_spec=_case(show_order_id_initially=True))
-    with pytest.raises(CustomerSimulatorProtocolError, match="customer_simulator_invalid:missing_mandatory_order_id"):
-        user.generate_initial_message()
-    assert client.calls == 2
-    assert user.get_customer_simulator_provenance()[0]["status"] == "invalid"
-    assert [item["invalid_reason"] for item in user.get_customer_simulator_provenance()[0]["attempts"]] == [
-        "missing_mandatory_order_id",
-        "missing_mandatory_order_id",
-    ]
+    assert user.generate_initial_message() == "我要退货，请帮我处理。"
+    assert client.calls == 1
+    assert user.get_customer_simulator_provenance()[0]["status"] == "valid"
 
 
 def test_customer_simulator_timeout_retries_once_and_records_provider_provenance():
