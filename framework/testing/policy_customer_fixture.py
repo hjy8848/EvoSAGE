@@ -1,68 +1,23 @@
-"""Customer policy validation, compilation and deterministic simulation."""
+"""Deterministic legacy Customer fixture for tests only.
+
+REAL Customer-only experiments use the LLM Customer model directly and do not
+interpret strategy text as tags or Python behavior rules.
+"""
 
 from __future__ import annotations
 
-import copy
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from ..backend.types import CaseSpec
 from ..core.customer_contract import get_customer_opening_contract
+from ..evolution.legacy.customer_policy import CustomerPolicyValidator
+from ..evolution.schemas import CustomerPolicy
 from ..llm_integration.llm_user_model import RuleUserModel
 from ..models import UserProfile
-from .schemas import CustomerPolicy, PolicyValidationError
-
-
-class CustomerPolicyValidator:
-    """Validate strategy executability and benchmark integrity only.
-
-    Business-claim truthfulness, hidden-value matching, and tactic allowlists
-    are deliberately not validity criteria: misleading the Service is the
-    adversarial task, while backend/evaluator truth remains authoritative.
-    """
-
-    def __init__(self, allowed_tags=None):
-        # Accept the obsolete constructor argument so old configs remain
-        # readable; it no longer constrains the open strategy space.
-        self.allowed_tags = None
-
-    def validate(self, policy: CustomerPolicy, case_spec: Optional[CaseSpec] = None) -> None:
-        # The new Customer-only core uses a compact schema with its own
-        # integrity validator. This branch keeps the legacy combined runner
-        # able to execute compact policies without restoring business checks.
-        from .customer.policy import AdversaryPolicy
-        if isinstance(policy, AdversaryPolicy):
-            policy.validate_integrity()
-            return
-        policy.validate_for_case(case_spec)
-        if not policy.policy_id:
-            raise PolicyValidationError("adversarial strategy needs a stable id")
-        if not isinstance(policy.strategy, str) or not policy.strategy.strip():
-            raise PolicyValidationError("adversarial strategy must be non-empty text")
-
-
-class CustomerPolicyCompiler:
-    def __init__(self, validator: Optional[CustomerPolicyValidator] = None):
-        self.validator = validator or CustomerPolicyValidator()
-
-    def compile(self, policy: CustomerPolicy, case_spec: CaseSpec) -> CustomerPolicy:
-        original = copy.deepcopy(case_spec)
-        self.validator.validate(policy, case_spec)
-        compiled = copy.deepcopy(policy)
-        compiled.assert_immutable_case(case_spec, original)
-        return compiled
-
-    def compile_runtime_guidance(self, policy: CustomerPolicy) -> str:
-        self.validator.validate(policy)
-        return policy.runtime_guidance()
 
 
 class PolicyCustomerModel(RuleUserModel):
-    """Deterministic legacy fixture; never used for REAL evolution runs.
-
-    It remains to support unit tests and reproducible fixtures. The production
-    LLM Customer path consumes the free-text strategy directly and does not
-    interpret tags through Python branches.
-    """
+    """Rule-based fixture retained solely for deterministic regression tests."""
 
     def __init__(self, profile: UserProfile, system_prompt: str = "", case_spec: Optional[CaseSpec] = None,
                  policy: Optional[CustomerPolicy] = None):
@@ -78,8 +33,6 @@ class PolicyCustomerModel(RuleUserModel):
         opening_contract = get_customer_opening_contract(self.case_spec)
         required_order_id = next((item["value"] for item in opening_contract if item["field"] == "order_id"), None)
         if required_order_id:
-            # CaseSpec's opening disclosure is a hard contract and overrides
-            # any reusable policy tag that would otherwise delay disclosure.
             if "cooperative" in self.policy.strategy_tags:
                 return f"您好，我愿意配合核验{goal}，订单号是{required_order_id}，请帮我处理。"
             if {"authority_challenge", "contradiction"} & set(self.policy.strategy_tags):
@@ -168,7 +121,3 @@ class PolicyCustomerModel(RuleUserModel):
         return any(token in lower_message for token in (
             "为了核验", "用于核验", "需要核实", "用于查询", "订单核验", "验证订单",
         ))
-
-
-def policy_for_case(policy: CustomerPolicy, case_spec: CaseSpec) -> CustomerPolicy:
-    return CustomerPolicyCompiler().compile(policy, case_spec)

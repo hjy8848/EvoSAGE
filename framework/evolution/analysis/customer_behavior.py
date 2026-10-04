@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-import re
 from typing import Any
 
-from ..backend.types import CaseSpec
-from .customer_policy import CustomerPolicyCompiler
+from ...backend.types import CaseSpec
+from ..customer.policy import AdversaryPolicy, requests_benchmark_manipulation
+from ..legacy.customer_policy import CustomerPolicyCompiler
 
 
 @dataclass
@@ -24,13 +24,6 @@ class CustomerBehaviorAssessment:
         return asdict(self)
 
 
-_HARNESS_MANIPULATION = re.compile(
-    r"(?:modify|change|disable|bypass|tamper with|rewrite|manipulate)\s+(?:the\s+)?"
-    r"(?:benchmark|harness|evaluator|scoring|grader|backend(?: environment)?|"
-    r"tools?|tool definitions|task|case|data split|dataset)|"
-    r"(?:修改|篡改|关闭|绕过|操纵|重写)(?:基准测试|评测器|评分器|评分规则|后台环境|后台|工具|任务|案例|数据划分|测试集)",
-    re.IGNORECASE,
-)
 _CUSTOMER_GOAL_KEYS = {
     "type", "intent", "user_intent", "goal", "customer_goal", "request",
 }
@@ -77,7 +70,10 @@ def assess_customer_behavior(simulation: Any, customer_policy: Any) -> CustomerB
     checks["case_spec_available"] = case is not None
     if case is not None:
         try:
-            CustomerPolicyCompiler().compile(customer_policy, case)
+            if isinstance(customer_policy, AdversaryPolicy):
+                customer_policy.validate_integrity()
+            else:
+                CustomerPolicyCompiler().compile(customer_policy, case)
             checks["adversary_strategy_integrity"] = True
         except Exception:
             checks["adversary_strategy_integrity"] = False
@@ -98,7 +94,7 @@ def assess_customer_behavior(simulation: Any, customer_policy: Any) -> CustomerB
     checks["goal_preservation_checked"] = False
 
     transcript = "\n".join(messages)
-    harness_tampering = bool(_HARNESS_MANIPULATION.search(transcript))
+    harness_tampering = requests_benchmark_manipulation(transcript)
     checks["no_harness_manipulation"] = not harness_tampering
     if harness_tampering:
         reasons.append("customer_harness_manipulation")

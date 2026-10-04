@@ -14,7 +14,7 @@ from typing import Any, Optional
 from .archives import AttackArchive, DefenseArchive
 from .config import EvolutionConfig
 from .customer_evolver import CustomerEvolver
-from .customer_policy import CustomerPolicyValidator
+from .legacy.customer_policy import CustomerPolicyValidator
 from .customer_selector import CandidateScore, CustomerSelector
 from .evaluator_adapter import BudgetedEpisodeEvaluator, MockEpisodeEvaluator, aggregate_episode_metrics
 from .generation_protocol import GenerationProtocolError
@@ -1116,6 +1116,11 @@ class EvolutionRunner:
             require_generator = bool(
                 getattr(self.customer_evolver, "require_strategy_generator", False)
             ) if fresh_strategy_generator is None else True
+
+        if strategy_generator is not None:
+            from .customer.legacy import LegacyCustomerStrategyGeneratorAdapter
+            if not isinstance(strategy_generator, LegacyCustomerStrategyGeneratorAdapter):
+                strategy_generator = LegacyCustomerStrategyGeneratorAdapter(strategy_generator)
 
         incumbent = CustomerPolicy()
         results = []

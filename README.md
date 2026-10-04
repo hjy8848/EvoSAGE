@@ -37,6 +37,10 @@ The first-stage research question is whether open-ended Customer strategies can
 reduce a fixed Service's official benchmark performance. Customer behavior is
 not required to be truthful, cooperative, realistic, or goal-preserving; only
 runtime validity and benchmark integrity are hard boundaries.
+Customer utterances are not checked for semantic legitimacy: a Customer may
+make false claims or ask the Service to perform an improper business action.
+Only official tools can change business state; runtime-invalid episodes and
+actual benchmark-integrity violations are the exclusion boundaries.
 
 ```text
 Customer strategy C_t

@@ -4,7 +4,13 @@ Combined Service/co-evolution code stays available through its existing
 submodules and is imported lazily only when a legacy API is explicitly used.
 """
 
-from .config import EvolutionConfig, load_config
+from .config import (
+    CustomerEvolutionConfig,
+    CustomerSearchConfig,
+    EvolutionConfig,
+    load_config,
+    load_customer_search_config,
+)
 from .customer.policy import AdversaryPolicy
 from .customer.runner import CustomerEvolutionRunner
 from .customer_evolver import CustomerEvolver, LLMCustomerPolicyGenerator
@@ -16,8 +22,10 @@ from .split_manager import DatasetSplits, SplitManager
 __all__ = [
     "AdversaryPolicy",
     "CandidateScore",
+    "CustomerEvolutionConfig",
     "CustomerEvolver",
     "CustomerEvolutionRunner",
+    "CustomerSearchConfig",
     "CustomerSelector",
     "DatasetSplits",
     "EpisodeResult",
@@ -28,6 +36,7 @@ __all__ = [
     "EvoSAGEEpisodeEvaluator",
     "MockEpisodeEvaluator",
     "load_config",
+    "load_customer_search_config",
 ]
 
 
@@ -46,9 +55,6 @@ _LEGACY_EXPORTS = {
     "ServiceRule": (".schemas", "ServiceRule"),
     "VulnerabilitySignature": (".schemas", "VulnerabilitySignature"),
     "VulnerabilityArchiveEntry": (".schemas", "VulnerabilityArchiveEntry"),
-    "CustomerPolicyCompiler": (".customer_policy", "CustomerPolicyCompiler"),
-    "CustomerPolicyValidator": (".customer_policy", "CustomerPolicyValidator"),
-    "PolicyCustomerModel": (".customer_policy", "PolicyCustomerModel"),
     "ServicePolicyCompiler": (".service_policy", "ServicePolicyCompiler"),
     "ServicePolicySanitizer": (".service_policy", "ServicePolicySanitizer"),
     "ServicePolicyValidator": (".service_policy", "ServicePolicyValidator"),

@@ -398,7 +398,7 @@ class EvoSAGEEpisodeEvaluator:
             if isinstance(case_spec, dict):
                 from ..backend.types import CaseSpec
                 case_spec = CaseSpec(**case_spec)
-            from .customer_policy import CustomerPolicyValidator
+            from .legacy.customer_policy import CustomerPolicyValidator
             CustomerPolicyValidator().validate(customer_policy, case_spec)
             return {"valid": True}
         except Exception as exc:
@@ -820,7 +820,7 @@ class EvoSAGEEpisodeEvaluator:
             # Kept for legacy service/co-evolution analysis only. The open
             # Customer-only runner passes False and never imports/calls these.
             from .attribution import infer_failure_attribution, infer_failure_location
-            from .customer_behavior_validity import assess_customer_behavior
+            from .analysis.customer_behavior import assess_customer_behavior
             customer_assessment = assess_customer_behavior(simulation, customer_policy)
             attribution = infer_failure_attribution(report, simulation, path_config)
             location = infer_failure_location(report, simulation, path_config)

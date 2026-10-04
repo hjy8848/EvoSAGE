@@ -10,7 +10,8 @@ from framework.backend.factory import build_case_spec
 from framework.evolution.archives import AttackArchive
 from framework.evolution.attribution import infer_failure_location
 from framework.evolution.config import EvolutionConfig, PersistenceConfig, SplitConfig, load_config
-from framework.evolution.customer_policy import CustomerPolicyValidator, PolicyCustomerModel
+from framework.evolution.legacy.customer_policy import CustomerPolicyValidator
+from framework.testing.policy_customer_fixture import PolicyCustomerModel
 from framework.evolution.evaluator_adapter import MockEpisodeEvaluator
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator, aggregate_episode_metrics
 from framework.evolution.customer_evolver import LLMCustomerPolicyGenerator
@@ -1188,7 +1189,8 @@ def test_customer_generator_prompt_anchors_policy_to_customer_behavior():
     assert "expected actions" in client.prompt
     assert "official benchmark outcome" in client.prompt
     assert "continue pursuing an assigned business goal" in client.prompt
-    assert "Do not request changes" in client.prompt
+    assert "Do not propose editing the benchmark implementation" in client.prompt
+    assert "ask the Service to skip" in client.prompt
     assert "hypothesis" in client.prompt
     assert set(inspect.signature(LLMCustomerPolicyGenerator.generate).parameters) == {
         "self", "parent_strategy", "parent_id", "generation", "count", "parent_reward",

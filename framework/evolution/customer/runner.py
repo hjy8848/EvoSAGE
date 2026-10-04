@@ -13,7 +13,7 @@ from pathlib import Path
 import subprocess
 import time
 
-from ..config import EvolutionConfig
+from ..config import CustomerSearchConfig, EvolutionConfig
 from ..customer_evolver import CustomerEvolver
 from ..customer_selector import CustomerSelector
 from ..evaluator_adapter import BudgetedEpisodeEvaluator, MockEpisodeEvaluator
@@ -33,10 +33,16 @@ class CustomerEvolutionInconclusive(RuntimeError):
 class CustomerEvolutionRunner:
     """Evaluate incumbent + children once on E, then select by official score."""
 
-    def __init__(self, config: EvolutionConfig | None = None, evaluator=None,
+    def __init__(self, config: CustomerSearchConfig | EvolutionConfig | None = None, evaluator=None,
                  customer_evolver: CustomerEvolver | None = None,
                  split_manager: SplitManager | None = None, run_dir: str | Path | None = None):
-        self.config = config or EvolutionConfig(experiment_mode="customer_only")
+        if config is None:
+            config = CustomerSearchConfig()
+        elif isinstance(config, EvolutionConfig):
+            if config.experiment_mode != "customer_only":
+                raise ValueError("CustomerEvolutionRunner requires experiment_mode='customer_only'")
+            config = CustomerSearchConfig.from_evolution_config(config)
+        self.config = config
         if self.config.experiment_mode != "customer_only":
             raise ValueError("CustomerEvolutionRunner requires experiment_mode='customer_only'")
         self.run_dir = Path(run_dir or self.config.persistence.output_dir)
@@ -147,7 +153,6 @@ class CustomerEvolutionRunner:
             "seed": self.config.seed,
             "generation_count": self.config.max_generations,
             "customer_candidate_count": self.config.customer.candidate_count,
-            "customer_elite_count": self.config.customer.elite_count,
             "repetitions": self.config.evaluation.repetitions,
             "max_turns": self.config.evaluation.max_turns,
             "judge_in_evolution": self.config.evaluation.judge_in_evolution,
@@ -190,6 +195,7 @@ class CustomerEvolutionRunner:
 
     def _run_generation(self, generation: int, incumbent, service, evolution_cases):
         started = time.monotonic()
+        request_metrics_before = self._request_metrics()
         self.store.generation_dir(generation)
         baseline = self.evaluator.evaluate(
             incumbent, service, evolution_cases, "evolution", generation,
@@ -307,11 +313,35 @@ class CustomerEvolutionRunner:
         self.store.write_json(f"generations/gen_{generation:03d}/selection.json", selection_record)
         self.store.write_json(f"generations/gen_{generation:03d}/customer_policy.json", selected.to_dict())
         self.store.write_json(f"generations/gen_{generation:03d}/service_policy.json", service.to_dict())
+        request_metrics_after = self._request_metrics()
+        generation_requests = max(
+            0, request_metrics_after["provider_attempts"] - request_metrics_before["provider_attempts"]
+        )
+        generation_input_tokens = max(
+            0, request_metrics_after["input_tokens"] - request_metrics_before["input_tokens"]
+        )
+        generation_output_tokens = max(
+            0, request_metrics_after["output_tokens"] - request_metrics_before["output_tokens"]
+        )
+        generation_runtime_metrics = {
+            "provider_requests": generation_requests,
+            "input_tokens": generation_input_tokens,
+            "output_tokens": generation_output_tokens,
+            "tokens": generation_input_tokens + generation_output_tokens,
+            "timeouts": max(0, request_metrics_after["timeouts"] - request_metrics_before["timeouts"]),
+            "provider_failures": max(
+                0, request_metrics_after["provider_failures"] - request_metrics_before["provider_failures"]
+            ),
+            "latency_seconds": max(
+                0.0, request_metrics_after["latency_seconds"] - request_metrics_before["latency_seconds"]
+            ),
+        }
         payload = {
             "generation": generation,
             "status": "complete",
             "selected_policy_id": selected.policy_id,
             "incumbent_policy_id": incumbent.policy_id,
+            "customer_changed": selected.policy_id != incumbent.policy_id,
             "selected_fitness": selected_score.fitness,
             "selected_official_task_success": selected_score.official_task_success,
             "requested_candidate_count": self.config.customer.candidate_count,
@@ -319,6 +349,7 @@ class CustomerEvolutionRunner:
             "evaluated_policy_count": len(evaluated),
             "evolution_evaluation": gen_metrics,
             "api_episode_runs": (1 + len(proposals)) * len(evolution_cases) * self.config.evaluation.repetitions,
+            "runtime_metrics": generation_runtime_metrics,
             "wall_time_seconds": time.monotonic() - started,
         }
         self.store.write_json(f"generations/gen_{generation:03d}/SUMMARY.json", payload)
@@ -335,14 +366,19 @@ class CustomerEvolutionRunner:
             f"- Fixed Service: `service_policy_s0`",
             f"- Validation: `{validation_summary.get('status', 'not_evaluated')}` (report-only)",
             "",
-            "| Generation | Incumbent | Selected | Fitness | Official task success | Proposals | E episode runs |",
-            "|---:|---|---|---:|---:|---:|---:|",
+            "| Generation | Incumbent | Selected | Changed | Candidates | Runtime-valid episodes | Runtime-invalid episodes | Official task success | Fitness | Provider requests | Tokens |",
+            "|---:|---|---|:---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
         for item in history:
             lines.append(
                 f"| {item['generation']} | {item['incumbent_policy_id']} | {item['selected_policy_id']} | "
-                f"{_display(item.get('selected_fitness'))} | {_display(item.get('selected_official_task_success'))} | "
-                f"{item['proposed_candidate_count']} | {item['api_episode_runs']} |"
+                f"{'yes' if item.get('customer_changed') else 'no'} | "
+                f"{item['proposed_candidate_count']} | "
+                f"{item.get('evolution_evaluation', {}).get('valid_episode_count', 0)} | "
+                f"{item.get('evolution_evaluation', {}).get('invalid_episode_count', 0)} | "
+                f"{_display(item.get('selected_official_task_success'))} | {_display(item.get('selected_fitness'))} | "
+                f"{item.get('runtime_metrics', {}).get('provider_requests', 0)} | "
+                f"{item.get('runtime_metrics', {}).get('tokens', 0)} |"
             )
         lines.append("")
         lines.append("Held-out data was not used or evaluated by this Customer-only runner.")

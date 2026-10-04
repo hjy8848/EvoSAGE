@@ -7,6 +7,31 @@ from typing import Any
 from .policy import AdversaryPolicy
 
 
+def adapt_legacy_customer_policy(policy: Any) -> Any:
+    """Convert a historical policy once at a legacy-runner boundary."""
+    from ..schemas import LegacyCustomerPolicy
+
+    if isinstance(policy, AdversaryPolicy) or not isinstance(policy, LegacyCustomerPolicy):
+        return policy
+    return load_legacy_customer_policy(policy.to_dict())
+
+
+class LegacyCustomerStrategyGeneratorAdapter:
+    """Adapt historical generator outputs before they enter Customer core."""
+
+    def __init__(self, generator):
+        self.generator = generator
+
+    def __getattr__(self, name):
+        return getattr(self.generator, name)
+
+    def generate(self, **kwargs):
+        policies = self.generator.generate(**kwargs)
+        if isinstance(policies, list):
+            return [adapt_legacy_customer_policy(policy) for policy in policies]
+        return policies
+
+
 def load_legacy_customer_policy(data: dict[str, Any]) -> AdversaryPolicy:
     """Convert a pre-free-text Customer policy payload into the compact schema.
 
@@ -28,6 +53,5 @@ def load_legacy_customer_policy(data: dict[str, Any]) -> AdversaryPolicy:
         hypothesis=str(data.get("hypothesis") or data.get("mutation_rationale") or "loaded from legacy artifact"),
         parent_id=data.get("parent_id") or next(iter(data.get("parent_policy_ids", []) or []), None),
         generation=int(data.get("generation", 0) or 0),
-        source_evidence=list(data.get("source_evidence") or data.get("source_failure_ids") or []),
         model_metadata=dict(data.get("model_metadata") or {}),
     )

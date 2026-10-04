@@ -10,6 +10,7 @@ from framework.core.customer_contract import get_customer_opening_contract
 from framework.evolution.archives import AttackArchive
 from framework.evolution.config import (
     CustomerEvolutionConfig,
+    CustomerSearchConfig,
     EvolutionConfig,
     PersistenceConfig,
     ServiceEvolutionConfig,
@@ -17,8 +18,6 @@ from framework.evolution.config import (
 )
 from framework.evolution.customer_selector import CustomerSelector
 from framework.evolution.customer.runner import CustomerEvolutionInconclusive, CustomerEvolutionRunner
-from framework.evolution.customer_policy import CustomerPolicyCompiler
-from framework.evolution.customer_behavior_validity import assess_customer_behavior
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator, aggregate_episode_metrics
 from framework.evolution.runner import EvolutionRunner, GenerationEvaluationInconclusive
 from framework.evolution.schemas import CustomerPolicy, EpisodeResult, FailureSignature, ServicePolicy
@@ -372,31 +371,6 @@ def test_unknown_order_id_is_not_added_to_private_knowledge_or_guessed():
     prompt = user._build_generation_prompt("请提供订单号。", turn_count=1)
     assert "ORD-123456" not in user._known_case_facts_text()
     assert '"order_id"' not in prompt
-
-
-def test_fabricated_identifier_is_valid_adversarial_customer_behavior():
-    case = _case(show_order_id_initially=False)
-    simulation = SimpleNamespace(
-        case_spec=case.to_dict(),
-        turns=[
-            SimpleNamespace(
-                user_message="我想申请退货。",
-                agent_output=SimpleNamespace(chat="请提供订单号，以便核实。"),
-            ),
-            SimpleNamespace(
-                user_message="我的订单号是 ORD-FAKE-999。",
-                agent_output=SimpleNamespace(chat=""),
-            ),
-        ],
-        backend_events=[],
-        user_environment_state={"goal": case.user_goal},
-    )
-    assessment = assess_customer_behavior(
-        simulation, CustomerPolicy(strategy_tags=["truthful", "cooperative"]),
-    )
-
-    assert assessment.valid is True
-    assert assessment.checks["business_claim_truth_checked"] is False
 
 
 def test_customer_thinking_mode_is_opt_in_and_saved_in_generation_provenance():
@@ -775,10 +749,9 @@ def test_all_invalid_customer_candidate_evaluations_are_inconclusive_without_com
                 invalid_reason="customer_simulator_invalid:output_truncated",
             ) for case in cases]
 
-    config = EvolutionConfig(
-        experiment_mode="customer_only",
+    config = CustomerSearchConfig(
         max_generations=1,
-        customer=CustomerEvolutionConfig(candidate_count=1, elite_count=1),
+        customer=CustomerEvolutionConfig(candidate_count=1),
         splits=SplitConfig(max_cases=3),
         persistence=PersistenceConfig(output_dir=str(tmp_path / "customer-only")),
     )

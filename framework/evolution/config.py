@@ -17,10 +17,16 @@ from ..backend.tool_contract import ToolContractConfig
 
 @dataclass
 class CustomerEvolutionConfig:
-    # Identifies the free-text adversary contract written into run manifests.
-    # Older configs can omit it; the runtime no longer uses a tactic allowlist.
+    """Only the proposal parameters used by the Customer search core."""
+
     strategy_schema: str = "deceptive_free_text_v1"
     candidate_count: int = 5
+
+
+@dataclass
+class LegacyCustomerEvolutionConfig(CustomerEvolutionConfig):
+    """Customer knobs retained only for the older combined runner."""
+
     elite_count: int = 1
     cases_per_candidate: int = 4
 
@@ -80,6 +86,26 @@ class TokenBudgetConfig:
     judge: int = 1024
     customer_evolver: int = 4096
     service_evolver: int = 4096
+
+
+@dataclass
+class CustomerSearchTokenBudgetConfig:
+    """Role budgets needed by Customer-only runtime; no Service-Evolver slot."""
+
+    user: int = 512
+    agent: int = 1536
+    judge: int = 1024
+    customer_evolver: int = 4096
+
+    @classmethod
+    def from_value(cls, value) -> "CustomerSearchTokenBudgetConfig":
+        if hasattr(value, "__dataclass_fields__"):
+            value = asdict(value)
+        value = dict(value or {})
+        return cls(**{
+            key: item for key, item in value.items()
+            if key in cls.__dataclass_fields__
+        })
 
 
 @dataclass
@@ -154,6 +180,26 @@ class EvaluationConfig:
 
 
 @dataclass
+class CustomerSearchEvaluationConfig(EvaluationConfig):
+    """Runtime controls for Customer-only runs without Service-Evolver budget."""
+
+    token_budget: CustomerSearchTokenBudgetConfig = field(
+        default_factory=CustomerSearchTokenBudgetConfig
+    )
+
+    @classmethod
+    def from_dict(cls, value: Optional[Dict[str, Any]]) -> "CustomerSearchEvaluationConfig":
+        value = dict(value or {})
+        value["token_budget"] = CustomerSearchTokenBudgetConfig.from_value(
+            value.get("token_budget")
+        )
+        tool_contract = value.get("tool_contract")
+        if tool_contract is not None:
+            value["tool_contract"] = ToolContractConfig.from_value(tool_contract)
+        return cls(**{key: item for key, item in value.items() if key in cls.__dataclass_fields__})
+
+
+@dataclass
 class PersistenceConfig:
     output_dir: str = "results/adversarial_coevolution"
     resume: bool = False
@@ -189,7 +235,7 @@ class EvolutionConfig:
     experiment_mode: str = "coevolution"
     seed: int = 7
     max_generations: int = 2
-    customer: CustomerEvolutionConfig = field(default_factory=CustomerEvolutionConfig)
+    customer: LegacyCustomerEvolutionConfig = field(default_factory=LegacyCustomerEvolutionConfig)
     service: ServiceEvolutionConfig = field(default_factory=ServiceEvolutionConfig)
     splits: SplitConfig = field(default_factory=SplitConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
@@ -204,7 +250,7 @@ class EvolutionConfig:
     def from_dict(cls, value: Optional[Dict[str, Any]]) -> "EvolutionConfig":
         value = dict(value or {})
         nested = {
-            "customer": CustomerEvolutionConfig,
+            "customer": LegacyCustomerEvolutionConfig,
             "service": ServiceEvolutionConfig,
             "splits": SplitConfig,
             "evaluation": EvaluationConfig,
@@ -243,8 +289,99 @@ class EvolutionConfig:
         return cls(**{key: item for key, item in value.items() if key in cls.__dataclass_fields__})
 
 
-def load_config(path: str | Path) -> EvolutionConfig:
-    """Load JSON or YAML when PyYAML is installed; JSON is always supported."""
+@dataclass
+class CustomerSearchConfig:
+    """Small configuration surface for open-ended Customer black-box search."""
+
+    scenario: str = "ecommerce_refund"
+    seed: int = 7
+    max_generations: int = 2
+    customer: CustomerEvolutionConfig = field(default_factory=CustomerEvolutionConfig)
+    splits: SplitConfig = field(default_factory=SplitConfig)
+    evaluation: CustomerSearchEvaluationConfig = field(default_factory=CustomerSearchEvaluationConfig)
+    persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
+    model_metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def experiment_mode(self) -> str:
+        return "customer_only"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"experiment_mode": self.experiment_mode, **asdict(self)}
+
+    @classmethod
+    def from_dict(cls, value: Optional[Dict[str, Any]]) -> "CustomerSearchConfig":
+        value = dict(value or {})
+        mode = value.get("experiment_mode", "customer_only")
+        if mode != "customer_only":
+            raise ValueError("CustomerSearchConfig only accepts experiment_mode='customer_only'")
+
+        for legacy_block in ("service", "fresh_adversary"):
+            if legacy_block in value:
+                warnings.warn(
+                    f"legacy {legacy_block} config is ignored by CustomerSearchConfig",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
+        customer_value = dict(value.get("customer") or {})
+        supported_customer = set(CustomerEvolutionConfig.__dataclass_fields__)
+        ignored_customer = sorted(set(customer_value) - supported_customer)
+        if ignored_customer:
+            warnings.warn(
+                "deprecated Customer fields are ignored by CustomerSearchConfig: "
+                + ", ".join(ignored_customer),
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        customer = CustomerEvolutionConfig(**{
+            key: item for key, item in customer_value.items()
+            if key in supported_customer
+        })
+
+        splits_value = dict(value.get("splits") or {})
+        splits = SplitConfig(**{
+            key: item for key, item in splits_value.items()
+            if key in SplitConfig.__dataclass_fields__
+        })
+        persistence_value = dict(value.get("persistence") or {})
+        persistence = PersistenceConfig(**{
+            key: item for key, item in persistence_value.items()
+            if key in PersistenceConfig.__dataclass_fields__
+        })
+        evaluation = CustomerSearchEvaluationConfig.from_dict(value.get("evaluation"))
+        return cls(
+            scenario=str(value.get("scenario", "ecommerce_refund")),
+            seed=int(value.get("seed", 7)),
+            max_generations=int(value.get("max_generations", 2)),
+            customer=customer,
+            splits=splits,
+            evaluation=evaluation,
+            persistence=persistence,
+            model_metadata=dict(value.get("model_metadata") or {}),
+        )
+
+    @classmethod
+    def from_evolution_config(cls, config: EvolutionConfig) -> "CustomerSearchConfig":
+        """Explicitly drop legacy Service/search fields at the CLI/API boundary."""
+        evaluation = CustomerSearchEvaluationConfig.from_dict(asdict(config.evaluation))
+        return cls(
+            scenario=config.scenario,
+            seed=config.seed,
+            max_generations=config.max_generations,
+            customer=CustomerEvolutionConfig(
+                strategy_schema=config.customer.strategy_schema,
+                candidate_count=config.customer.candidate_count,
+            ),
+            splits=SplitConfig(**asdict(config.splits)),
+            evaluation=evaluation,
+            persistence=PersistenceConfig(**asdict(config.persistence)),
+            model_metadata=dict(config.model_metadata or {}),
+        )
+
+
+def _read_config_data(path: str | Path) -> dict[str, Any]:
+    """Read JSON or YAML configuration data without choosing a runtime schema."""
     path = Path(path)
     raw = path.read_text(encoding="utf-8")
     try:
@@ -257,7 +394,17 @@ def load_config(path: str | Path) -> EvolutionConfig:
         data = yaml.safe_load(raw)
     if not isinstance(data, dict):
         raise ValueError("Evolution config must be a mapping")
-    return EvolutionConfig.from_dict(data)
+    return data
+
+
+def load_config(path: str | Path) -> EvolutionConfig:
+    """Load a legacy/general Service or co-evolution configuration."""
+    return EvolutionConfig.from_dict(_read_config_data(path))
+
+
+def load_customer_search_config(path: str | Path) -> CustomerSearchConfig:
+    """Load the intentionally small Customer-only black-box search config."""
+    return CustomerSearchConfig.from_dict(_read_config_data(path))
 
 
 def save_config(config: EvolutionConfig, path: str | Path) -> None:

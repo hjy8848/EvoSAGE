@@ -11,7 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from framework.evolution.config import load_config
+from framework.evolution.config import CustomerSearchConfig, load_config
 from framework.evolution.persistence import resolve_run_dir
 from framework.evolution.request_budget import APIRequestBudget
 
@@ -35,6 +35,10 @@ def main() -> int:
         config.experiment_mode = args.mode
     if args.resume:
         config.persistence.resume = True
+    if config.experiment_mode == "customer_only":
+        # Customer-only gets an explicit small config at the boundary; Service,
+        # replay, and fresh-adversary settings are not passed into its runner.
+        config = CustomerSearchConfig.from_evolution_config(config)
     if args.real and args.mock:
         raise SystemExit("choose exactly one evaluator: --mock or --real")
     evaluator_mode = "real" if args.real else args.evaluator

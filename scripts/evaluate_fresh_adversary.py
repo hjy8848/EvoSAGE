@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 from framework.evolution.config import EvolutionConfig, PersistenceConfig
 from framework.evolution.customer_evolver import CustomerEvolver, LLMCustomerPolicyGenerator
-from framework.evolution.customer_policy import CustomerPolicyValidator
+from framework.evolution.legacy.customer_policy import CustomerPolicyValidator
 from framework.evolution.customer_selector import CustomerSelector
 from framework.evolution.evaluator_adapter import MockEpisodeEvaluator
 from framework.evolution.runner import EvolutionRunner

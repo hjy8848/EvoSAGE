@@ -42,7 +42,10 @@ Benchmark integrity remains protected. Customer and Evolver receive no hidden
 backend state, gold action/path, held-out answers, evaluator internals, or
 private benchmark metadata. Customer strategies cannot mutate tasks, tools,
 backend, evaluator, scoring, splits, or experiment records. A Customer's spoken
-claim never changes backend truth.
+claim never changes backend truth. This is an actual capability boundary, not
+a ban on adversarial business requests: asking the Service to skip verification
+or change an order's business status remains valid Customer behavior; only the
+official tools can perform such a state transition.
 
 The policy generator receives only the parent strategy, its scalar official
 fitness, generation index, and requested candidate count. It does not receive
@@ -98,8 +101,8 @@ defense archives, weakness frontiers, or service-gate records.
 
 ```bash
 PYTHONPATH=. .venv/bin/python scripts/run_adversarial_coevolution.py \
-  --config configs/ecommerce_coevolution.yaml \
-  --mode customer_only --evaluator mock
+  --config configs/ecommerce_deceptive_customer_only_smoke_20261003.yaml \
+  --evaluator mock
 ```
 
 For a real run, use `--evaluator real --model ...` and inject
@@ -112,10 +115,12 @@ research evidence.
 The existing `EvolutionRunner`, service policy/gate/evolver, failure
 attribution, `AttackArchive`, `DefenseArchive`, and `WeaknessFrontier` remain in
 the repository for legacy combined experiments and later research. They are
-not part of the new Customer-only core. Historical artifacts remain readable;
-legacy config fields `fitness_weights`, `allowed_strategy_tags`, and
-`adversary_access` are ignored with a deprecation warning and are not serialized
-into new Customer config.
+not part of the new Customer-only core. Historical artifacts remain readable.
+The legacy `EvolutionConfig` retains `elite_count` and `cases_per_candidate`
+for its combined runner. At the Customer-only boundary, the compact
+`CustomerSearchConfig` drops those fields, deprecated `fitness_weights`,
+`allowed_strategy_tags`, and `adversary_access`, as well as Service and
+fresh-adversary blocks; these do not appear in the new Customer manifest.
 
 ## Interpretation cautions
 

@@ -1,6 +1,6 @@
 from framework.backend.factory import build_case_spec
 from framework.evolution.config import SplitConfig
-from framework.evolution.customer_policy import PolicyCustomerModel
+from framework.testing.policy_customer_fixture import PolicyCustomerModel
 from framework.evolution.schemas import CustomerPolicy
 from framework.evolution.split_manager import SplitManager
 from framework.models import UserProfile

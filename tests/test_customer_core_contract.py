@@ -1,6 +1,6 @@
 """Regression guard: diversity/signature diagnostics do not gate Customer fitness."""
 
-from framework.evolution.config import CustomerEvolutionConfig
+from framework.evolution.config import CustomerEvolutionConfig, CustomerSearchConfig
 from framework.evolution.customer.policy import AdversaryPolicy
 from framework.evolution.customer_selector import CustomerSelector
 from framework.evolution.schemas import EpisodeResult
@@ -38,4 +38,6 @@ def test_failure_node_and_signature_metadata_cannot_change_official_fitness():
 
 def test_customer_config_has_no_behavior_taxonomy_or_fitness_weights():
     fields = set(CustomerEvolutionConfig.__dataclass_fields__)
-    assert not {"fitness_weights", "allowed_strategy_tags", "adversary_access"}.intersection(fields)
+    assert fields == {"strategy_schema", "candidate_count"}
+    customer_fields = set(CustomerSearchConfig.__dataclass_fields__)
+    assert not {"service", "fresh_adversary"}.intersection(customer_fields)

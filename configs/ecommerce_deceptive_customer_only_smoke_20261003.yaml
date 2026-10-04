@@ -2,7 +2,7 @@
   "scenario": "ecommerce_refund",
   "experiment_mode": "customer_only",
   "seed": 7,
-  "max_generations": 2,
+  "max_generations": 1,
   "model_metadata": {
     "provider": "InferAI",
     "model": "deepseek-v4-flash",
@@ -13,16 +13,7 @@
   },
   "customer": {
     "strategy_schema": "deceptive_free_text_v1",
-    "candidate_count": 2,
-    "elite_count": 1,
-    "cases_per_candidate": 0,
-    "adversary_access": "black_box"
-  },
-  "service": {
-    "candidate_count": 1,
-    "replay_attack_count": 0,
-    "exact_replay_instance_count": 0,
-    "transfer_replay_policy_count": 0
+    "candidate_count": 1
   },
   "splits": {
     "strategy": "instance_holdout",
@@ -31,7 +22,7 @@
     "validation_ratio": 0.2,
     "heldout_ratio": 0.2,
     "instances_per_path": 1,
-    "max_cases": 6,
+    "max_cases": 3,
     "customer_disclosure_variants": ["opening", "on_request"]
   },
   "evaluation": {
@@ -59,18 +50,12 @@
       "user": 512,
       "agent": 4096,
       "judge": 1024,
-      "customer_evolver": 8192,
-      "service_evolver": 8192
+      "customer_evolver": 8192
     },
     "summary_limit": 5
   },
   "persistence": {
-    "output_dir": "results/deceptive_customer_only_smoke_20261003",
+    "output_dir": "results/customer_search_slimming_20261004/real_tiny",
     "resume": false
-  },
-  "fresh_adversary": {
-    "enabled": false,
-    "rounds": 1,
-    "candidate_count": 1
   }
 }
