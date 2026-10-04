@@ -141,3 +141,25 @@ def test_thinking_mode_is_explicitly_scoped_to_customer_request():
     customer.generate_initial_message()
     assert client.kwargs[0]["thinking"] == {"type": "disabled"}
     assert client.kwargs[0]["max_tokens"] == 512
+
+
+def test_adversarial_customer_ignores_legacy_satisfaction_heuristic_but_keeps_case_emotion():
+    case = _case()
+    case.user_policy = {"initial_emotion": "Dissatisfied"}
+    customer = AdversarialCustomerModel(
+        profile=_profile(),
+        llm_client=_SequenceClient(["我还是不满意。"]),
+        case_spec=case,
+        customer_policy=AdversaryPolicy(
+            policy_id="emotion", strategy="Stay dissatisfied."
+        ),
+    )
+    initial_emotion = customer.emotion_state
+    initial_satisfaction = customer.satisfaction_score
+
+    customer.update_satisfaction(+0.5)
+    customer.update_satisfaction(-0.5)
+
+    assert customer.emotion_state is initial_emotion
+    assert customer.satisfaction_score == initial_satisfaction
+    assert "- 情感状态: angry" in customer._build_initial_message_prompt()

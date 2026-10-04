@@ -70,17 +70,21 @@ class CustomerEvolutionRunner:
         ]
 
     @classmethod
-    def _score_summary(cls, episodes):
+    def _score_summary(cls, episodes, expected_episode_count=None):
         valid = cls._valid(episodes)
         invalid = len(episodes) - len(valid)
+        expected = len(episodes) if expected_episode_count is None else int(expected_episode_count)
+        complete = len(valid) == expected
         success = (
             sum(bool(item.task_success) for item in valid) / len(valid)
-            if valid else None
+            if complete and valid else None
         )
         return {
             "episode_count": len(episodes),
+            "expected_episode_count": expected,
             "valid_episode_count": len(valid),
             "invalid_episode_count": invalid,
+            "evaluation_status": "valid" if complete else "inconclusive",
             "official_task_success": success,
             "fitness": 1.0 - success if success is not None else None,
         }
@@ -129,7 +133,10 @@ class CustomerEvolutionRunner:
         self.store.write_json("environment/provenance.json", {
             "method": "customer_search",
             "search_method": "open_ended_black_box_customer_search",
-            "selection_objective": "fitness = 1 - mean(official task_success) over runtime-valid E episodes",
+            "selection_objective": (
+                "fitness = 1 - mean(official task_success) only when all expected E x repetitions "
+                "episodes are runtime-valid; otherwise inconclusive"
+            ),
             "service_policy_id": "service_policy_s0",
             "model": model.get("model"),
             "provider": model.get("provider"),
@@ -185,7 +192,35 @@ class CustomerEvolutionRunner:
             incumbent, service, evolution_cases, "evolution", generation,
             "customer_incumbent",
         )
-        parent_score = self.selector.score(incumbent, baseline)
+        expected_episode_count = len(evolution_cases) * self.config.evaluation.repetitions
+        parent_score = self.selector.score(
+            incumbent, baseline, expected_episode_count=expected_episode_count,
+        )
+        if parent_score.fitness is None:
+            reason = "incumbent_evaluation_panel_incomplete"
+            self.store.write_json(f"generations/gen_{generation:03d}/proposals.json", {
+                "generation": generation,
+                "parent_policy": incumbent.to_dict(),
+                "parent_score": parent_score.to_dict(),
+                "expected_episode_count": expected_episode_count,
+                "requested_candidate_count": self.config.customer.candidate_count,
+                "proposed_candidate_count": 0,
+                "generation_record": {"status": "skipped", "reason": reason},
+                "candidate_policies": [],
+            })
+            self.store.append_jsonl(
+                f"generations/gen_{generation:03d}/episodes.jsonl",
+                [item.to_dict() for item in baseline],
+            )
+            self.store.write_json(f"generations/gen_{generation:03d}/selection.json", {
+                "generation": generation,
+                "selection_status": "inconclusive",
+                "reason": reason,
+                "expected_episode_count": expected_episode_count,
+                "selected_policy_id": None,
+                "candidate_scores": [parent_score.to_dict()],
+            })
+            raise CustomerEvolutionInconclusive(reason)
         try:
             proposals = self.customer_evolver.propose(
                 incumbent,
@@ -199,6 +234,7 @@ class CustomerEvolutionRunner:
                 "generation": generation,
                 "parent_policy": incumbent.to_dict(),
                 "parent_score": parent_score.to_dict(),
+                "expected_episode_count": expected_episode_count,
                 "requested_candidate_count": self.config.customer.candidate_count,
                 "proposed_candidate_count": 0,
                 "generation_record": record,
@@ -212,6 +248,7 @@ class CustomerEvolutionRunner:
                 "generation": generation,
                 "selection_status": "inconclusive",
                 "reason": record.get("reason") or "customer_generation_protocol_invalid",
+                "expected_episode_count": expected_episode_count,
                 "selected_policy_id": None,
                 "candidate_scores": [parent_score.to_dict()],
             })
@@ -228,41 +265,22 @@ class CustomerEvolutionRunner:
             evaluated.append((candidate, rows))
 
         selected, scores = self.selector.select(
-            evaluated, incumbent_policy_id=incumbent.policy_id,
+            evaluated,
+            incumbent_policy_id=incumbent.policy_id,
+            expected_episode_count=expected_episode_count,
         )
         selected = selected or incumbent
         score_by_id = {item.policy_id: item for item in scores}
-        if parent_score.fitness is None:
-            evaluation_rows = [episode for _, rows in evaluated for episode in rows]
-            generation_record = copy.deepcopy(self.customer_evolver.last_generation_record)
-            self.store.write_json(f"generations/gen_{generation:03d}/proposals.json", {
-                "generation": generation,
-                "parent_policy": incumbent.to_dict(),
-                "parent_score": parent_score.to_dict(),
-                "requested_candidate_count": self.config.customer.candidate_count,
-                "proposed_candidate_count": len(proposals),
-                "generation_record": generation_record,
-                "candidate_policies": [policy.to_dict() for policy in proposals],
-            })
-            self.store.append_jsonl(
-                f"generations/gen_{generation:03d}/episodes.jsonl",
-                [item.to_dict() for item in evaluation_rows],
-            )
-            self.store.write_json(f"generations/gen_{generation:03d}/selection.json", {
-                "generation": generation,
-                "selection_status": "inconclusive",
-                "reason": "incumbent_has_no_runtime_valid_official_score",
-                "selected_policy_id": None,
-                "candidate_scores": self._score_to_dict(scores),
-            })
-            raise CustomerEvolutionInconclusive(
-                "incumbent_has_no_runtime_valid_official_score"
-            )
         evaluation_rows = [episode for _, rows in evaluated for episode in rows]
-        gen_metrics = self._score_summary(evaluation_rows)
+        gen_metrics = self._score_summary(
+            evaluation_rows,
+            expected_episode_count=expected_episode_count * len(evaluated),
+        )
         selected_score = score_by_id[selected.policy_id]
         phase_counts = {
-            policy.policy_id: self._score_summary(rows)
+            policy.policy_id: self._score_summary(
+                rows, expected_episode_count=expected_episode_count,
+            )
             for policy, rows in evaluated
         }
         generation_record = copy.deepcopy(self.customer_evolver.last_generation_record)
@@ -283,7 +301,11 @@ class CustomerEvolutionRunner:
         selection_record = {
             **(copy.deepcopy(self.selector.last_selection_record) or {}),
             "generation": generation,
-            "objective": "fitness = 1 - mean(official task_success) over runtime-evaluable episodes",
+            "objective": (
+                "fitness = 1 - mean(official task_success) only when all expected E x repetitions "
+                "episodes are runtime-valid; otherwise inconclusive"
+            ),
+            "expected_episode_count": expected_episode_count,
             "candidate_scores": self._score_to_dict(scores),
             "selected_policy": selected.to_dict(),
             "selected_score": selected_score.to_dict(),
@@ -346,7 +368,7 @@ class CustomerEvolutionRunner:
             "",
             f"- Status: `{status}`",
             f"- Run directory: `{self.run_dir}`",
-            f"- Objective: `fitness = 1 - mean(official task_success)` on runtime-valid E episodes",
+            "- Objective: `fitness = 1 - mean(official task_success)` only on complete runtime-valid E panels",
             f"- Fixed Service: `service_policy_s0`",
             f"- Validation: `{validation_summary.get('status', 'not_evaluated')}` (report-only)",
             "",
@@ -445,7 +467,10 @@ class CustomerEvolutionRunner:
             entry["incumbent_policy_id"] = incumbent_before.policy_id
             history.append(entry)
             self.store.write_json("analysis/trajectory.json", {
-                "objective": "1 - mean(official task_success) over runtime-evaluable E episodes",
+                "objective": (
+                    "1 - mean(official task_success) when all expected E x repetitions episodes "
+                    "are runtime-valid; incomplete panels are inconclusive"
+                ),
                 "history": history,
             })
 
@@ -459,7 +484,18 @@ class CustomerEvolutionRunner:
                 "analysis/validation_episodes.jsonl",
                 [item.to_dict() for item in validation_rows],
             )
-            validation_summary = {"status": "reported_not_selected", **self._score_summary(validation_rows)}
+            validation_detail = self._score_summary(
+                validation_rows,
+                expected_episode_count=len(validation_cases) * self.config.evaluation.repetitions,
+            )
+            validation_summary = {
+                "status": (
+                    "reported_not_selected"
+                    if validation_detail["evaluation_status"] == "valid"
+                    else "partial_report_only"
+                ),
+                **validation_detail,
+            }
             self.store.write_json("analysis/validation_summary.json", validation_summary)
 
         request_metrics = self._request_metrics()

@@ -747,6 +747,10 @@ simulator knows them. Return only the message text, with no JSON, claim annotati
 class AdversarialCustomerModel(LLMUserModel):
     """LLM Customer executor with no satisfaction/solved behavior heuristics."""
 
+    def update_satisfaction(self, delta: float) -> None:
+        """Ignore legacy Agent-action satisfaction updates during adversarial search."""
+        return None
+
     def observe_backend_event(self, event: Dict[str, Any]) -> None:
         self.backend_events.append({
             "event_type": event.get("event_type"),

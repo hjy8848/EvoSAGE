@@ -32,10 +32,15 @@ class CustomerSelector:
         self,
         policy: AdversaryPolicy,
         episodes: Iterable[EpisodeResult],
+        expected_episode_count: int | None = None,
     ) -> CandidateScore:
         values = list(episodes)
         if any(item.split == "heldout_test" for item in values):
             raise AssertionError("CustomerSelector cannot score heldout episodes")
+        if expected_episode_count is not None:
+            expected_episode_count = int(expected_episode_count)
+            if expected_episode_count < 1:
+                raise ValueError("expected_episode_count must be positive")
         valid = [
             item for item in values
             if item.is_runtime_evaluable() and isinstance(item.task_success, bool)
@@ -56,6 +61,17 @@ class CustomerSelector:
             for item in invalid
         ):
             reasons = sorted(set(reasons) | {"missing_official_score"})
+        if expected_episode_count is not None and len(valid) != expected_episode_count:
+            reasons = sorted(set(reasons) | {"incomplete_evaluation_panel"})
+            return CandidateScore(
+                policy_id=policy.policy_id,
+                fitness=None,
+                official_task_success=None,
+                valid_episode_count=len(valid),
+                invalid_episode_count=len(invalid),
+                evaluation_status="inconclusive",
+                invalid_reasons=reasons,
+            )
         if not valid:
             return CandidateScore(
                 policy_id=policy.policy_id,
@@ -82,16 +98,17 @@ class CustomerSelector:
         candidates: list[tuple[AdversaryPolicy, list[EpisodeResult]]],
         *,
         incumbent_policy_id: str | None = None,
+        expected_episode_count: int | None = None,
     ):
         scores = [
-            self.score(policy, episodes)
+            self.score(policy, episodes, expected_episode_count=expected_episode_count)
             for policy, episodes in candidates
         ]
         incumbent_index = next((
             index for index, (policy, _) in enumerate(candidates)
             if incumbent_policy_id is not None and policy.policy_id == incumbent_policy_id
         ), None)
-        eligible = [index for index, score in enumerate(scores) if score.valid_episode_count]
+        eligible = [index for index, score in enumerate(scores) if score.fitness is not None]
 
         if incumbent_index is not None:
             selected_index = incumbent_index

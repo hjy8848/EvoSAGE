@@ -45,21 +45,42 @@ def test_policy_integrity_checks_only_structure_and_provenance():
         AdversaryPolicy(strategy="free text", provenance_hash="tampered").validate_integrity()
 
 
-def test_official_task_success_alone_defines_customer_fitness():
+def test_partial_invalid_panel_is_inconclusive_instead_of_shrinking_denominator():
     policy = AdversaryPolicy(policy_id="candidate", strategy="Any free-text strategy")
     selector = CustomerSelector()
-    mixed = selector.score(policy, [
+    score = selector.score(policy, [
+        _episode(policy.policy_id, False),
+        _episode(
+            policy.policy_id, None, evaluation_status="invalid",
+            invalid_reason="timeout", protocol_valid=False,
+        ),
+        _episode(
+            policy.policy_id, None, evaluation_status="invalid",
+            invalid_reason="json_parse_failed", protocol_valid=False,
+        ),
+    ], expected_episode_count=3)
+    assert score.fitness is None
+    assert score.official_task_success is None
+    assert score.evaluation_status == "inconclusive"
+    assert score.valid_episode_count == 1
+    assert score.invalid_episode_count == 2
+    assert "incomplete_evaluation_panel" in score.invalid_reasons
+
+
+def test_complete_panel_computes_official_fitness():
+    policy = AdversaryPolicy(policy_id="candidate", strategy="Any free-text strategy")
+    score = CustomerSelector().score(policy, [
         _episode(policy.policy_id, True),
         _episode(policy.policy_id, False),
         _episode(policy.policy_id, False),
-        _episode(policy.policy_id, None, evaluation_status="invalid", invalid_reason="timeout"),
-    ])
-    assert mixed.official_task_success == pytest.approx(1 / 3)
-    assert mixed.fitness == pytest.approx(2 / 3)
-    assert mixed.valid_episode_count == 3
-    assert mixed.invalid_episode_count == 1
+    ], expected_episode_count=3)
+    assert score.official_task_success == pytest.approx(1 / 3)
+    assert score.fitness == pytest.approx(2 / 3)
+    assert score.valid_episode_count == 3
+    assert score.invalid_episode_count == 0
+    assert score.evaluation_status == "valid"
 
-    missing_score = selector.score(policy, [_episode(policy.policy_id, None)])
+    missing_score = CustomerSelector().score(policy, [_episode(policy.policy_id, None)])
     assert missing_score.fitness is None
     assert missing_score.evaluation_status == "inconclusive"
     assert "missing_official_score" in missing_score.invalid_reasons
@@ -73,7 +94,7 @@ def test_strict_elitism_keeps_incumbent_on_tie_or_worse_child():
         selected, _ = selector.select([
             (incumbent, [_episode(incumbent.policy_id, incumbent_success)]),
             (child, [_episode(child.policy_id, child_success)]),
-        ], incumbent_policy_id=incumbent.policy_id)
+        ], incumbent_policy_id=incumbent.policy_id, expected_episode_count=1)
         assert selected.policy_id == incumbent.policy_id
 
 
@@ -83,9 +104,42 @@ def test_strict_elitism_accepts_only_a_strict_official_fitness_improvement():
     selected, scores = CustomerSelector().select([
         (incumbent, [_episode(incumbent.policy_id, True)]),
         (child, [_episode(child.policy_id, False)]),
-    ], incumbent_policy_id=incumbent.policy_id)
+    ], incumbent_policy_id=incumbent.policy_id, expected_episode_count=1)
     assert selected.policy_id == child.policy_id
     assert [score.fitness for score in scores] == [0.0, 1.0]
+
+
+def test_incomplete_child_cannot_replace_incumbent_but_complete_better_child_can():
+    incumbent = AdversaryPolicy(policy_id="incumbent", strategy="incumbent")
+    incomplete = AdversaryPolicy(policy_id="incomplete", strategy="incomplete child")
+    better = AdversaryPolicy(policy_id="better", strategy="complete better child")
+    selector = CustomerSelector()
+    incumbent_rows = [_episode(incumbent.policy_id, True) for _ in range(3)]
+    incomplete_rows = [
+        _episode(incomplete.policy_id, False),
+        _episode(incomplete.policy_id, None, evaluation_status="invalid", invalid_reason="timeout"),
+        _episode(incomplete.policy_id, None, evaluation_status="invalid", invalid_reason="timeout"),
+    ]
+
+    selected, scores = selector.select([
+        (incumbent, incumbent_rows),
+        (incomplete, incomplete_rows),
+    ], incumbent_policy_id=incumbent.policy_id, expected_episode_count=3)
+    assert selected.policy_id == incumbent.policy_id
+    assert scores[1].fitness is None
+    assert scores[1].evaluation_status == "inconclusive"
+
+    selected, scores = selector.select([
+        (incumbent, incumbent_rows),
+        (incomplete, incomplete_rows),
+        (better, [
+            _episode(better.policy_id, False),
+            _episode(better.policy_id, False),
+            _episode(better.policy_id, True),
+        ]),
+    ], incumbent_policy_id=incumbent.policy_id, expected_episode_count=3)
+    assert selected.policy_id == better.policy_id
+    assert scores[2].fitness == pytest.approx(2 / 3)
 
 
 def test_episode_schema_contains_only_active_search_and_official_result_fields():
