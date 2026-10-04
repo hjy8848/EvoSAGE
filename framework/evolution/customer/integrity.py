@@ -1,4 +1,4 @@
-"""Minimal hard boundary for strategy schema and benchmark integrity."""
+"""Structural validation for the free-text Customer policy object."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from .policy import AdversaryPolicy
 
 
 class AdversaryPolicyValidator:
-    """Reject malformed policies and explicit benchmark/harness manipulation only."""
+    """Validate structure and provenance, never Customer behavior or claims."""
 
     def validate(self, policy: AdversaryPolicy) -> None:
         if not isinstance(policy, AdversaryPolicy):

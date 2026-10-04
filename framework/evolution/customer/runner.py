@@ -1,8 +1,4 @@
-"""Thin Customer-only evolutionary runner over a fixed Service S0.
-
-This module intentionally has no imports of ServiceEvolver, ServiceGate,
-AttackArchive, DefenseArchive, WeaknessFrontier, or failure attribution.
-"""
+"""Customer strategy search against a fixed Service S0."""
 
 from __future__ import annotations
 
@@ -13,15 +9,14 @@ from pathlib import Path
 import subprocess
 import time
 
-from ..config import CustomerSearchConfig, EvolutionConfig
-from ..customer_evolver import CustomerEvolver
-from ..customer_selector import CustomerSelector
+from ..config import CustomerSearchConfig
+from .evolver import CustomerEvolver
+from .selector import CustomerSelector
 from ..evaluator_adapter import BudgetedEpisodeEvaluator, MockEpisodeEvaluator
 from ..generation_protocol import GenerationProtocolError
 from ..persistence import RunStore
 from ..schemas import ServicePolicy
 from ..split_manager import SplitManager
-from .legacy import load_legacy_customer_policy
 from .integrity import AdversaryPolicyValidator
 from .policy import AdversaryPolicy
 
@@ -33,20 +28,12 @@ class CustomerEvolutionInconclusive(RuntimeError):
 class CustomerEvolutionRunner:
     """Evaluate incumbent + children once on E, then select by official score."""
 
-    def __init__(self, config: CustomerSearchConfig | EvolutionConfig | None = None, evaluator=None,
+    def __init__(self, config: CustomerSearchConfig | None = None, evaluator=None,
                  customer_evolver: CustomerEvolver | None = None,
                  split_manager: SplitManager | None = None, run_dir: str | Path | None = None):
-        if config is None:
-            config = CustomerSearchConfig()
-        elif isinstance(config, EvolutionConfig):
-            if config.experiment_mode != "customer_only":
-                raise ValueError("CustomerEvolutionRunner requires experiment_mode='customer_only'")
-            config = CustomerSearchConfig.from_evolution_config(config)
-        self.config = config
-        if self.config.experiment_mode != "customer_only":
-            raise ValueError("CustomerEvolutionRunner requires experiment_mode='customer_only'")
+        self.config = config or CustomerSearchConfig()
         self.run_dir = Path(run_dir or self.config.persistence.output_dir)
-        self.store = RunStore(self.run_dir, create_archives=False)
+        self.store = RunStore(self.run_dir)
         self.split_manager = split_manager or SplitManager(
             self.config.splits, self.run_dir / "split_manifest", scenario=self.config.scenario,
         )
@@ -58,9 +45,8 @@ class CustomerEvolutionRunner:
         )
         self.customer_evolver = customer_evolver or CustomerEvolver(
             seed=self.config.seed,
-            selector=CustomerSelector(),
         )
-        self.selector = self.customer_evolver.selector
+        self.selector = CustomerSelector()
         self.policy_validator = AdversaryPolicyValidator()
         self.request_budget = getattr(self.base_evaluator, "request_budget", None)
 
@@ -139,9 +125,9 @@ class CustomerEvolutionRunner:
 
     def _write_run_provenance(self, splits, fresh_run_isolated=False):
         model = self.config.model_metadata or {}
-        self.store.write_json("config/evolution.json", self.config.to_dict())
+        self.store.write_json("config/customer_search.json", self.config.to_dict())
         self.store.write_json("environment/provenance.json", {
-            "mode": "customer_only",
+            "method": "customer_search",
             "search_method": "open_ended_black_box_customer_search",
             "selection_objective": "fitness = 1 - mean(official task_success) over runtime-valid E episodes",
             "service_policy_id": "service_policy_s0",
@@ -155,14 +141,12 @@ class CustomerEvolutionRunner:
             "customer_candidate_count": self.config.customer.candidate_count,
             "repetitions": self.config.evaluation.repetitions,
             "max_turns": self.config.evaluation.max_turns,
-            "judge_in_evolution": self.config.evaluation.judge_in_evolution,
+            "judge_validation_enabled": self.config.evaluation.judge_validation_enabled,
             "token_budget": asdict(self.config.evaluation.token_budget),
             "customer_protocol_retry_limit": self.config.evaluation.customer_protocol_retries,
-            "evolver_protocol_retry_limit": self.config.evaluation.evolver_protocol_retries,
+            "customer_evolver_protocol_retry_limit": self.config.evaluation.customer_evolver_protocol_retries,
             "customer_hidden_truth_access": False,
             "evolver_case_or_trace_access": False,
-            "customer_behavior_gate": False,
-            "failure_attribution_in_fitness": False,
             "heldout_used_for_adaptation_or_selection": False,
             "split_strategy": splits.strategy,
             "split_seed": splits.seed,
@@ -186,7 +170,7 @@ class CustomerEvolutionRunner:
                 return policy
         initial_path = self.run_dir / "environment" / "initial_customer_policy.json"
         if self.config.persistence.resume and initial_path.exists():
-            policy = load_legacy_customer_policy(json.loads(initial_path.read_text(encoding="utf-8")))
+            policy = AdversaryPolicy.from_dict(json.loads(initial_path.read_text(encoding="utf-8")))
             self.policy_validator.validate(policy)
             return policy
         policy = AdversaryPolicy()
@@ -222,7 +206,7 @@ class CustomerEvolutionRunner:
             })
             self.store.append_jsonl(
                 f"generations/gen_{generation:03d}/episodes.jsonl",
-                [item.to_dict(include_analysis_artifacts=False) for item in baseline],
+                [item.to_dict() for item in baseline],
             )
             self.store.write_json(f"generations/gen_{generation:03d}/selection.json", {
                 "generation": generation,
@@ -262,7 +246,7 @@ class CustomerEvolutionRunner:
             })
             self.store.append_jsonl(
                 f"generations/gen_{generation:03d}/episodes.jsonl",
-                [item.to_dict(include_analysis_artifacts=False) for item in evaluation_rows],
+                [item.to_dict() for item in evaluation_rows],
             )
             self.store.write_json(f"generations/gen_{generation:03d}/selection.json", {
                 "generation": generation,
@@ -294,7 +278,7 @@ class CustomerEvolutionRunner:
         self.store.write_json(f"generations/gen_{generation:03d}/proposals.json", proposal_payload)
         self.store.append_jsonl(
             f"generations/gen_{generation:03d}/episodes.jsonl",
-            [item.to_dict(include_analysis_artifacts=False) for item in evaluation_rows],
+            [item.to_dict() for item in evaluation_rows],
         )
         selection_record = {
             **(copy.deepcopy(self.selector.last_selection_record) or {}),
@@ -462,7 +446,6 @@ class CustomerEvolutionRunner:
             history.append(entry)
             self.store.write_json("analysis/trajectory.json", {
                 "objective": "1 - mean(official task_success) over runtime-evaluable E episodes",
-                "selection_uses_attribution_or_behavior_validity": False,
                 "history": history,
             })
 
@@ -474,7 +457,7 @@ class CustomerEvolutionRunner:
             )
             self.store.append_jsonl(
                 "analysis/validation_episodes.jsonl",
-                [item.to_dict(include_analysis_artifacts=False) for item in validation_rows],
+                [item.to_dict() for item in validation_rows],
             )
             validation_summary = {"status": "reported_not_selected", **self._score_summary(validation_rows)}
             self.store.write_json("analysis/validation_summary.json", validation_summary)

@@ -69,8 +69,6 @@ class AdversaryPolicy:
         expected_hash = self._compute_provenance_hash()
         if self.provenance_hash and self.provenance_hash != expected_hash:
             raise ValueError("adversarial policy provenance hash mismatch")
-        if requests_benchmark_manipulation(self.strategy):
-            raise ValueError("customer strategy attempts benchmark or harness manipulation")
 
     def semantic_dict(self) -> dict[str, str]:
         return {"strategy": self.strategy}
@@ -97,47 +95,9 @@ class AdversaryPolicy:
             "policy_id", "strategy", "hypothesis", "parent_id", "generation",
             "provenance_hash", "created_at", "model_metadata",
         }
-        payload = {key: value for key, value in data.items() if key in allowed}
-        # Older compact policies hashed the now-retired evidence field. Recompute
-        # their digest once at this artifact compatibility boundary.
-        if "source_evidence" in data or "source_failure_ids" in data:
-            payload["provenance_hash"] = ""
-        return cls(**payload)
-
-
-def requests_benchmark_manipulation(text: str) -> bool:
-    """Catch explicit benchmark-infrastructure tampering, not business requests.
-
-    This is intentionally a tiny integrity boundary rather than a semantic
-    classifier. Ordinary Customer requests such as changing an order's status,
-    asking the Service to skip a tool, or claiming the backend is wrong remain
-    eligible. Negative instructions ("do not change the benchmark") are also
-    not interpreted as tampering.
-    """
-    import re
-
-    english = re.compile(
-        r"\b(?:please\s+|try\s+to\s+|ask\s+(?:the\s+)?(?:service|agent|customer)\s+to\s+)?"
-        r"(?:modify|change|disable|bypass|tamper\s+with|rewrite|manipulate|edit)\s+"
-        r"(?:the\s+)?(?:benchmark(?:\s+(?:case|task|dataset|implementation|harness))?|"
-        r"evaluation\s+harness|harness|evaluator(?:\s+implementation)?|"
-        r"scoring(?:\s+(?:rules?|logic))?|grader|tool\s+definitions?|tool\s+schema|"
-        r"test\s+(?:set|split|dataset)|held[- ]out\s+dataset|experiment\s+records|"
-        r"backend\s+implementation)\b",
-        re.IGNORECASE,
-    )
-    chinese = re.compile(
-        r"(?:请|尝试|要求(?:客服|系统)?|让(?:客服|系统)?)?"
-        r"(?:修改|篡改|关闭|绕过|操纵|重写)"
-        r"(?:基准测试(?:代码|案例|任务|数据|环境)?|benchmark(?:代码|案例|任务|数据)?|"
-        r"评测器(?:实现|代码)?|评分(?:器|规则|逻辑)|评测规则|评分规则|"
-        r"工具定义|工具schema|测试集|数据划分|实验记录|后台实现|后台代码)",
-        re.IGNORECASE,
-    )
-    for pattern in (english, chinese):
-        for match in pattern.finditer(text):
-            prefix = text[max(0, match.start() - 48):match.start()].lower()
-            if re.search(r"(?:\bdo\s+not\s+|\bdon['’]t\s+|\bnever\s+|\bmust\s+not\s+|不要|不应|不得|切勿)\s*$", prefix):
-                continue
-            return True
-    return False
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            raise ValueError(f"unsupported adversary policy field(s): {', '.join(unknown)}")
+        policy = cls(**data)
+        policy.validate_integrity()
+        return policy

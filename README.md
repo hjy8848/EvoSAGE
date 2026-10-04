@@ -54,10 +54,11 @@ strict elitist selection
 C_t+1
 ```
 
-Service/co-evolution remains a separate later-stage path. The Customer-only
-runner does not run failure attribution, service repair, archives, or a
-selected-policy rerun. See [`docs/ADVERSARIAL_COEVOLUTION.md`](docs/ADVERSARIAL_COEVOLUTION.md)
-for the current research contract.
+This is the active first-stage research method. The Customer-only runner does
+not run failure attribution, service repair, archives, or a selected-policy
+rerun. See [`docs/CUSTOMER_ADVERSARIAL_SEARCH.md`](docs/CUSTOMER_ADVERSARIAL_SEARCH.md)
+for its current contract. Older co-evolution plans and results are historical;
+they are not executable with the active research runtime.
 
 ---
 
@@ -975,27 +976,19 @@ export AGENT_MODEL_PATH="Qwen/Qwen2.5-32B-Instruct"
 - [ ] Logs error-free (`tail vllm_logs/*.log`)
 - [ ] Services accessible (`curl localhost:8000/v1/models`)
 
-### Legacy Service/co-evolution modes
+### EvoSAGE Customer search
 
-The older combined Service/co-evolution runner and its archives, gates, and
-attribution remain available for historical experiments. The current first
-research stage is the isolated Customer-only runner described in
-[`docs/ADVERSARIAL_COEVOLUTION.md`](docs/ADVERSARIAL_COEVOLUTION.md): fixed
-Service S0, open-ended Customer strategies, and official-score-only selection.
-For legacy runs, the default CLI remains offline and deterministic:
+Run a deterministic orchestration fixture with fixed Service S0:
 
 ```bash
-./.venv/bin/python scripts/run_adversarial_coevolution.py \
-  --config configs/ecommerce_coevolution.yaml --evaluator mock
+PYTHONPATH=. .venv/bin/python scripts/run_customer_search.py \
+  --config configs/customer_search_smoke.yaml --evaluator mock
 ```
 
-Use `--evaluator real --model MODEL` only when the OpenAI-compatible API and
-`OPENAI_API_KEY` are configured in the calling environment. The key is never
-stored in the repository or result artifacts.
-
-The historical `configs/ecommerce_deceptive_customer_only_smoke_20261003.yaml`
-is retained as an old configuration/artifact reference. It is not the canonical
-protocol for the current Customer-only research stage.
+For real runs, pass `--evaluator real --model MODEL`; inject `OPENAI_API_KEY`
+from the local environment/keychain. The key is never stored in the repository
+or result artifacts. Historical configurations and experiment plans remain
+under `experiments/` for reference only; see [`experiments/README.md`](experiments/README.md).
 
 ---
 

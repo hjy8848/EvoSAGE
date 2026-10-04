@@ -6,27 +6,23 @@ import copy
 import json
 import math
 
-from .customer.integrity import AdversaryPolicyValidator
-from .customer.policy import AdversaryPolicy
-from .customer_selector import CustomerSelector
-from .generation_protocol import GenerationProtocolError, request_json_with_retry
+from .integrity import AdversaryPolicyValidator
+from .policy import AdversaryPolicy
+from ..generation_protocol import GenerationProtocolError, request_json_with_retry
 
 
 class CustomerEvolver:
     """Generate strategies; candidate quality is decided only by official score."""
 
-    def __init__(self, seed: int = 7, validator=None, selector=None, strategy_generator=None,
+    def __init__(self, seed: int = 7, validator=None, strategy_generator=None,
                  require_strategy_generator: bool = False):
         self.seed = seed
         self.validator = validator or AdversaryPolicyValidator()
-        self.selector = selector or CustomerSelector()
         self.strategy_generator = strategy_generator
         self.require_strategy_generator = require_strategy_generator
         self.last_rejections: list[dict] = []
         self.last_candidate_records: list[dict] = []
         self.last_generation_record: dict | None = None
-        self.last_selection_record: dict | None = None
-        self.last_evaluation_case_ids: list[str] = []
 
     @staticmethod
     def _bounded_reward(value) -> float | None:
@@ -182,72 +178,7 @@ class CustomerEvolver:
             for index in range(max(0, int(count)))
         ]
 
-    def evolve(
-        self,
-        incumbent,
-        service_policy,
-        cases,
-        evaluator,
-        archive=None,
-        generation=0,
-        count=5,
-        cases_per_candidate=None,
-        elite_count=0,
-        source_failures=None,
-        incumbent_episodes=None,
-    ):
-        """Compatibility bridge for the legacy combined runner.
-
-        New Customer-only experiments use CustomerEvolutionRunner directly.
-        This boundary adapts historical policy objects once; it intentionally
-        ignores archives, source failures, elite_count, and failure attribution.
-        """
-        from .customer.legacy import (
-            LegacyCustomerStrategyGeneratorAdapter,
-            adapt_legacy_customer_policy,
-        )
-
-        incumbent = adapt_legacy_customer_policy(incumbent)
-        evaluation_cases = list(cases)
-        if any(getattr(case, "split", "") == "heldout_test" for case in evaluation_cases):
-            raise AssertionError("CustomerEvolver cannot consume heldout cases")
-        if cases_per_candidate and cases_per_candidate > 0:
-            evaluation_cases = evaluation_cases[:cases_per_candidate]
-        baseline = list(incumbent_episodes or [])
-        target_ids = {getattr(case, "case_id", None) for case in evaluation_cases}
-        if {item.case_id for item in baseline} != target_ids:
-            baseline = evaluator.evaluate(
-                incumbent, service_policy, evaluation_cases, "evolution", generation,
-                "customer_incumbent_comparison",
-            )
-        self.last_evaluation_case_ids = [str(getattr(case, "case_id", "")) for case in evaluation_cases]
-        parent_score = self.selector.score(incumbent, baseline)
-        original_generator = self.strategy_generator
-        if original_generator is not None and not isinstance(
-            original_generator, LegacyCustomerStrategyGeneratorAdapter
-        ):
-            self.strategy_generator = LegacyCustomerStrategyGeneratorAdapter(original_generator)
-        try:
-            children = self.propose(
-                incumbent, generation, count=count, parent_reward=parent_score.fitness,
-            )
-        finally:
-            self.strategy_generator = original_generator
-        evaluated = [(incumbent, baseline)]
-        for candidate in children:
-            rows = evaluator.evaluate(
-                candidate, service_policy, evaluation_cases, "evolution", generation,
-                "customer_candidate",
-            )
-            evaluated.append((candidate, rows))
-        selected, scores = self.selector.select(
-            evaluated, incumbent_policy_id=incumbent.policy_id,
-        )
-        self.last_selection_record = copy.deepcopy(self.selector.last_selection_record)
-        return selected or incumbent, evaluated, scores
-
-
-class LLMCustomerPolicyGenerator:
+class LLMAdversaryStrategyGenerator:
     """Structured proposal generator with no case-level or failure-category feedback."""
 
     def __init__(self, llm_client, max_tokens: int = 4096,

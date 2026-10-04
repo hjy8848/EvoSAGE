@@ -1,4 +1,4 @@
-"""Filesystem persistence for resumable co-evolution experiments."""
+"""Filesystem persistence for Customer-search runs."""
 
 from __future__ import annotations
 
@@ -14,11 +14,9 @@ def _now():
 
 
 class RunStore:
-    def __init__(self, run_dir: str | Path, *, create_archives: bool = True):
+    def __init__(self, run_dir: str | Path):
         self.run_dir = Path(run_dir)
-        names = ["config", "environment", "split_manifest", "generations", "traces", "analysis"]
-        if create_archives:
-            names.append("archives")
+        names = ["config", "environment", "split_manifest", "generations", "analysis"]
         for name in names:
             (self.run_dir / name).mkdir(parents=True, exist_ok=True)
 
@@ -75,12 +73,10 @@ class RunStore:
 def has_prior_run_state(run_dir: str | Path) -> bool:
     root = Path(run_dir)
     return any((root / marker).exists() for marker in (
-        "config/evolution.json",
+        "config/customer_search.json",
         "environment/provenance.json",
         "environment/episode_cache.jsonl",
         "split_manifest/evolution_cases.json",
-        "archives/attacks.jsonl",
-        "archives/defenses.jsonl",
     ))
 
 

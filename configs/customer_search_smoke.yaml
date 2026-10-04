@@ -1,6 +1,5 @@
 {
   "scenario": "ecommerce_refund",
-  "experiment_mode": "customer_only",
   "seed": 7,
   "max_generations": 1,
   "model_metadata": {
@@ -8,11 +7,9 @@
     "model": "deepseek-v4-flash",
     "api_url": "https://inferaiapi.com/v1",
     "client": "openai_api",
-    "api_key_env": "OPENAI_API_KEY",
-    "run_kind": "real_deceptive_customer_smoke"
+    "api_key_env": "OPENAI_API_KEY"
   },
   "customer": {
-    "strategy_schema": "deceptive_free_text_v1",
     "candidate_count": 1
   },
   "splits": {
@@ -22,8 +19,7 @@
     "validation_ratio": 0.2,
     "heldout_ratio": 0.2,
     "instances_per_path": 1,
-    "max_cases": 3,
-    "customer_disclosure_variants": ["opening", "on_request"]
+    "max_cases": 3
   },
   "evaluation": {
     "repetitions": 1,
@@ -31,17 +27,17 @@
     "max_tool_steps": 4,
     "concurrency": 1,
     "api_timeout": 120,
-    "judge_in_evolution": false,
+    "judge_validation_enabled": false,
     "customer_thinking_mode": "disabled",
     "agent_thinking_mode": "disabled",
-    "evolver_thinking_mode": "disabled",
+    "customer_evolver_thinking_mode": "disabled",
     "agent_max_retries": 1,
     "customer_transport_max_retries": 1,
-    "evolver_max_retries": 1,
+    "customer_evolver_max_retries": 1,
     "judge_max_retries": 1,
     "judge_validation_retries": 0,
     "customer_protocol_retries": 1,
-    "evolver_protocol_retries": 1,
+    "customer_evolver_protocol_retries": 1,
     "rate_limit_backoff_seconds": 0,
     "invalid_evaluation_retries": 0,
     "max_api_requests_per_generation": 400,
@@ -51,11 +47,10 @@
       "agent": 4096,
       "judge": 1024,
       "customer_evolver": 8192
-    },
-    "summary_limit": 5
+    }
   },
   "persistence": {
-    "output_dir": "results/customer_search_slimming_20261004/real_tiny",
+    "output_dir": "results/customer_search_smoke",
     "resume": false
   }
 }

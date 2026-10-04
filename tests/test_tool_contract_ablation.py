@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from framework import get_sop_graph
 from framework.backend import ToolCall, ToolContractConfig, build_case_spec, create_backend
-from framework.evolution.config import EvolutionConfig
+from framework.evolution.config import EvaluationConfig
 from framework.models.agent_model import AgentModel
 from framework.prompts.ecommerce_refund_prompts import AGENT_SYSTEM_PROMPT
 
@@ -106,20 +106,22 @@ def test_runtime_validation_only_enforces_constraints_present_in_schema():
 
 
 def test_default_tool_contract_preserves_existing_behavior_and_config_roundtrips():
-    default = EvolutionConfig.from_dict({})
-    assert default.evaluation.tool_contract == ToolContractConfig()
-    strict = EvolutionConfig.from_dict({
-        "evaluation": {
-            "tool_contract": {
-                "provider_schema_strict": True,
-                "runtime_schema_validation": True,
-            }
+    default = EvaluationConfig.from_dict({})
+    assert default.tool_contract == ToolContractConfig()
+    strict = EvaluationConfig.from_dict({
+        "tool_contract": {
+            "provider_schema_strict": True,
+            "runtime_schema_validation": True,
         }
     })
-    assert strict.evaluation.tool_contract == ToolContractConfig(True, True)
-    assert strict.to_dict()["evaluation"]["tool_contract"] == {
+    assert strict.tool_contract == ToolContractConfig(True, True)
+    assert strict.__dict__["tool_contract"] == ToolContractConfig(True, True)
+    assert {
         "provider_schema_strict": True,
         "runtime_schema_validation": True,
+    } == {
+        "provider_schema_strict": strict.tool_contract.provider_schema_strict,
+        "runtime_schema_validation": strict.tool_contract.runtime_schema_validation,
     }
     try:
         ToolContractConfig.from_value({"runtime_schema_validaton": True})

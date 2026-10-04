@@ -1,4 +1,4 @@
-"""Read-only correctness tests for the EvoSAGE dashboard exporter."""
+"""Read-only exporter tests for current Customer-search artifacts."""
 
 from __future__ import annotations
 
@@ -19,337 +19,200 @@ def write_json(path: Path, value) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
-def write_jsonl(path: Path, rows) -> None:
+def write_jsonl(path: Path, values) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    path.write_text("\n".join(json.dumps(value) for value in values) + "\n", encoding="utf-8")
 
 
-def make_run(tmp_path: Path, *, source_kind: str = "REAL") -> Path:
+def make_run(tmp_path: Path, evaluator="real") -> Path:
     run = tmp_path / "run"
-    write_json(
-        run / "config" / "evolution.json",
+    write_json(run / "config" / "customer_search.json", {
+        "scenario": "ecommerce_refund",
+        "seed": 17,
+        "max_generations": 1,
+        "customer": {"candidate_count": 2},
+        "splits": {"strategy": "instance_holdout", "seed": 5},
+        "evaluation": {"max_turns": 4},
+        "model_metadata": {"model": "deepseek-v4-flash", "provider": "InferAI"},
+    })
+    write_json(run / "environment" / "provenance.json", {
+        "method": "customer_search",
+        "evaluator": evaluator,
+        "model": "deepseek-v4-flash",
+        "provider": "InferAI",
+        "seed": 17,
+        "runtime_commit": "actual-runtime-sha",
+        "runtime_tag": "runtime-tag",
+        "heldout_used_for_adaptation_or_selection": False,
+        "service_policy_id": "service_policy_s0",
+    })
+    for name in ("evolution_cases", "validation_cases", "heldout_cases"):
+        write_json(run / "split_manifest" / f"{name}.json", {
+            "cases": [{"case_id": f"{name}-1"}],
+        })
+    write_json(run / "analysis" / "run_status.json", {"status": "complete"})
+    write_json(run / "analysis" / "orchestration_metrics.json", {
+        "provider_attempts": 9,
+        "input_tokens": 900,
+        "output_tokens": 120,
+        "latency_seconds": 12.5,
+        "timeouts": 1,
+        "provider_failures": 0,
+        "customer_evolver": {"attempts": 1, "requests": 1},
+        "episode_evaluator": {"attempts": 8, "pipeline_requests": 8},
+    })
+    generation = run / "generations" / "gen_000"
+    write_json(generation / "COMPLETE.json", {"generation": 0})
+    write_json(generation / "SUMMARY.json", {
+        "generation": 0,
+        "status": "complete",
+        "selected_policy_id": "customer-1",
+        "incumbent_policy_id": "customer-0",
+        "customer_changed": True,
+        "selected_fitness": 1.0,
+        "selected_official_task_success": 0.0,
+        "proposed_candidate_count": 2,
+        "evolution_evaluation": {"valid_episode_count": 2, "invalid_episode_count": 1},
+    })
+    write_json(generation / "proposals.json", {
+        "requested_candidate_count": 2,
+        "proposed_candidate_count": 2,
+        "candidate_policies": [{
+            "policy_id": "customer-1",
+            "strategy": "Claim the delivery record is wrong.",
+            "hypothesis": "This may induce rechecking.",
+            "provenance_hash": "policy-hash",
+        }],
+        "generation_record": {"status": "valid", "candidates": []},
+    })
+    write_json(generation / "selection.json", {
+        "selected_policy_id": "customer-1",
+        "incumbent_policy_id": "customer-0",
+        "selected_policy": {"policy_id": "customer-1", "strategy": "Claim the delivery record is wrong."},
+        "selected_score": {"fitness": 1.0, "official_task_success": 0.0},
+        "selected_episode_ids": ["failure-1"],
+        "candidate_scores": [{"policy_id": "customer-1", "fitness": 1.0, "official_task_success": 0.0}],
+        "selection_reason": "strict_official_fitness_improvement",
+    })
+    write_json(generation / "service_policy.json", {"policy_id": "service_policy_s0"})
+    write_jsonl(generation / "episodes.jsonl", [
         {
-            "experiment_mode": "coevolution",
-            "model": "deepseek-v4-flash",
-            "seed": 7,
-            "max_generations": 1,
-            "runtime_freeze_commit": "runtime-sha",
-            "runtime_freeze_tag": "runtime-tag",
-            "formal_protocol": {"commit": "protocol-sha", "tag": "protocol-tag"},
-            "splits": {"strategy": "instance_holdout", "seed": 17, "max_cases": 3},
-            "customer": {"candidate_count": 3, "elite_count": 1},
-            "service": {"candidate_count": 3, "replay_attack_count": 1},
-            "evaluation": {"max_turns": 5},
-        },
-    )
-    write_json(
-        run / "environment" / "provenance.json",
-        {
-            "source_kind": source_kind,
-            "provider": "InferAI",
-            "commit_sha": "runtime-sha",
-            "freeze_tag": "runtime-tag",
-            "observed_runtime_freeze_commit": "runtime-sha",
-            "observed_runtime_freeze_tag": "runtime-tag",
-        },
-    )
-    write_json(
-        run / "analysis" / "orchestration_metrics.json",
-        {
-            "llm_requests": 11,
-            "input_tokens": 1000,
-            "output_tokens": 200,
-            "latency_seconds": 12.5,
-            "timeouts": 0,
-            "failures": 0,
-            "retries": 1,
-            "attempts": 12,
-            "successes": 11,
-            "average_attempt_latency": 1.04,
-            "max_attempt_latency": 2.2,
-        },
-    )
-    for name in ("evolution_cases.json", "validation_cases.json", "heldout_cases.json"):
-        write_json(run / "split_manifest" / name, [])
-    write_json(run / "generations" / "gen_000" / "COMPLETE.json", {"complete": True})
-    episodes = [
-        {
-            "episode_id": "valid-episode",
-            "generation": 0,
-            "split": "evolution",
+            "episode_id": "failure-1",
+            "scenario": "ecommerce_refund",
             "case_id": "CASE-1",
-            "task_success": True,
-            "strict_process_success": True,
-            "eventual_goal_success": 1.0,
-            "recovery_success": False,
-            "protocol_valid": True,
-            "environment_valid": True,
-            "customer_behavior_valid": True,
-            "service_failure_attributable": False,
-            "vulnerability_signature": None,
-            "failure_occurrence": None,
-            "expected_action": "Refund",
-            "predicted_action": "Refund",
-            "executed_action": "Refund",
-            "latency_seconds": 2.5,
-            "failure_signature": {},
-        },
-        {
-            "episode_id": "legitimate-failure",
-            "generation": 0,
+            "customer_policy_id": "customer-1",
+            "service_policy_id": "service_policy_s0",
             "split": "evolution",
-            "case_id": "CASE-2",
+            "generation": 0,
             "task_success": False,
-            "strict_process_success": False,
-            "eventual_goal_success": 0.0,
-            "recovery_success": False,
-            "protocol_valid": True,
-            "environment_valid": True,
-            "customer_behavior_valid": True,
-            "service_failure_attributable": True,
-            "vulnerability_signature": {
-                "schema_version": 2,
-                "signature_id": "v2-missing-order-id",
-                "failure_stage": "VERIFICATION",
-            },
-            "failure_occurrence": {"occurrence_id": "occurrence-1"},
-            "error_types": ["missed_backend_verification"],
-            "failure_signature": {
-                "signature_id": "missing_order_id",
-                "sop_node": "shipping_verification",
+            "execution_score": 0.25,
+            "action_execution_score": 0.0,
+            "goal_fulfillment_score": 0.0,
+            "error_types": ["goal_not_fulfilled"],
+            "predicted_action": "Supplementary",
+            "executed_action": "",
+            "tool_sequence_summary": ["query_order"],
+            "trace_ref": "simulation:sim-1",
+            "metadata": {
+                "phase": "customer_candidate",
+                "model_name": "deepseek-v4-flash",
+                "trace_events": [
+                    {"seq": 0, "turn_index": 0, "event_type": "USER_MESSAGE", "actor": "user", "payload": {"text": "I want a refund."}},
+                    {"seq": 1, "turn_index": 0, "event_type": "TOOL_CALL", "actor": "agent", "name": "query_order", "payload": {"arguments": {"order_id": "ORD-123"}}},
+                    {"seq": 2, "turn_index": 0, "event_type": "TOOL_RESULT", "actor": "backend", "name": "query_order", "payload": {"success": False, "error_code": "order_not_found", "state_before": {"secret": "must-not-export"}}},
+                ],
             },
         },
         {
-            "episode_id": "invalid-episode",
-            "generation": 0,
+            "episode_id": "invalid-1",
+            "scenario": "ecommerce_refund",
+            "case_id": "CASE-2",
+            "customer_policy_id": "customer-1",
+            "service_policy_id": "service_policy_s0",
             "split": "evolution",
-            "case_id": "CASE-3",
+            "generation": 0,
             "task_success": False,
             "evaluation_status": "invalid",
             "invalid_reason": "output_truncated",
-            "metadata": {"protocol_failure": True},
             "protocol_valid": False,
             "environment_valid": True,
-            "customer_behavior_valid": True,
-            "service_failure_attributable": False,
-            "vulnerability_signature": None,
-            "failure_occurrence": None,
         },
-    ]
-    write_jsonl(run / "generations" / "gen_000" / "episodes.jsonl", episodes)
-    write_jsonl(
-        run / "real_traces" / "trace.jsonl",
-        [
-            {
-                "trace_file": "real_traces/trace.jsonl",
-                "simulation": {
-                    "case_spec": {"case_id": "CASE-2"},
-                    "simulation_id": "sim-2",
-                    "model_name": "deepseek-v4-flash",
-                    "duration_seconds": 3.25,
-                    "turns": [
-                        {
-                            "turn_id": 0,
-                            "user_message": "I need a refund but do not have the order number.",
-                            "agent_output": {"chat": "I will check the order."},
-                            "tool_calls": [
-                                {"name": "query_order", "arguments": {"order_id": ""}}
-                            ],
-                            "tool_results": [{"error": "order_not_found", "state_before": "hidden"}],
-                        }
-                    ],
-                },
-            }
-        ],
-    )
-    write_json(
-        run / "generations" / "gen_000" / "customer_generation.json",
-        {
-            "status": "valid",
-            "response_candidate_count": 3,
-            "candidates": [
-                {
-                    "candidate_index": i,
-                    "policy_id": f"customer-{i}",
-                    "constructed_policy": {"policy_id": f"customer-{i}", "strategy_tags": ["withholding"]},
-                    "raw_candidate": {"strategy_tags": ["withholding"]},
-                    "accepted": True,
-                }
-                for i in range(3)
-            ],
-        },
-    )
-    write_json(
-        run / "generations" / "gen_000" / "customer_candidates.json",
-        {
-            "selected_policy": {"policy_id": "customer-0"},
-            "scores": [
-                {"policy_id": "incumbent", "fitness": 0.2},
-                {"policy_id": "customer-0", "fitness": 0.8},
-                {"policy_id": "customer-1", "fitness": 0.4},
-                {"policy_id": "customer-2", "fitness": 0.3},
-            ],
-        },
-    )
-    write_json(
-        run / "generations" / "gen_000" / "service_generation.json",
-        {"status": "valid", "candidates": [], "selected_policy_id": "service-0"},
-    )
-    write_json(
-        run / "generations" / "gen_000" / "service_gate.json",
-        {
-            "candidates": [
-                {
-                    "patch_id": "patch-1",
-                    "accepted": True,
-                    "evaluation_status": "valid",
-                    "delta": 0.4,
-                    "reason": "improved",
-                    "source_failure_ids": ["missing_order_id"],
-                    "patch": {"rule_category": "VERIFICATION", "rule_text": "Ask for order id."},
-                    "metrics": {
-                        "latest_task_success": 1.0,
-                        "exact_replay_task_success": 1.0,
-                        "transfer_replay_task_success": 0.5,
-                        "normal_task_success": 1.0,
-                        "latest_paired": {"wins": 1, "losses": 0, "ties": 0},
-                        "exact_replay_paired": {"wins": 0, "losses": 0, "ties": 1},
-                        "transfer_replay_paired": {"wins": 1, "losses": 0, "ties": 0},
-                        "normal_paired": {"wins": 0, "losses": 0, "ties": 1},
-                    },
-                },
-                {
-                    "patch_id": "patch-2",
-                    "accepted": False,
-                    "evaluation_status": "valid",
-                    "delta": 0.0,
-                    "reason": "insufficient_improvement",
-                    "source_failure_ids": ["missing_order_id"],
-                    "patch": {"rule_category": "VERIFICATION", "rule_text": "Ask for order id."},
-                },
-                {
-                    "patch_id": "patch-3",
-                    "accepted": False,
-                    "evaluation_status": "invalid",
-                    "invalid_reasons": ["output_truncated"],
-                    "reason": "candidate_evaluation_invalid:output_truncated",
-                    "patch": {"rule_category": "TOOL_USE", "rule_text": "Use grounded args."},
-                },
-            ]
-        },
-    )
-    write_jsonl(
-        run / "archives" / "attack_instances.jsonl",
-        [{"attack_instance_id": "instance-1", "vulnerability_signature_id": "v2-missing-order-id"}],
-    )
+    ])
     return run
 
 
-def test_exporter_preserves_statuses_candidates_and_trace_provenance(tmp_path: Path):
+def test_exporter_copies_official_result_and_display_trace_without_rescoring(tmp_path):
     run = make_run(tmp_path)
-    result = exporter.export_run("real", run)
+    exported = exporter.export_run("customer-search", run)
 
-    assert result["metadata"]["source_kind"] == "REAL"
-    assert result["metadata"]["runtime_freeze_match_status"] == "matched"
-    assert result["metadata"]["formal_protocol_commit"] == "protocol-sha"
-    assert result["metadata"]["candidate_counts"] == {
-        "customer": 3,
-        "customer_elite": 1,
-        "service": 3,
-        "service_replay": 1,
-    }
-    assert result["metrics"]["valid_episodes"] == 2
-    assert result["metrics"]["legitimate_failures"] == 1
-    assert result["metrics"]["invalid_episodes"] == 1
-    assert result["metrics"]["protocol_invalid_rate"] == 1 / 3
-    assert result["metrics"]["customer_behavior_invalid_rate"] == 0.0
-    assert result["metrics"]["attributable_service_failure_rate"] == 0.5
-    assert result["metrics"]["strict_process_success"] == 0.5
-    assert result["metrics"]["eventual_goal_success"] == 0.5
-    assert result["metrics"]["recovery_success_rate"] == 0.0
-    assert result["metrics"]["unique_vulnerability_signatures_v2"] == 1
-    assert result["metrics"]["attack_instance_count"] == 1
-    assert result["metrics"]["latest_task_success"] == 1.0
-    assert result["metrics"]["exact_replay_task_success"] == 1.0
-    assert result["metrics"]["transfer_replay_task_success"] == 0.5
-    assert result["metrics"]["normal_task_success"] == 1.0
-    assert result["metrics"]["paired_outcomes"]["latest"]["wins"] == 1
-    assert result["failure_analysis"]["unique_count"] == 1
-    assert result["failure_analysis"]["legitimate_failure_count"] == 1
-    assert result["customer_candidates"][0]["candidate_count"] == 3
-    assert result["customer_candidates"][0]["evaluated_candidate_count"] == 4
+    assert exported["metadata"]["method"] == "customer_search"
+    assert exported["metadata"]["source_kind"] == "REAL"
+    assert exported["metadata"]["runtime_commit"] == "actual-runtime-sha"
+    assert exported["metadata"]["runtime_freeze_match_status"] == "not_confirmed"
+    assert exported["metrics"]["task_success"] == 0.0
+    assert exported["metrics"]["invalid_rate"] == 0.5
+    assert exported["metrics"]["requests"] == 9
+    assert "service_candidates" not in exported
+    assert "robustness" not in exported
+    assert "unique_failure_signatures" not in exported["metrics"]
 
-    episode = next(item for item in result["episodes"] if item["episode_id"] == "legitimate-failure")
-    assert episode["status"] == "LEGITIMATE FAILURE"
-    assert episode["attribution_status"] == "attributable"
-    assert episode["latency_seconds"] == 3.25
-    tool = next(item for item in episode["trace_events"] if item["kind"] == "tool_call")
-    backend = next(item for item in episode["trace_events"] if item["kind"] == "backend_result")
-    assert tool["payload"] == {"name": "query_order", "arguments": {"order_id": ""}}
-    assert backend["payload"] == {"error": "order_not_found"}
-
-    invalid = next(item for item in result["episodes"] if item["episode_id"] == "invalid-episode")
+    failure = next(item for item in exported["episodes"] if item["episode_id"] == "failure-1")
+    assert failure["status"] == "VALID FAILURE"
+    assert failure["task_success"] is False
+    tool_call = next(item for item in failure["trace_events"] if item["kind"] == "tool_call")
+    backend_result = next(item for item in failure["trace_events"] if item["kind"] == "backend_result")
+    assert tool_call["label"] == "query_order"
+    assert tool_call["payload"]["arguments"] == {"order_id": "ORD-123"}
+    assert backend_result["payload"]["error_code"] == "order_not_found"
+    assert "state_before" not in backend_result["payload"]
+    invalid = next(item for item in exported["episodes"] if item["episode_id"] == "invalid-1")
     assert invalid["status"] == "INVALID EVALUATION"
-    assert invalid["invalid_reason"] == "output_truncated"
-    assert result["repair_analysis"]["statistics"]["total_service_proposals"] == 3
-    assert result["repair_analysis"]["statistics"]["unique_service_proposals"] == 2
-    assert result["repair_analysis"]["statistics"]["repeated_service_proposals"] == 1
-    assert result["robustness"]["heldout"] is None
-    assert result["robustness"]["fresh_adversary"] is None
+    assert invalid["task_success"] is None
 
 
-def test_exporter_marks_mock_without_reclassifying_business_failures(tmp_path: Path):
-    run = make_run(tmp_path, source_kind="MOCK")
-    result = exporter.export_run("mock", run)
-    assert result["metadata"]["source_kind"] == "MOCK"
-    assert result["metrics"]["legitimate_failures"] == 1
-    assert result["metrics"]["invalid_episodes"] == 1
+def test_current_runtime_metrics_count_evaluator_and_evolver_requests():
+    metrics = exporter._runtime_metrics({
+        "provider_attempts": 27,
+        "episode_evaluator": {"pipeline_requests": 26},
+        "customer_evolver": {"requests": 1},
+    })
+    assert metrics["requests"] == 27
+    assert metrics["attempts"] == 27
 
 
-def test_legacy_failures_are_not_silently_reclassified_as_attributable(tmp_path: Path):
+def test_trace_events_are_read_from_episode_metadata_trace_events():
+    events = exporter.trace_events({
+        "metadata": {
+            "trace_events": [
+                {"seq": 1, "event_type": "TOOL_CALL", "actor": "agent",
+                 "name": "query_order", "payload": {"arguments": {"order_id": "ORD-1"}}},
+            ],
+        },
+    })
+    assert len(events) == 1
+    assert events[0]["kind"] == "tool_call"
+    assert events[0]["payload"]["arguments"] == {"order_id": "ORD-1"}
+
+
+def test_mock_source_is_explicit_and_candidate_provenance_is_preserved(tmp_path):
+    run = make_run(tmp_path, evaluator="mock")
+    exported = exporter.export_run("mock-search", run)
+    assert exported["metadata"]["source_kind"] == "MOCK"
+    candidate = exported["customer_candidates"][0]["candidates"][0]
+    assert candidate["strategy"] == "Claim the delivery record is wrong."
+    assert candidate["provenance_hash"] == "policy-hash"
+    assert exported["customer_candidates"][0]["selected_policy_id"] == "customer-1"
+
+
+def test_trajectory_analyzer_reads_summary_and_does_not_rescore(tmp_path):
     run = make_run(tmp_path)
-    episodes_path = run / "generations" / "gen_000" / "episodes.jsonl"
-    rows = [json.loads(line) for line in episodes_path.read_text().splitlines()]
-    for row in rows:
-        for key in (
-            "strict_process_success", "eventual_goal_success", "recovery_success",
-            "protocol_valid", "environment_valid", "customer_behavior_valid",
-            "service_failure_attributable", "vulnerability_signature", "failure_occurrence",
-        ):
-            row.pop(key, None)
-    write_jsonl(episodes_path, rows)
-    (run / "archives" / "attack_instances.jsonl").unlink()
-
-    result = exporter.export_run("legacy", run)
-    failed = next(item for item in result["episodes"] if item["episode_id"] == "legitimate-failure")
-    assert failed["status"] == "UNATTRIBUTED LEGACY FAILURE"
-    assert failed["attribution_status"] == "legacy_unavailable"
-    assert result["metrics"]["attributable_service_failure_rate"] is None
-    assert result["metrics"]["strict_process_success"] is None
-    assert result["metrics"]["unique_vulnerability_signatures_v2"] is None
-    assert result["metrics"]["attack_instance_count"] is None
-    assert result["failure_analysis"]["legitimate_failure_count"] == 0
-    assert result["failure_analysis"]["legacy_unattributed_failure_count"] == 1
-
-
-def test_customer_behavior_invalid_failure_is_not_a_service_failure(tmp_path: Path):
-    run = make_run(tmp_path)
-    episodes_path = run / "generations" / "gen_000" / "episodes.jsonl"
-    rows = [json.loads(line) for line in episodes_path.read_text().splitlines()]
-    failed = next(row for row in rows if row["episode_id"] == "legitimate-failure")
-    failed["customer_behavior_valid"] = False
-    failed["service_failure_attributable"] = False
-    write_jsonl(episodes_path, rows)
-
-    result = exporter.export_run("invalid-customer", run)
-    failed_view = next(item for item in result["episodes"] if item["episode_id"] == "legitimate-failure")
-    assert failed_view["status"] == "NON-ATTRIBUTABLE FAILURE"
-    assert failed_view["validity_status"] == "customer_behavior_invalid"
-    assert result["failure_analysis"]["legitimate_failure_count"] == 0
-
-
-def test_demo_fixture_is_explicitly_demo():
-    fixture = json.loads((Path(__file__).parents[1] / "dashboard" / "public" / "data" / "demo.json").read_text())
-    assert fixture["dataset_kind"] == "DEMO"
-    assert fixture["demo_notice"]
-    assert all(run["metadata"]["source_kind"] == "DEMO" for run in fixture["runs"])
+    analyzer_path = Path(__file__).parents[1] / "scripts" / "analyze_evolution_trajectory.py"
+    analyzer_spec = importlib.util.spec_from_file_location("evosage_trajectory_analyzer", analyzer_path)
+    assert analyzer_spec and analyzer_spec.loader
+    analyzer = importlib.util.module_from_spec(analyzer_spec)
+    analyzer_spec.loader.exec_module(analyzer)
+    result = analyzer.analyze_run("run", run)
+    assert result["generations"][0]["selected_fitness"] == 1.0
+    assert result["generations"][0]["selected_official_task_success"] == 0.0
+    assert result["valid_episode_count"] == 1
+    assert result["invalid_episode_count"] == 1

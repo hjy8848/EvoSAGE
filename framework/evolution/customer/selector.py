@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from .customer.policy import AdversaryPolicy
-from .schemas import EpisodeResult
+from .policy import AdversaryPolicy
+from ..schemas import EpisodeResult
 
 
 @dataclass
@@ -19,37 +19,10 @@ class CandidateScore:
     evaluation_status: str
     invalid_reasons: list[str] | None = None
 
-    @property
-    def episodes(self) -> int:
-        """Legacy runner compatibility; counts runtime-valid score evidence."""
-        return self.valid_episode_count
-
     def to_dict(self) -> dict:
         value = dict(self.__dict__)
         value["invalid_reasons"] = list(self.invalid_reasons or [])
         return value
-
-    @classmethod
-    def from_dict(cls, value: dict) -> "CandidateScore":
-        """Load both compact scores and pre-refactor persisted score rows."""
-        valid_count = value.get("valid_episode_count", value.get("episodes", 0))
-        fitness = value.get("fitness")
-        official_success = value.get("official_task_success")
-        if official_success is None and fitness is not None:
-            official_success = 1.0 - float(fitness)
-        return cls(
-            policy_id=str(value.get("policy_id", "")),
-            fitness=float(fitness) if fitness is not None else None,
-            official_task_success=(
-                float(official_success) if official_success is not None else None
-            ),
-            valid_episode_count=int(valid_count or 0),
-            invalid_episode_count=int(value.get("invalid_episode_count", 0) or 0),
-            evaluation_status=value.get(
-                "evaluation_status", "valid" if valid_count else "inconclusive"
-            ),
-            invalid_reasons=list(value.get("invalid_reasons") or []),
-        )
 
 
 class CustomerSelector:
@@ -59,11 +32,9 @@ class CustomerSelector:
         self,
         policy: AdversaryPolicy,
         episodes: Iterable[EpisodeResult],
-        *,
-        allow_heldout: bool = False,
     ) -> CandidateScore:
         values = list(episodes)
-        if not allow_heldout and any(item.split == "heldout_test" for item in values):
+        if any(item.split == "heldout_test" for item in values):
             raise AssertionError("CustomerSelector cannot score heldout episodes")
         valid = [
             item for item in values
@@ -78,7 +49,10 @@ class CustomerSelector:
             + list((item.metadata or {}).get("invalid_reasons", []) or [])
         })
         if any(
-            item.is_runtime_evaluable() and not isinstance(item.task_success, bool)
+            not item.is_evaluation_invalid()
+            and item.protocol_valid
+            and item.environment_valid
+            and not isinstance(item.task_success, bool)
             for item in invalid
         ):
             reasons = sorted(set(reasons) | {"missing_official_score"})
@@ -108,10 +82,9 @@ class CustomerSelector:
         candidates: list[tuple[AdversaryPolicy, list[EpisodeResult]]],
         *,
         incumbent_policy_id: str | None = None,
-        allow_heldout: bool = False,
     ):
         scores = [
-            self.score(policy, episodes, allow_heldout=allow_heldout)
+            self.score(policy, episodes)
             for policy, episodes in candidates
         ]
         incumbent_index = next((

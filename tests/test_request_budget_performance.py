@@ -5,13 +5,13 @@ from types import SimpleNamespace
 import pytest
 import requests
 
-from framework.evolution.config import EvolutionConfig, load_config, save_config
+from framework.evolution.config import CustomerSearchConfig, load_customer_search_config
 from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
+from framework.evolution.evaluator_adapter import _exception_invalid_reason
 from framework.evolution.persistence import RunStore
 from framework.evolution.request_budget import APIRequestBudget, APIRequestBudgetExceeded, request_context
-from framework.evolution.runner import EvolutionRunner
-from framework.evolution.schemas import CustomerPolicy, ServicePolicy
-from framework.evolution.config import PersistenceConfig, SplitConfig
+from framework.evolution.customer.policy import AdversaryPolicy
+from framework.evolution.schemas import ServicePolicy
 from framework.backend.types import ToolCall, ToolResult
 from framework.llm_integration.llm_client import LLMResponse, OpenAIAPIClient
 from framework.backend import EcommerceBackend, build_case_spec
@@ -38,18 +38,18 @@ class _FakeResponse:
 
 
 def test_performance_config_roundtrip_and_safe_legacy_defaults(tmp_path):
-    legacy = EvolutionConfig.from_dict({})
-    assert legacy.evaluation.max_tool_steps == 8
-    assert legacy.evaluation.invalid_evaluation_retries == 1
-    assert legacy.evaluation.agent_max_retries == 1
+    defaults = CustomerSearchConfig.from_dict({})
+    assert defaults.evaluation.max_tool_steps == 8
+    assert defaults.evaluation.invalid_evaluation_retries == 1
+    assert defaults.evaluation.agent_max_retries == 1
 
-    config = EvolutionConfig.from_dict({
+    config = CustomerSearchConfig.from_dict({
         "evaluation": {
             "agent_thinking_mode": "disabled",
-            "evolver_thinking_mode": "enabled",
+            "customer_evolver_thinking_mode": "enabled",
             "agent_max_retries": 1,
             "customer_transport_max_retries": 2,
-            "evolver_max_retries": 1,
+            "customer_evolver_max_retries": 1,
             "judge_validation_retries": 0,
             "invalid_evaluation_retries": 0,
             "max_tool_steps": 3,
@@ -59,11 +59,11 @@ def test_performance_config_roundtrip_and_safe_legacy_defaults(tmp_path):
         }
     })
     path = tmp_path / "roundtrip.json"
-    save_config(config, path)
-    loaded = load_config(path)
+    path.write_text(json.dumps(config.to_dict()), encoding="utf-8")
+    loaded = load_customer_search_config(path)
     assert loaded.evaluation == config.evaluation
     assert loaded.evaluation.agent_thinking_mode == "disabled"
-    assert loaded.evaluation.evolver_thinking_mode == "enabled"
+    assert loaded.evaluation.customer_evolver_thinking_mode == "enabled"
     assert loaded.evaluation.max_tool_steps == 3
     assert loaded.evaluation.max_api_requests_per_run == 30
 
@@ -273,7 +273,9 @@ def test_invalid_episode_retry_count_is_configurable_and_not_business_failure(
     calls = []
 
     class Pipeline:
-        def run_single_simulation(self, intent, **kwargs):
+        def run_single_simulation(
+            self, intent, user_id=None, path_config=None, phase="", case_spec_override=None
+        ):
             calls.append(intent)
             raise RuntimeError("HTTP 503 provider unavailable")
 
@@ -286,43 +288,50 @@ def test_invalid_episode_retry_count_is_configurable_and_not_business_failure(
         path_config={}, case_spec=None, split="evolution", path_id=1,
     )
     result = evaluator.evaluate(
-        CustomerPolicy(), ServicePolicy(), [case], "evolution", 0, "customer_candidate"
+        AdversaryPolicy(), ServicePolicy(), [case], "evolution", 0, "customer_candidate"
     )[0]
     assert len(calls) == expected_calls
     assert result.is_evaluation_invalid()
-    assert not result.is_attributable_service_failure()
+    assert not result.is_runtime_evaluable()
     assert result.invalid_reason == "provider_error"
 
 
-def test_budget_exhaustion_persists_checkpoint_and_is_not_a_business_episode(tmp_path):
-    def stop_with_budget(*_args, **_kwargs):
-        raise APIRequestBudgetExceeded("generation", 1, 1)
+def test_local_harness_type_error_is_not_misreported_as_provider_failure():
+    assert _exception_invalid_reason(TypeError("unexpected local keyword")) == "environment_execution_error"
+    assert _exception_invalid_reason(TimeoutError("request timed out")) == "timeout"
+    assert _exception_invalid_reason(requests.Timeout("wrapped timeout")) == "timeout"
+    assert _exception_invalid_reason(requests.HTTPError("HTTP 503")) == "provider_error"
 
-    config = EvolutionConfig.from_dict({
-        "experiment_mode": "static",
-        "max_generations": 1,
-        "splits": {
-            "strategy": "instance_holdout", "seed": 7,
-            "evolution_ratio": 0.5, "validation_ratio": 0.25,
-            "heldout_ratio": 0.25, "max_cases": 3,
-        },
-        "persistence": {"output_dir": str(tmp_path / "budget-run"), "resume": False},
-    })
-    runner = EvolutionRunner(
-        config,
-        evaluator=type("Evaluator", (), {"evaluate": staticmethod(stop_with_budget)})(),
+
+def test_local_harness_error_is_invalid_but_not_a_provider_or_protocol_failure():
+    class BrokenPipeline:
+        def run_single_simulation(self, intent, user_id=None, path_config=None,
+                                  phase="", case_spec_override=None):
+            raise TypeError("unexpected local keyword")
+
+    evaluator = EvoSAGEEpisodeEvaluator(
+        lambda *_args, **_kwargs: BrokenPipeline(), invalid_evaluation_retries=0,
     )
-    result = runner.run()
-    assert result["run_status"] == "budget_exhausted"
-    metrics = json.loads((runner.store.run_dir / "analysis/orchestration_metrics.json").read_text())
-    checkpoint = json.loads(
-        (runner.store.run_dir / "generations/gen_000/CHECKPOINT.json").read_text()
+    case = SimpleNamespace(
+        case_id="case-1", scenario="ecommerce_refund", intent="refund_before_shipping",
+        path_config={}, case_spec=None, split="evolution", path_id=1,
     )
-    assert metrics["run_status"] == "budget_exhausted"
-    assert metrics["inconclusive_reason"] == "api_request_budget_exceeded"
-    assert checkpoint["status"] == "incomplete_budget_exhausted"
-    assert checkpoint["reason"] == "api_request_budget_exceeded"
-    assert checkpoint["active_customer_policy"]["policy_id"] == "adversary_c0"
-    assert checkpoint["active_service_policy"]["policy_id"] == "service_policy_s0"
-    assert checkpoint["stage"] == "generation_summary"
-    assert checkpoint["completed_phases"] == []
+    result = evaluator.evaluate(
+        AdversaryPolicy(), ServicePolicy(), [case], "evolution", 0, "customer_candidate"
+    )[0]
+    assert result.invalid_reason == "environment_execution_error"
+    assert result.error_types == ["environment_execution_error"]
+    assert result.protocol_valid is True
+    assert result.environment_valid is False
+    assert result.termination_reason == "environment_execution_error"
+
+
+def test_request_budget_artifact_records_role_and_phase_counters(tmp_path):
+    budget = APIRequestBudget(max_per_generation=2, max_per_run=3,
+                              persist_path=tmp_path / "request_budget.json")
+    with request_context(0, "customer_candidate"):
+        budget.before_attempt("agent")
+        budget.record_result("agent", input_tokens=5, output_tokens=3)
+    snapshot = json.loads((tmp_path / "request_budget.json").read_text())
+    assert snapshot["generations"]["0"]["phases"]["customer_candidate"]["provider_attempts"] == 1
+    assert snapshot["generations"]["0"]["phases"]["customer_candidate"]["roles"]["agent"]["input_tokens"] == 5

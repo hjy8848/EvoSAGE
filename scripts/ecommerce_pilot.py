@@ -409,8 +409,6 @@ def run(args) -> int:
         judge_model_name=args.model,
         max_turns=args.max_turns,
         verbose=args.verbose,
-        user_simulator_mode=args.user_simulator_mode,
-        user_policy_mode=args.user_policy_mode,
     )
     recorders = []
     for role in ("user", "agent", "judge"):
@@ -482,8 +480,6 @@ def run(args) -> int:
         "seed": None,
         "repetitions": args.repetitions,
         "max_turns": args.max_turns,
-        "user_simulator_mode": args.user_simulator_mode,
-        "user_policy_mode": args.user_policy_mode,
         "stage": args.stage,
         "target_path_count": len(target_path_ids),
     }
@@ -517,8 +513,6 @@ def main() -> int:
     parser.add_argument("--max-turns", type=int, default=6)
     parser.add_argument("--request-timeout", type=int, default=90, help="单次 API 请求超时秒数")
     parser.add_argument("--max-output-tokens", type=int, default=2048, help="Pilot 对每次生成设置的最大 token 上限")
-    parser.add_argument("--user-simulator-mode", choices=["llm", "rule", "rewrite"], default="llm")
-    parser.add_argument("--user-policy-mode", choices=["truthful", "mistaken", "withholding", "adversarial_false_claim"], default="truthful")
     parser.add_argument("--verbose", action="store_true")
     return run(parser.parse_args())
 

@@ -28,8 +28,6 @@ from .llm_user_model import (
     AdversarialCustomerModel,
     LLMUserModel,
     LLMUserMessageGenerator,
-    RuleUserModel,
-    RewritingUserModel,
 )
 
 from .llm_judge import (
@@ -50,8 +48,6 @@ __all__ = [
     "LLMUserModel",
     "AdversarialCustomerModel",
     "LLMUserMessageGenerator",
-    "RuleUserModel",
-    "RewritingUserModel",
     "LLMJudge",
     "MultiModelJudge",
     "MultiModelVotingJudge",

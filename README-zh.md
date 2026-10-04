@@ -943,22 +943,25 @@ export AGENT_MODEL_PATH="Qwen/Qwen2.5-32B-Instruct"
 - [ ] 日志无错误 (`tail vllm_logs/*.log`)
 - [ ] 服务可访问 (`curl localhost:8000/v1/models`)
 
-### 对抗用户—客服协同进化（电商退款 MVP）
+### EvoSAGE：开放式 Customer 策略搜索
 
-协同进化层见
-[`docs/ADVERSARIAL_COEVOLUTION.md`](docs/ADVERSARIAL_COEVOLUTION.md)。当前只
-覆盖 `ecommerce_refund`，不改官方 evaluator；新增固定的
-evolution/validation/heldout 清单、可复用 CustomerPolicy、结构化
-ServicePatch、攻击/防御归档、门禁和跨代分析。默认命令是零 API 调用的离线
-确定性验证：
+当前第一阶段研究：在固定 benchmark/environment 和固定 Service S0 下，
+自由文本 Customer 策略的黑盒进化能否降低 Service 的官方任务成功率。
+Customer 可以撒谎、隐瞒、矛盾、施压、改变或放弃诉求；不再做真实性、
+合作性或攻击类别监督。fitness 仅为运行有效 episode 上的
+`1 - mean(official task_success)`。当前不做 Service evolution 或共进化。
+详见 [`docs/CUSTOMER_ADVERSARIAL_SEARCH.md`](docs/CUSTOMER_ADVERSARIAL_SEARCH.md)。
+
+离线编排检查（不是研究结果）：
 
 ```bash
-./.venv/bin/python scripts/run_adversarial_coevolution.py \
-  --config configs/ecommerce_coevolution.yaml --evaluator mock
+PYTHONPATH=. .venv/bin/python scripts/run_customer_search.py \
+  --config configs/customer_search_smoke.yaml --evaluator mock
 ```
 
-只有显式添加 `--evaluator real --model MODEL`（或 `--real` 别名）才会调用 OpenAI-compatible API；
-`OPENAI_API_KEY` 由调用环境提供，不会保存进仓库或结果文件。
+真实运行需添加 `--evaluator real --model MODEL`，并从本机环境或钥匙串注入
+`OPENAI_API_KEY`；密钥不会写入仓库或结果文件。旧协同进化计划和结果是
+历史材料，不再由当前 runtime 执行，见 [`experiments/README.md`](experiments/README.md)。
 
 ---
 

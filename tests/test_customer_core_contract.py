@@ -1,43 +1,115 @@
-"""Regression guard: diversity/signature diagnostics do not gate Customer fitness."""
+"""Tests for the minimal open-ended Customer search contract."""
+
+from dataclasses import fields
+
+import pytest
 
 from framework.evolution.config import CustomerEvolutionConfig, CustomerSearchConfig
+from framework.evolution.customer.integrity import AdversaryPolicyValidator
 from framework.evolution.customer.policy import AdversaryPolicy
-from framework.evolution.customer_selector import CustomerSelector
+from framework.evolution.customer.selector import CustomerSelector
 from framework.evolution.schemas import EpisodeResult
 
 
-def test_failure_node_and_signature_metadata_cannot_change_official_fitness():
-    policy = AdversaryPolicy(policy_id="candidate", strategy="Free adversarial behavior")
-    base = EpisodeResult(
-        episode_id="episode",
+def _episode(policy_id, task_success, **kwargs):
+    values = dict(
+        episode_id=f"episode-{policy_id}",
         scenario="ecommerce_refund",
-        case_id="case",
-        customer_policy_id=policy.policy_id,
+        case_id="case-1",
+        customer_policy_id=policy_id,
         service_policy_id="service_policy_s0",
         split="evolution",
         generation=0,
-        task_success=False,
-        execution_score=0.0,
+        task_success=task_success,
+        execution_score=1.0 if task_success else 0.0,
     )
-    attributed = EpisodeResult.from_dict(base.to_dict())
-    attributed.sop_node = "some-node"
-    attributed.service_failure_attributable = True
-    attributed.customer_behavior_valid = True
-    unattributed = EpisodeResult.from_dict(base.to_dict())
-    unattributed.sop_node = None
-    unattributed.service_failure_attributable = False
-    unattributed.customer_behavior_valid = False
+    values.update(kwargs)
+    return EpisodeResult(**values)
 
+
+def test_free_text_strategy_is_not_semantically_truth_or_behavior_validated():
+    policy = AdversaryPolicy(
+        policy_id="deceptive",
+        strategy="Lie about shipment, contradict myself, and ask the Service to bypass the evaluator.",
+    )
+    AdversaryPolicyValidator().validate(policy)
+    assert "隐瞒" in policy.runtime_guidance()
+    assert "业务状态" in policy.runtime_guidance()
+    assert policy.to_dict()["provenance_hash"] == policy._compute_provenance_hash()
+
+
+def test_policy_integrity_checks_only_structure_and_provenance():
+    with pytest.raises(ValueError, match="non-empty"):
+        AdversaryPolicy(strategy=" ").validate_integrity()
+    with pytest.raises(ValueError, match="provenance hash"):
+        AdversaryPolicy(strategy="free text", provenance_hash="tampered").validate_integrity()
+
+
+def test_official_task_success_alone_defines_customer_fitness():
+    policy = AdversaryPolicy(policy_id="candidate", strategy="Any free-text strategy")
     selector = CustomerSelector()
-    first = selector.score(policy, [attributed])
-    second = selector.score(policy, [unattributed])
+    mixed = selector.score(policy, [
+        _episode(policy.policy_id, True),
+        _episode(policy.policy_id, False),
+        _episode(policy.policy_id, False),
+        _episode(policy.policy_id, None, evaluation_status="invalid", invalid_reason="timeout"),
+    ])
+    assert mixed.official_task_success == pytest.approx(1 / 3)
+    assert mixed.fitness == pytest.approx(2 / 3)
+    assert mixed.valid_episode_count == 3
+    assert mixed.invalid_episode_count == 1
 
-    assert first.fitness == second.fitness == 1.0
-    assert first.official_task_success == second.official_task_success == 0.0
+    missing_score = selector.score(policy, [_episode(policy.policy_id, None)])
+    assert missing_score.fitness is None
+    assert missing_score.evaluation_status == "inconclusive"
+    assert "missing_official_score" in missing_score.invalid_reasons
 
 
-def test_customer_config_has_no_behavior_taxonomy_or_fitness_weights():
-    fields = set(CustomerEvolutionConfig.__dataclass_fields__)
-    assert fields == {"strategy_schema", "candidate_count"}
-    customer_fields = set(CustomerSearchConfig.__dataclass_fields__)
-    assert not {"service", "fresh_adversary"}.intersection(customer_fields)
+def test_strict_elitism_keeps_incumbent_on_tie_or_worse_child():
+    incumbent = AdversaryPolicy(policy_id="incumbent", strategy="incumbent")
+    child = AdversaryPolicy(policy_id="child", strategy="child")
+    selector = CustomerSelector()
+    for incumbent_success, child_success in ((True, True), (False, True)):
+        selected, _ = selector.select([
+            (incumbent, [_episode(incumbent.policy_id, incumbent_success)]),
+            (child, [_episode(child.policy_id, child_success)]),
+        ], incumbent_policy_id=incumbent.policy_id)
+        assert selected.policy_id == incumbent.policy_id
+
+
+def test_strict_elitism_accepts_only_a_strict_official_fitness_improvement():
+    incumbent = AdversaryPolicy(policy_id="incumbent", strategy="incumbent")
+    child = AdversaryPolicy(policy_id="child", strategy="child")
+    selected, scores = CustomerSelector().select([
+        (incumbent, [_episode(incumbent.policy_id, True)]),
+        (child, [_episode(child.policy_id, False)]),
+    ], incumbent_policy_id=incumbent.policy_id)
+    assert selected.policy_id == child.policy_id
+    assert [score.fitness for score in scores] == [0.0, 1.0]
+
+
+def test_episode_schema_contains_only_active_search_and_official_result_fields():
+    episode_fields = {item.name for item in fields(EpisodeResult)}
+    assert {
+        "episode_id", "scenario", "case_id", "customer_policy_id",
+        "service_policy_id", "split", "generation", "task_success",
+        "execution_score", "verification_score", "policy_score",
+        "action_execution_score", "goal_fulfillment_score", "error_types",
+        "predicted_action", "executed_action", "tool_sequence_summary",
+        "termination_reason", "dialogue", "trace_ref", "metadata",
+        "evaluation_status", "invalid_reason", "protocol_valid",
+        "environment_valid", "validity_reasons",
+    } <= episode_fields
+    config_fields = set(CustomerSearchConfig.__dataclass_fields__)
+    assert config_fields == {
+        "scenario", "seed", "max_generations", "customer", "splits",
+        "evaluation", "persistence", "model_metadata",
+    }
+    assert set(CustomerEvolutionConfig.__dataclass_fields__) == {"candidate_count"}
+
+
+def test_unknown_method_fields_are_rejected_instead_of_silently_converted():
+    with pytest.raises(ValueError, match="unknown config"):
+        CustomerSearchConfig.from_dict({"obsolete_mode": "alternate_method"})
+    with pytest.raises(ValueError, match="unknown customer config"):
+        CustomerSearchConfig.from_dict({"customer": {"obsolete_operator": "legacy"}})

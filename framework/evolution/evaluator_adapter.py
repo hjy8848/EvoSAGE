@@ -1,4 +1,4 @@
-"""Adapters from EvoSAGE episodes to the co-evolution protocol.
+"""Adapters from official EvoSAGE episodes to Customer-search outcomes.
 
 The mock evaluator is deliberately deterministic and is used by tests and the
 CLI unless ``--real`` is explicitly selected.  It models only a small,
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import inspect
 import json
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
@@ -17,74 +16,18 @@ from pathlib import Path
 import threading
 from typing import Any, Callable, Iterable, Protocol
 
-from .schemas import CustomerPolicy, EpisodeResult, ServicePolicy
+from .customer.policy import AdversaryPolicy
+from .schemas import EpisodeResult, ServicePolicy
 from .request_budget import request_context
 
 
 class EpisodeEvaluator(Protocol):
-    def evaluate(self, customer_policy: CustomerPolicy, service_policy: ServicePolicy,
+    def evaluate(self, customer_policy: AdversaryPolicy, service_policy: ServicePolicy,
                  cases: Iterable[Any], split: str, generation: int, phase: str) -> list[EpisodeResult]: ...
 
 
-def _mean(items: list[EpisodeResult], field: str) -> float:
-    return sum(float(getattr(item, field, 0.0)) for item in items) / len(items) if items else 0.0
-
-
-def aggregate_episode_metrics(episodes: Iterable[EpisodeResult]) -> dict[str, float]:
-    values = list(episodes)
-    # Provider/protocol errors, invalid Customer behavior, and broken
-    # environments remain inspectable diagnostics, but cannot enter the
-    # substantive service-policy denominator.
-    evaluable_values = [
-        item for item in values
-        if not item.is_evaluation_invalid() and item.protocol_valid and item.environment_valid
-    ]
-    valid_values = [item for item in evaluable_values if item.customer_behavior_valid]
-    attributable_failures = sum(item.is_attributable_service_failure() for item in valid_values)
-    evaluable_failures = sum(not item.task_success for item in evaluable_values)
-    transfer_count = sum(
-        item.executed_action.lower() in {"transfer_human", "transhuman", "transfer"}
-        for item in valid_values
-    )
-    reject_count = sum(
-        item.executed_action.lower() in {"reject", "reject_request"}
-        for item in valid_values
-    )
-    return {
-        "task_success": sum(bool(item.task_success) for item in valid_values) / len(valid_values) if valid_values else 0.0,
-        "strict_process_success": sum(
-            bool(item.task_success if item.strict_process_success is None else item.strict_process_success)
-            for item in valid_values
-        ) / len(valid_values) if valid_values else 0.0,
-        "eventual_goal_success": _mean(valid_values, "eventual_goal_success"),
-        "recovery_attempted_rate": sum(bool(item.recovery_attempted) for item in valid_values) / len(valid_values) if valid_values else 0.0,
-        "recovery_success_rate": sum(bool(item.recovery_success) for item in valid_values) / len(valid_values) if valid_values else 0.0,
-        "recovery_count": sum(int(item.recovery_count or 0) for item in valid_values),
-        "mean_recovery_count": _mean(valid_values, "recovery_count"),
-        # Deprecated compatibility alias. New analyses should use the explicit
-        # attribution metrics below.
-        "legitimate_attack_success": attributable_failures / len(valid_values) if valid_values else 0.0,
-        "attributable_service_failure_rate": attributable_failures / len(valid_values) if valid_values else 0.0,
-        "evaluable_service_failure_rate": evaluable_failures / len(evaluable_values) if evaluable_values else 0.0,
-        "execution_score": _mean(valid_values, "execution_score"),
-        "verification": _mean(valid_values, "verification_score"),
-        "policy": _mean(valid_values, "policy_score"),
-        "action": _mean(valid_values, "action_execution_score"),
-        "goal": _mean(valid_values, "goal_fulfillment_score"),
-        "episodes": float(len(valid_values)),
-        "invalid_episodes": float(len(values) - len(evaluable_values)),
-        "protocol_invalid_episodes": float(sum(item.is_evaluation_invalid() or not item.protocol_valid for item in values)),
-        "environment_invalid_episodes": float(sum(not item.environment_valid for item in values)),
-        "customer_behavior_invalid_episodes": float(sum(not item.customer_behavior_valid for item in evaluable_values)),
-        "evaluable_episodes": float(len(evaluable_values)),
-        "tool_calls": sum(len(item.tool_sequence_summary) for item in valid_values) / len(valid_values) if valid_values else 0.0,
-        "transfer_rate": transfer_count / len(valid_values) if valid_values else 0.0,
-        "reject_rate": reject_count / len(valid_values) if valid_values else 0.0,
-    }
-
-
 def _exception_invalid_reason(exc: BaseException) -> str:
-    """Map transport/provider exceptions to a stable diagnostic reason."""
+    """Separate transport failures from local harness/programming errors."""
     customer_reason = getattr(exc, "reason", None)
     if getattr(exc, "customer_simulator_protocol_invalid", False) and customer_reason:
         return str(customer_reason)
@@ -94,7 +37,17 @@ def _exception_invalid_reason(exc: BaseException) -> str:
         return "timeout"
     if "json" in name or "parse" in name or "json" in text:
         return "json_parse_failed"
-    return "provider_error"
+    if isinstance(exc, (TypeError, AttributeError, AssertionError, NameError)):
+        return "environment_execution_error"
+    module = type(exc).__module__.lower()
+    if module.startswith(("requests.", "httpx.", "openai.", "litellm.")):
+        return "provider_error"
+    if any(marker in text for marker in (
+        "provider", "http 4", "http 5", "rate limit", "connection error",
+        "failed to generate",
+    )):
+        return "provider_error"
+    return "environment_execution_error"
 
 
 def _response_finish_reason(response: Any) -> str:
@@ -163,6 +116,7 @@ def _episode_invalid_reasons(simulation: Any, report: Any) -> list[str]:
         "output_truncated",
         "json_parse_failed",
         "provider_error",
+        "environment_execution_error",
         "no_valid_agent_decision",
         "protocol_failure",
     )
@@ -180,19 +134,13 @@ class BudgetedEpisodeEvaluator:
         self.concurrency = max(1, int(concurrency))
 
     @staticmethod
-    def _assert_evolution_scope(cases, phase: str) -> None:
-        protected_phases = (
-            "candidate", "customer", "service", "baseline", "normal", "replay",
-            "failure_scan", "generation_summary", "gate", "evolution",
-        )
-        if any(getattr(case, "split", "") == "heldout_test" for case in cases) and any(
-            token in phase.lower() for token in protected_phases
-        ):
-            raise AssertionError("heldout cases cannot enter an evolution or service gate phase")
+    def _assert_evolution_scope(cases) -> None:
+        if any(getattr(case, "split", "") == "heldout_test" for case in cases):
+            raise AssertionError("heldout cases are never evaluated by Customer search")
 
     def evaluate(self, customer_policy, service_policy, cases, split, generation, phase):
         cases = list(cases)
-        self._assert_evolution_scope(cases, phase)
+        self._assert_evolution_scope(cases)
         outputs = []
         for repetition in range(self.repetitions):
             if self.concurrency > 1 and len(cases) > 1:
@@ -216,60 +164,37 @@ class BudgetedEpisodeEvaluator:
 
 
 class MockEpisodeEvaluator:
-    """Offline fixture for the complete two-generation integration test."""
+    """Deterministic plumbing fixture; it does not model benchmark behavior."""
 
-    def __init__(self, vulnerability_tags: tuple[str, ...] = ()):
-        # Deprecated argument retained for old test callers. The offline
-        # fixture now recognizes free-text strategy content instead of tags.
-        self.vulnerability_tags = set(vulnerability_tags)
+    def __init__(self):
         self.calls: list[dict[str, Any]] = []
 
-    def evaluate(self, customer_policy: CustomerPolicy, service_policy: ServicePolicy,
+    def evaluate(self, customer_policy: AdversaryPolicy, service_policy: ServicePolicy,
                  cases: Iterable[Any], split: str, generation: int, phase: str) -> list[EpisodeResult]:
         cases = list(cases)
         self.calls.append({"customer_policy_id": customer_policy.policy_id, "service_policy_id": service_policy.policy_id,
                            "split": split, "generation": generation, "phase": phase, "case_count": len(cases)})
-        active_rules = " ".join(rule.text.lower() for rule in service_policy.rules if rule.active)
-        defended = any(token in active_rules for token in ("authoritative", "action tool", "verify before", "execute only"))
-        strategy = str(getattr(customer_policy, "strategy", "")).lower()
-        fixture_attack = any(token in strategy for token in (
-            "backend result is wrong", "contradict the service's verified result",
-            "push for an action before verification",
-        ))
-        vulnerable = fixture_attack and not defended
         results = []
         for index, case in enumerate(cases):
             case_id = getattr(case, "case_id", f"case_{index}")
-            path_id = getattr(case, "path_id", None)
-            error_types = [] if not vulnerable else [
-                "authoritative_conflict" if "backend result is wrong" in strategy
-                else "claimed_action_not_executed"
-            ]
-            success = not vulnerable
             results.append(EpisodeResult(
                 episode_id=f"mock-g{generation}-{split}-{index}",
-                scenario="ecommerce_refund",
+                scenario=getattr(case, "scenario", "ecommerce_refund"),
                 case_id=case_id,
                 customer_policy_id=customer_policy.policy_id,
                 service_policy_id=service_policy.policy_id,
                 split=split,
                 generation=generation,
-                task_success=success,
-                execution_score=1.0 if success else 0.4,
-                sage_style_score=1.0 if success else 0.6,
-                verification_score=1.0 if success else 0.0,
-                policy_score=1.0 if success else 0.0,
-                action_execution_score=1.0 if success else 0.0,
-                goal_fulfillment_score=1.0 if success else 0.0,
-                error_types=error_types,
-                predicted_action="Refund" if success else "Reject",
-                executed_action="Refund" if success else "",
-                tool_sequence_summary=["query_order", "submit_refund"] if success else ["query_order"],
-                termination_reason="goal_satisfied" if success else "mock_adversarial_failure",
-                sop_node=f"path_{path_id}" if path_id is not None else None,
-                path_step_index=0,
+                task_success=True,
+                execution_score=1.0,
+                sage_style_score=1.0,
+                verification_score=1.0,
+                policy_score=1.0,
+                action_execution_score=1.0,
+                goal_fulfillment_score=1.0,
+                tool_sequence_summary=[],
+                termination_reason="mock_fixture",
                 metadata={"mock": True, "phase": phase},
-                service_failure_attributable=not success,
             ))
         return results
 
@@ -283,33 +208,14 @@ class CallableEpisodeEvaluator:
 
 
 class EvoSAGEEpisodeEvaluator:
-    """Thin real-run adapter; imports the legacy runner lazily."""
+    """Run one Customer policy against fixed S0 and retain objective outcomes."""
 
-    _FAST_PHASES = frozenset({
-        "customer_incumbent",
-        "customer_failure_scan",
-        "customer_candidate",
-        "customer_elite",
-        "selected_customer",
-        "service_failures",
-        "service_baseline_latest",
-        "service_baseline_replay",
-        "service_normal_baseline",
-        "service_candidate_latest",
-        "service_candidate_replay",
-        "service_normal_candidate",
-        "generation_summary",
-        "fresh_adaptation",
-    })
-
-    def __init__(self, pipeline_factory: Callable[..., Any], user_policy_mode: str = "truthful",
-                 judge_in_evolution: bool = False, cache_namespace: str = "default",
+    def __init__(self, pipeline_factory: Callable[..., Any],
+                 judge_validation_enabled: bool = False, cache_namespace: str = "default",
                  cache_path: str | Path | None = None, reset_cache: bool = False,
-                 invalid_evaluation_retries: int = 1, request_budget=None,
-                 include_failure_analysis: bool = True):
+                 invalid_evaluation_retries: int = 1, request_budget=None):
         self.pipeline_factory = pipeline_factory
-        self.user_policy_mode = user_policy_mode
-        self.judge_in_evolution = judge_in_evolution
+        self.judge_validation_enabled = bool(judge_validation_enabled)
         self.cache_namespace = cache_namespace
         self._episode_cache: dict[str, EpisodeResult] = {}
         self._cache_path = Path(cache_path) if cache_path else None
@@ -320,7 +226,6 @@ class EvoSAGEEpisodeEvaluator:
         self._reset_cache = reset_cache
         self.invalid_evaluation_retries = max(0, int(invalid_evaluation_retries))
         self.request_budget = request_budget
-        self.include_failure_analysis = bool(include_failure_analysis)
         self._cache_lock = threading.Lock()
         self._pipelines = []
         self._pipeline_lock = threading.Lock()
@@ -344,9 +249,7 @@ class EvoSAGEEpisodeEvaluator:
             return
 
     def _use_llm_judge(self, phase: str) -> bool:
-        if self.judge_in_evolution:
-            return True
-        return phase not in self._FAST_PHASES
+        return self.judge_validation_enabled and phase == "customer_validation_report_only"
 
     def _print_phase_summary(self, generation: int, phase: str) -> None:
         if self.request_budget is None:
@@ -365,19 +268,11 @@ class EvoSAGEEpisodeEvaluator:
 
     def _cache_key(self, customer_policy, service_policy, case, split, generation, judge_enabled):
         payload = {
-            "version": "episode-cache-v4-semantic-policy",
+            "version": "episode-cache-v5-customer-search",
             "namespace": self.cache_namespace,
             # IDs remain available on the cached EpisodeResult for provenance,
             # but only executable policy semantics determine compatibility.
             "customer_policy": customer_policy.semantic_fingerprint(),
-            # Open-ended Customer search validates only policy schema and
-            # benchmark integrity before evaluation. Do not run the legacy
-            # case/truthfulness validator in this path.
-            "customer_policy_validation": (
-                {"contract": "free_text_integrity_v1"}
-                if not self.include_failure_analysis
-                else self._customer_policy_validation_contract(customer_policy, case)
-            ),
             "service_policy": service_policy.semantic_fingerprint(),
             "case_id": getattr(case, "case_id", None),
             "intent": getattr(case, "intent", None),
@@ -390,36 +285,6 @@ class EvoSAGEEpisodeEvaluator:
             "judge_enabled": judge_enabled,
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-
-    @staticmethod
-    def _customer_policy_validation_contract(customer_policy, case) -> dict[str, Any]:
-        case_spec = getattr(case, "case_spec", None)
-        try:
-            if isinstance(case_spec, dict):
-                from ..backend.types import CaseSpec
-                case_spec = CaseSpec(**case_spec)
-            from .legacy.customer_policy import CustomerPolicyValidator
-            CustomerPolicyValidator().validate(customer_policy, case_spec)
-            return {"valid": True}
-        except Exception as exc:
-            message = str(exc).lower()
-            if "evaluator-only" in message:
-                reason = "evaluator_reference"
-            elif "sample-specific" in message:
-                reason = "sample_specific_value"
-            elif "backend value" in message or "unobserved" in message:
-                reason = "hidden_value"
-            elif "stable id" in message:
-                reason = "missing_identity"
-            elif "protocol" in message or "manipulation" in message:
-                reason = "protocol_manipulation"
-            elif "strategy tag" in message:
-                reason = "strategy_tag"
-            else:
-                reason = "validation_error"
-            # Keep exception messages out of the cache key: a validator message
-            # can include a hidden backend value.
-            return {"valid": False, "reason": reason}
 
     @staticmethod
     def _fingerprint(value) -> str:
@@ -442,7 +307,7 @@ class EvoSAGEEpisodeEvaluator:
                             episode = EpisodeResult.from_dict(episode_data)
                             # Invalid records are retained in the diagnostic
                             # log, never reused as a substantive cache hit.
-                            if not episode.is_evaluation_invalid():
+                            if episode.is_runtime_evaluable():
                                 self._episode_cache[key] = episode
                     except (TypeError, ValueError, json.JSONDecodeError):
                         # A truncated final JSONL line must not invalidate the
@@ -525,10 +390,17 @@ class EvoSAGEEpisodeEvaluator:
             "split": split,
             "generation": generation,
             "evaluation_status": "invalid",
-            "protocol_failure": True,
+            "protocol_failure": reason in {
+                "timeout", "output_truncated", "json_parse_failed", "provider_error",
+                "protocol_failure", "no_valid_agent_decision",
+            } or reason.startswith("customer_simulator_invalid:"),
             "invalid_reason": reason,
             "evaluation_attempt": attempt,
         }
+        environment_valid = reason != "environment_execution_error"
+        if not environment_valid:
+            metadata["environment_valid"] = False
+            metadata["environment_invalid_reasons"] = [reason]
         customer_provenance = getattr(error, "customer_simulator_provenance", None) if error else None
         if customer_provenance is not None:
             metadata["customer_simulator_protocol_invalid"] = True
@@ -546,81 +418,32 @@ class EvoSAGEEpisodeEvaluator:
             service_policy_id=service_policy.policy_id,
             split=split,
             generation=generation,
-            task_success=False,
+            task_success=None,
             execution_score=0.0,
-            error_types=["protocol_failure", reason],
+            error_types=(
+                ["protocol_failure", reason]
+                if metadata["protocol_failure"]
+                else [reason]
+            ),
             termination_reason=(
                 "customer_simulator_invalid"
                 if reason.startswith("customer_simulator_invalid:")
+                else "environment_execution_error"
+                if not environment_valid
                 else "evaluation_invalid"
             ),
             metadata=metadata,
             evaluation_status="invalid",
             invalid_reason=reason,
+            protocol_valid=metadata["protocol_failure"] is False,
+            environment_valid=environment_valid,
+            validity_reasons=[reason],
         )
 
-    @staticmethod
-    def _call_pipeline(pipeline, intent: str, run_kwargs: dict[str, Any]):
-        """Call old and new pipeline signatures without hiding real errors."""
-        method = pipeline.run_single_simulation
-        # Resolve compatibility before invoking the method.  This matters for
-        # wrappers that record a call and then delegate to an old signature:
-        # probing by calling first would create a duplicate provider request.
-        try:
-            signature = inspect.signature(method)
-            parameters = signature.parameters
-            accepts_kwargs = any(
-                parameter.kind == inspect.Parameter.VAR_KEYWORD
-                for parameter in parameters.values()
-            )
-            if accepts_kwargs and "phase" not in parameters:
-                # Do not pass phase through opaque wrappers: a common wrapper
-                # accepts **kwargs but delegates to an older concrete method.
-                # Passing it once would otherwise trigger duplicate calls
-                # during compatibility fallback.
-                run_kwargs = dict(run_kwargs)
-                run_kwargs.pop("phase", None)
-            if accepts_kwargs and "case_spec_override" not in parameters:
-                # Opaque legacy wrappers may forward arbitrary kwargs to an
-                # older concrete pipeline. Do not probe this argument by
-                # making a speculative call, which could duplicate requests.
-                run_kwargs = dict(run_kwargs)
-                run_kwargs.pop("case_spec_override", None)
-            if not accepts_kwargs:
-                run_kwargs = {
-                    key: value for key, value in run_kwargs.items()
-                    if key in parameters
-                }
-            return method(intent, **run_kwargs)
-        except (TypeError, ValueError) as exc:
-            # Some proxy/c-extension callables do not expose a signature;
-            # retain the conservative fallback for those only.
-            if not isinstance(exc, TypeError) or "unexpected keyword" not in str(exc):
-                raise
-        candidates = [
-            dict(run_kwargs),
-            {key: value for key, value in run_kwargs.items() if key != "phase"},
-            {key: value for key, value in run_kwargs.items() if key not in {"phase", "judge_enabled"}},
-            {key: value for key, value in run_kwargs.items() if key not in {"phase", "judge_enabled", "case_spec_override"}},
-        ]
-        last_error = None
-        for kwargs in candidates:
-            try:
-                return method(intent, **kwargs)
-            except TypeError as exc:
-                last_error = exc
-                text = str(exc)
-                # Only retry signature compatibility errors.  A TypeError
-                # raised inside the provider/pipeline is a real invalid
-                # evaluation and must reach the protocol classifier.
-                optional = [name for name in ("phase", "judge_enabled", "case_spec_override") if name in kwargs]
-                if not optional or not any(
-                    marker in text for marker in ("unexpected keyword", "got an unexpected keyword", "positional")
-                ):
-                    raise
-        raise last_error  # pragma: no cover - defensive; candidates are non-empty
-
-    def evaluate(self, customer_policy, service_policy, cases, split, generation, phase):
+    def evaluate(self, customer_policy: AdversaryPolicy, service_policy: ServicePolicy,
+                 cases, split, generation, phase):
+        if service_policy != ServicePolicy():
+            raise ValueError("Customer search evaluates only the fixed Service S0")
         cases = list(cases)
         if self.request_budget is not None:
             self.request_budget.record_episodes(len(cases), generation, phase)
@@ -648,27 +471,13 @@ class EvoSAGEEpisodeEvaluator:
             self._print_phase_summary(generation, phase)
             return outputs
 
-        # Policies are pipeline-construction state.  Older factories that do
-        # not accept them remain supported for callers that already bind the
-        # policies in a closure.
-        try:
-            pipeline = self.pipeline_factory(customer_policy, service_policy, judge_enabled=judge_enabled)
-        except TypeError as exc:
-            if "positional" not in str(exc) and "argument" not in str(exc):
-                raise
-            try:
-                pipeline = self.pipeline_factory(customer_policy, service_policy)
-            except TypeError as legacy_exc:
-                if "positional" not in str(legacy_exc) and "argument" not in str(legacy_exc):
-                    raise
-                pipeline = self.pipeline_factory()
+        pipeline = self.pipeline_factory(customer_policy, judge_enabled=judge_enabled)
         with self._pipeline_lock:
             self._pipelines.append(pipeline)
         for index, case, key in missing:
             run_kwargs = {
                 "user_id": f"{getattr(case, 'case_id', 'case')}_{generation}",
                 "path_config": getattr(case, "path_config", None),
-                "judge_enabled": judge_enabled,
                 "phase": phase,
             }
             archived_case_spec = getattr(case, "case_spec", None)
@@ -683,15 +492,12 @@ class EvoSAGEEpisodeEvaluator:
                 terminal_customer_invalid = False
                 try:
                     with request_context(generation, phase):
-                        simulation, report = self._call_pipeline(
-                            pipeline,
+                        simulation, report = pipeline.run_single_simulation(
                             getattr(case, "intent", "refund_before_shipping"),
-                            run_kwargs,
+                            **run_kwargs,
                         )
                     episode = self.from_evosage(
                         simulation, report, customer_policy, service_policy, split, generation, phase,
-                        path_config=getattr(case, "path_config", None),
-                        include_failure_analysis=self.include_failure_analysis,
                     )
                 except Exception as exc:
                     if getattr(exc, "budget_exhausted", False):
@@ -741,7 +547,7 @@ class EvoSAGEEpisodeEvaluator:
                 1 if not episode.is_evaluation_invalid() else 0
             )
             episode.metadata["invalid_attempts"] = invalid_attempts
-            if not episode.is_evaluation_invalid():
+            if episode.is_runtime_evaluable():
                 cached_episode = copy.deepcopy(episode)
                 with self._cache_lock:
                     self._episode_cache[key] = cached_episode
@@ -808,26 +614,11 @@ class EvoSAGEEpisodeEvaluator:
         return stats
 
     @staticmethod
-    def from_evosage(simulation, report, customer_policy, service_policy, split, generation, phase,
-                     path_config=None, include_failure_analysis=True):
+    def from_evosage(simulation, report, customer_policy: AdversaryPolicy,
+                     service_policy: ServicePolicy, split, generation, phase):
         from .trace import flatten_simulation
 
-        analysis_trace_events = [event.to_dict() for event in flatten_simulation(simulation)]
-        customer_assessment = None
-        attribution = None
-        location = {}
-        if include_failure_analysis:
-            # Kept for legacy service/co-evolution analysis only. The open
-            # Customer-only runner passes False and never imports/calls these.
-            from .attribution import infer_failure_attribution, infer_failure_location
-            from .analysis.customer_behavior import assess_customer_behavior
-            customer_assessment = assess_customer_behavior(simulation, customer_policy)
-            attribution = infer_failure_attribution(report, simulation, path_config)
-            location = infer_failure_location(report, simulation, path_config)
-        # BackendEnvironment records both query and action tools as ``tool_call``
-        # events.  Keep the co-evolution trace aligned with the execution
-        # evaluator; filtering for the old ``tool_query`` name silently turned
-        # every real episode into an empty tool trace.
+        trace_events = [event.to_dict() for event in flatten_simulation(simulation)]
         tools = [
             event.get("name", "")
             for event in getattr(simulation, "backend_events", [])
@@ -865,16 +656,8 @@ class EvoSAGEEpisodeEvaluator:
                 environment_valid = False
                 environment_reasons.append("backend_exception")
         protocol_valid = not protocol_failure
-        service_failure_attributable = bool(include_failure_analysis and (
-            not bool(official_task_success)
-            and protocol_valid
-            and customer_assessment is not None
-            and customer_assessment.valid
-            and environment_valid
-        ))
         validity_reasons = list(dict.fromkeys([
             *invalid_reasons,
-            *(customer_assessment.reasons if customer_assessment is not None else []),
             *environment_reasons,
         ]))
         metadata = {
@@ -890,20 +673,11 @@ class EvoSAGEEpisodeEvaluator:
             "invalid_reasons": invalid_reasons,
             "environment_valid": environment_valid,
             "environment_invalid_reasons": environment_reasons,
-            "analysis_trace_events": analysis_trace_events,
-            "trace_seq_start": 0 if analysis_trace_events else None,
-            "trace_seq_end": len(analysis_trace_events) - 1 if analysis_trace_events else None,
-            "failure_analysis_included": bool(include_failure_analysis),
+            "trace_events": trace_events,
             "customer_simulator_provenance": copy.deepcopy(
                 getattr(simulation, "customer_simulator_provenance", []) or []
             ),
         }
-        if include_failure_analysis:
-            metadata.update({
-                "failure_location": location,
-                "failure_attribution": attribution.to_dict(),
-                "customer_behavior_assessment": customer_assessment.to_dict(),
-            })
         return EpisodeResult(
             episode_id=simulation.simulation_id,
             scenario=simulation.scenario_id,
@@ -912,7 +686,7 @@ class EvoSAGEEpisodeEvaluator:
             service_policy_id=service_policy.policy_id,
             split=split,
             generation=generation,
-            task_success=bool(official_task_success),
+            task_success=official_task_success,
             execution_score=float(report.execution_score),
             sage_style_score=float(report.sage_style_score),
             verification_score=float(report.required_verification_score),
@@ -923,26 +697,13 @@ class EvoSAGEEpisodeEvaluator:
             predicted_action=report.predicted_action,
             executed_action=report.executed_action,
             tool_sequence_summary=tools,
-            trace_ref=(
-                f"simulation:{simulation.simulation_id}"
-                if analysis_trace_events else None
-            ),
+            trace_ref=f"simulation:{simulation.simulation_id}" if trace_events else None,
             termination_reason=simulation.termination_reason,
-            sop_node=location.get("sop_node"),
-            path_step_index=location.get("path_step_index"),
             dialogue=[turn.agent_output.to_dict() for turn in simulation.turns],
             metadata=metadata,
             evaluation_status=evaluation_status,
             invalid_reason=invalid_reasons[0] if invalid_reasons else None,
-            strict_process_success=bool(official_task_success),
-            eventual_goal_success=float(getattr(report, "eventual_goal_success", report.goal_fulfillment) or 0.0),
-            recovery_attempted=bool(getattr(report, "recovery_attempted", False)),
-            recovery_success=bool(getattr(report, "recovery_success", False)),
-            recovery_count=int(getattr(report, "recovery_count", 0) or 0),
-            first_failure_stage=str(getattr(report, "first_failure_stage", "") or ""),
             protocol_valid=protocol_valid,
-            customer_behavior_valid=(customer_assessment.valid if customer_assessment is not None else True),
             environment_valid=environment_valid,
-            service_failure_attributable=service_failure_attributable,
             validity_reasons=validity_reasons,
         )

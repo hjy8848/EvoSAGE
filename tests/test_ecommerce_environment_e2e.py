@@ -63,10 +63,11 @@ def response_with_json(action, path=None, chat="已根据后台结果完成处�
     )
 
 
-def make_case(
-    shipping_status="Signed", credit_level="Low", expected_action="CollectionService",
-    disclosure_variant="opening",
-):
+def response_with_text(text):
+    return SimpleNamespace(text=text, model="fake", tool_calls=[], metadata={})
+
+
+def make_case(shipping_status="Signed", credit_level="Low", expected_action="CollectionService"):
     path = {
         "Classification_items": ["ReturnOrRefund", True, "User", "Reasonable", "Calm"],
         "system_variables": {
@@ -76,10 +77,7 @@ def make_case(
         "expected_path": ["step1", "step2", "step3"],
         "final_output": {"Action": expected_action},
     }
-    case = build_case_spec(
-        "ecommerce_refund", "refund_request", path, user_id="e2e-user",
-        disclosure_variant=disclosure_variant,
-    )
+    case = build_case_spec("ecommerce_refund", "refund_request", path, user_id="e2e-user")
     return case
 
 
@@ -105,6 +103,7 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         case_id = _stable_id("CASE", "ecommerce_refund:refund_before_shipping:runner-test")
         order_id = _stable_id("ORD", case_id)
         client = ScriptedClient([
+            response_with_text("我想退款，请帮我处理。"),
             response_with_tools(ToolCall("q", "query_order", {"order_id": order_id})),
             response_with_tools(ToolCall("a", "transfer_human", {"order_id": order_id})),
             response_with_json("TransHuman", path_config["expected_path"], "已为您转接人工客服。"),
@@ -153,7 +152,6 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
                 output_dir=output_dir,
                 max_turns=1,
                 verbose=False,
-                user_simulator_mode="rule",
             )
             result, report = pipeline.run_single_simulation(
                 "refund_before_shipping", user_id="runner-test", path_config=path_config
@@ -167,14 +165,14 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         self.assertEqual(result.case_spec["metadata"]["legacy_gt"]["finals"]["Action"], "TransHuman")
         self.assertTrue(result.case_spec["metadata"]["legacy_gt"]["classification"])
         self.assertTrue(result.case_spec["metadata"]["legacy_gt"]["expected_path"])
-        first_messages = json.dumps(client.requests[0]["messages"], ensure_ascii=False)
-        self.assertNotIn("Signed", first_messages)
+        initial_agent_messages = json.dumps(client.requests[1]["messages"], ensure_ascii=False)
+        self.assertNotIn("Signed", initial_agent_messages)
         # Public SOP branches may name the credit-level vocabulary; the
         # hidden case value must not be injected as a backend observation.
-        self.assertNotIn('"credit_level": "Low"', first_messages)
-        self.assertNotIn("CreditLevel=Low", first_messages)
-        self.assertTrue(any(message.get("role") == "tool" for message in client.requests[1]["messages"]))
-        self.assertIn("Signed", json.dumps(client.requests[1]["messages"], ensure_ascii=False))
+        self.assertNotIn('"credit_level": "Low"', initial_agent_messages)
+        self.assertNotIn("CreditLevel=Low", initial_agent_messages)
+        self.assertTrue(any(message.get("role") == "tool" for message in client.requests[2]["messages"]))
+        self.assertIn("Signed", json.dumps(client.requests[2]["messages"], ensure_ascii=False))
         self.assertEqual([event["name"] for event in result.backend_events], [
             "query_order", "transfer_human", "TransHuman"
         ])
@@ -336,7 +334,7 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         self.assertEqual(report.environment_goal_fulfillment, 1.0)
 
     def test_recoverable_failed_query_and_action_can_continue_on_next_customer_turn(self):
-        case = make_case("Unshipped", "High", "Refund", disclosure_variant="on_request")
+        case = make_case("Unshipped", "High", "Refund")
         order_id = case.user_knowledge["order_id"]
         client = ScriptedClient([
             response_with_tools(ToolCall("bad-query", "query_order", {"order_id": ""})),
@@ -375,17 +373,16 @@ class EcommerceEnvironmentE2ETests(unittest.TestCase):
         assert report.to_dict()["recovery_success"] is True
         assert result.backend_final_state["order"]["refund_status"] == "Approved"
         from framework.evolution.evaluator_adapter import EvoSAGEEpisodeEvaluator
-        from framework.evolution.schemas import CustomerPolicy, EpisodeResult, ServicePolicy
+        from framework.evolution.customer.policy import AdversaryPolicy
+        from framework.evolution.schemas import EpisodeResult, ServicePolicy
 
         episode = EvoSAGEEpisodeEvaluator.from_evosage(
-            result, report, CustomerPolicy(), ServicePolicy(), "evolution", 0, "recovery_test"
+            result, report, AdversaryPolicy(), ServicePolicy(), "evolution", 0, "recovery_test"
         )
         restored = EpisodeResult.from_dict(episode.to_dict())
-        assert restored.strict_process_success is False
-        assert restored.eventual_goal_success == 1.0
-        assert restored.recovery_success is True
-        assert restored.recovery_count == 2
-        assert restored.vulnerability_signature_v2().consequence_class == "RECOVERED"
+        assert restored.task_success is False
+        assert restored.execution_score == report.execution_score
+        assert restored.trace_ref
 
     def test_fatal_backend_exception_terminates_and_recovery_loop_is_bounded(self):
         case = make_case("Unshipped", "High", "Refund")

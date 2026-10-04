@@ -10,7 +10,7 @@ from framework.backend.types import CaseSpec
 from framework.config import get_scenario_config
 from framework.evolution.config import SplitConfig
 from framework.evolution.split_manager import SplitManager
-from framework.llm_integration.llm_user_model import LLMUserModel, RuleUserModel
+from framework.llm_integration.llm_user_model import LLMUserModel
 from framework.models.agent_model import AgentModel
 from framework.models.user_model import UserProfile
 from framework.prompts.ecommerce_refund_prompts import (
@@ -181,11 +181,6 @@ def test_customer_uses_only_case_declared_emotion_not_adversarial_intensity():
         next_prompt = model._build_generation_prompt("请提供订单号", 1)
         assert ("情感状态: angry" in next_prompt) is explicit_emotion
         assert "情感状态: calm" not in next_prompt
-
-        rule_model = RuleUserModel(profile, case_spec=case)
-        assert rule_model.emotion_state.value == expected_internal_emotion
-        assert rule_model.environment_state.emotion == expected_internal_emotion
-
 
 def test_explicit_calm_customer_contract_initializes_state_and_prompt():
     case = CaseSpec(

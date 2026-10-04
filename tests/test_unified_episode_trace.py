@@ -106,7 +106,7 @@ def test_flatten_simulation_marks_agent_protocol_failure_and_unmaterialized_cust
     ]
 
 
-def test_failure_occurrence_keeps_trace_reference_and_sequence_bounds():
+def test_episode_result_keeps_trace_reference_and_official_outcome():
     episode = EpisodeResult(
         episode_id="episode-trace-1",
         scenario="ecommerce_refund",
@@ -119,12 +119,9 @@ def test_failure_occurrence_keeps_trace_reference_and_sequence_bounds():
         execution_score=0.0,
         error_types=["wrong_tool_arguments"],
         trace_ref="simulation:sim_trace_1",
-        service_failure_attributable=True,
         metadata={"analysis_trace_events": [{"seq": 0}, {"seq": 1}, {"seq": 2}]},
     )
-    occurrence = episode.to_dict()["failure_occurrence"]
-    assert occurrence["trace_ref"] == "simulation:sim_trace_1"
-    assert occurrence["trace_seq_start"] == 0
-    assert occurrence["trace_seq_end"] == 2
-    assert occurrence["metadata"]["trace_range_scope"] == "whole_episode"
-    assert "analysis_trace_events" not in occurrence["metadata"]
+    restored = EpisodeResult.from_dict(episode.to_dict())
+    assert restored.trace_ref == "simulation:sim_trace_1"
+    assert restored.task_success is False
+    assert restored.error_types == ["wrong_tool_arguments"]

@@ -1,5 +1,11 @@
 # EvoSAGE Roadmap
 
+> **历史路线图，已被当前研究目标取代（2026-10-04）。** 本文描述的是旧版
+> Service/Customer 对抗共进化计划，不是当前 active method，也不能按本文命令
+> 运行。当前唯一研究主线是固定 Service S0 下的自由文本 Customer 策略搜索；
+> 以 [`../docs/CUSTOMER_ADVERSARIAL_SEARCH.md`](../docs/CUSTOMER_ADVERSARIAL_SEARCH.md)
+> 为准。此文件仅保留决策历史。
+
 更新时间：2026-09-18
 
 本文记录当前对 SAGE-Bench 的观察、EvoSAGE 的目标定义，以及后续实施计划。

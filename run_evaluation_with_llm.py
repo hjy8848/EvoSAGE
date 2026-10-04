@@ -76,8 +76,6 @@ from framework.llm_integration import (
     get_llm_client,
     LLMUserModel,
     LLMUserMessageGenerator,
-    RuleUserModel,
-    RewritingUserModel,
     LLMJudge,
     MultiModelJudge,
 )
@@ -251,11 +249,8 @@ class LLMEvaluationPipeline:
         max_turns: int = 10,
         api_timeout: int = 300,
         verbose: bool = True,
-        user_simulator_mode: str = "llm",
-        user_policy_mode: str = "truthful",
         legacy_execution: bool = False,
         customer_policy=None,
-        service_policy=None,
         use_llm_judge: bool = True,
         client_type: str = "openai_api",
         user_max_tokens: int = 512,
@@ -304,13 +299,8 @@ class LLMEvaluationPipeline:
         self.max_turns = max_turns
         self.api_timeout = api_timeout
         self.verbose = verbose
-        self.user_simulator_mode = user_simulator_mode
-        self.user_policy_mode = user_policy_mode
         self.legacy_execution = legacy_execution
-        # Optional co-evolution overlays.  None preserves the historical
-        # runner behavior; policies never replace CaseSpec or evaluator truth.
         self.customer_policy = customer_policy
-        self.service_policy = service_policy
         self.use_llm_judge = use_llm_judge
         self.user_max_tokens = user_max_tokens
         self.agent_max_tokens = agent_max_tokens
@@ -581,7 +571,6 @@ class LLMEvaluationPipeline:
                 user_intent=user_intent,
                 path_config=path_config or {},
                 user_id=user_id,
-                user_policy_mode=self.user_policy_mode,
             )
         else:
             case_spec = (
@@ -601,62 +590,21 @@ class LLMEvaluationPipeline:
             backend_environment.reset(case_spec)
 
         if self.customer_policy is not None:
+            from framework.evolution.customer.integrity import AdversaryPolicyValidator
             from framework.evolution.customer.policy import AdversaryPolicy
-            if isinstance(self.customer_policy, AdversaryPolicy):
-                from framework.evolution.customer.integrity import AdversaryPolicyValidator
-                AdversaryPolicyValidator().validate(self.customer_policy)
-                compiled_policy = self.customer_policy
-                open_ended_policy = True
-                if self.user_simulator_mode == "rule":
-                    raise ValueError("open-ended Customer search requires an LLM simulator, not the rule fixture")
-            else:
-                from framework.evolution.customer_policy import CustomerPolicyCompiler
-                compiled_policy = CustomerPolicyCompiler().compile(self.customer_policy, case_spec)
-                open_ended_policy = False
-            if self.user_simulator_mode == "rule" and not open_ended_policy:
-                from framework.evolution.customer_policy import PolicyCustomerModel
-                user_system_prompt += compiled_policy.runtime_guidance()
-                user_model = PolicyCustomerModel(user_profile, user_system_prompt, case_spec, compiled_policy)
-            elif self.user_simulator_mode == "rewrite":
-                user_model = RewritingUserModel(
-                    profile=user_profile,
-                    system_prompt="",
-                    llm_client=self.user_llm_client,
-                    temperature=0.8,
-                    max_tokens=self.user_max_tokens,
-                    case_spec=case_spec,
-                    thinking_mode=self.customer_thinking_mode,
-                    protocol_retry_limit=self.customer_protocol_retries,
-                    customer_policy=compiled_policy,
-                )
-            else:
-                # Real co-evolution uses the LLM customer with a validated,
-                # open adversarial strategy. Static prompt templates and
-                # deterministic tag rules are intentionally bypassed here.
-                customer_model = AdversarialCustomerModel if open_ended_policy else LLMUserModel
-                user_model = customer_model(
-                    profile=user_profile,
-                    system_prompt="",
-                    llm_client=self.user_llm_client,
-                    temperature=0.8,
-                    max_tokens=self.user_max_tokens,
-                    case_spec=case_spec,
-                    thinking_mode=self.customer_thinking_mode,
-                    protocol_retry_limit=self.customer_protocol_retries,
-                    customer_policy=compiled_policy,
-                )
-        elif self.user_simulator_mode == "rule":
-            user_model = RuleUserModel(user_profile, user_system_prompt, case_spec)
-        elif self.user_simulator_mode == "rewrite":
-            user_model = RewritingUserModel(
+            if not isinstance(self.customer_policy, AdversaryPolicy):
+                raise TypeError("Customer search requires an AdversaryPolicy")
+            AdversaryPolicyValidator().validate(self.customer_policy)
+            user_model = AdversarialCustomerModel(
                 profile=user_profile,
-                system_prompt=user_system_prompt,
+                system_prompt="",
                 llm_client=self.user_llm_client,
                 temperature=0.8,
                 max_tokens=self.user_max_tokens,
-                    case_spec=case_spec,
-                    thinking_mode=self.customer_thinking_mode,
-                    protocol_retry_limit=self.customer_protocol_retries,
+                case_spec=case_spec,
+                thinking_mode=self.customer_thinking_mode,
+                protocol_retry_limit=self.customer_protocol_retries,
+                customer_policy=self.customer_policy,
             )
         else:
             user_model = LLMUserModel(
@@ -673,9 +621,6 @@ class LLMEvaluationPipeline:
         # 创建客服模型
         # 根据场景ID获取对应的系统提示词
         agent_system_prompt = get_agent_system_prompt_by_scenario(self.scenario_id)
-        if self.service_policy is not None:
-            from framework.evolution.service_policy import ServicePolicyCompiler
-            agent_system_prompt += ServicePolicyCompiler().compile_prompt(self.service_policy)
         
         agent_model = AgentModel(
             scenario_id=self.scenario_id,
@@ -1901,18 +1846,6 @@ def main():
         help="Judge模型名称 (API模式使用)",
     )
     parser.add_argument(
-        "--user-simulator-mode",
-        default="llm",
-        choices=["llm", "rule", "rewrite"],
-        help="用户模拟器模式：LLM、规则状态机或改写对抗模式",
-    )
-    parser.add_argument(
-        "--user-policy-mode",
-        default="truthful",
-        choices=["truthful", "mistaken", "withholding", "adversarial_false_claim"],
-        help="电商用户事实策略：真实、错误认知、暂不披露或对抗性错误陈述",
-    )
-    parser.add_argument(
         "--legacy-execution",
         action="store_true",
         help="兼容旧版：允许 finals.Action 直接触发动作；默认只接受正式动作工具调用",
@@ -2058,8 +1991,6 @@ def main():
         judge_model_name=args.judge_model_name,
         max_turns=args.max_turns,
         verbose=args.verbose,
-        user_simulator_mode=args.user_simulator_mode,
-        user_policy_mode=args.user_policy_mode,
         legacy_execution=args.legacy_execution,
     )
     

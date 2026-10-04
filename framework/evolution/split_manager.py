@@ -52,37 +52,6 @@ class DatasetSplits:
             raise AssertionError(f"heldout cases entered an evolver: {sorted(overlap)}")
 
 
-def dataset_case_from_attack_instance(instance) -> DatasetCase:
-    """Rehydrate the exact archived case without regenerating its backend truth."""
-    if isinstance(instance, dict):
-        data = instance
-    else:
-        data = instance.to_dict()
-    descriptor = data.get("dataset_case")
-    if isinstance(descriptor, dict):
-        required = {"case_id", "split", "path_id", "instance_index", "intent", "path_config", "case_spec"}
-        if required.issubset(descriptor):
-            case = DatasetCase(**{key: descriptor[key] for key in required})
-            if case.case_id != data.get("case_id") or case.split == "heldout_test":
-                raise ValueError("archived DatasetCase identity/split does not match its attack instance")
-            return case
-
-    case_spec = data.get("case_spec")
-    if not isinstance(case_spec, dict):
-        raise ValueError("attack instance does not contain an archived CaseSpec")
-    metadata = case_spec.get("metadata") or {}
-    path_config = metadata.get("path_config") or metadata.get("legacy_path_config") or {}
-    return DatasetCase(
-        case_id=str(data.get("case_id") or case_spec.get("case_id")),
-        split=str(data.get("source_split") or "evolution"),
-        path_id=0,
-        instance_index=0,
-        intent=str(metadata.get("user_intent") or (case_spec.get("user_goal") or {}).get("type", "")),
-        path_config=path_config,
-        case_spec=case_spec,
-    )
-
-
 class SplitManager:
     def __init__(self, config: Optional[SplitConfig] = None,
                  manifest_dir: Optional[str | Path] = None,
@@ -111,22 +80,19 @@ class SplitManager:
         for path_id, path_config in enumerate(paths, start=1):
             intent = path_to_intent[path_id]
             for instance_index in range(max(1, self.config.instances_per_path)):
-                for variant in self.config.customer_disclosure_variants:
-                    suffix = "" if variant == "opening" else f"_{variant}"
-                    user_id = f"evolution_case_{path_id}_{instance_index}{suffix}"
-                    case_spec = build_case_spec(
-                        self.scenario, intent, copy.deepcopy(path_config),
-                        user_id=user_id, disclosure_variant=variant,
-                    )
-                    cases.append(DatasetCase(
-                        case_id=case_spec.case_id,
-                        split="",
-                        path_id=path_id,
-                        instance_index=instance_index,
-                        intent=intent,
-                        path_config=copy.deepcopy(path_config),
-                        case_spec=case_spec.to_dict(),
-                    ))
+                user_id = f"evolution_case_{path_id}_{instance_index}"
+                case_spec = build_case_spec(
+                    self.scenario, intent, copy.deepcopy(path_config), user_id=user_id,
+                )
+                cases.append(DatasetCase(
+                    case_id=case_spec.case_id,
+                    split="",
+                    path_id=path_id,
+                    instance_index=instance_index,
+                    intent=intent,
+                    path_config=copy.deepcopy(path_config),
+                    case_spec=case_spec.to_dict(),
+                ))
         rng = random.Random(self.config.seed)
         if self.config.max_cases is not None:
             rng.shuffle(cases)

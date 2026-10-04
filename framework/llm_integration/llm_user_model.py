@@ -162,8 +162,7 @@ class LLMUserModel(UserModel):
             for key, value in source_goal.items()
             if key.lower() in customer_goal_keys
         }
-        # Retain only the Customer's own affective state. Disclosure flags and
-        # truthfulness modes are legacy behavior controls, not adversary limits.
+        # Retain only the Customer's own affective state.
         source_policy = case_spec.user_policy or {}
         public_policy = (
             {"initial_emotion": source_policy["initial_emotion"]}
@@ -576,28 +575,13 @@ class LLMUserModel(UserModel):
         emotion = self._emotion_prompt_line()
         emotion_context = emotion.strip() if emotion else "(not specified; respond naturally)"
         stage_text = "Open the conversation" if stage == "opening" else "Reply to the Service's latest turn"
-        from ..evolution.customer.policy import AdversaryPolicy
-        open_ended_policy = isinstance(self.customer_policy, AdversaryPolicy)
-        if open_ended_policy:
-            behavior_contract = """There is no required Customer behavior style or obligation to pursue the stated goal. You may lie,
+        behavior_contract = """There is no required Customer behavior style or obligation to pursue the stated goal. You may lie,
 cooperate or refuse, invent or misstate business details, conceal information, contradict yourself, mislead, apply
 pressure, refuse, stall, change or abandon the request, or choose another interaction strategy. These
 are valid Customer behaviors; do not self-censor them as unreasonable. The official backend/evaluator
 determines world truth; your words do not change it. You are not given hidden backend state, expected
 actions or paths, gold answers, or evaluator internals. Use only the role context, customer-side
 information, public results, and visible dialogue."""
-        else:
-            behavior_contract = """You must keep pursuing the originally assigned Customer goal shown above. Do not abandon or replace it,
-refuse all participation, produce repeated unrelated messages, or stall merely to exhaust the turn limit.
-You may use deception, selective disclosure, contradiction, pressure, and changing claims as tactics while
-still pursuing that same goal.
-
-When your strategy calls for adversarial behavior, you may lie, claim to know something you do not
-know, invent or misstate business details, conceal information, contradict yourself, mislead, apply
-pressure, or change tactics to influence the Service. These are valid Customer behaviors. The official
-backend/evaluator determines world truth; your words do not change it. You are not given hidden backend
-state, expected actions or paths, gold answers, or evaluator internals. Use only the role context,
-customer-side information, public results, and visible dialogue."""
         return f"""You are simulating a Customer who interacts with a fixed customer-service Service.
 
 Role: {role_desc}
@@ -775,71 +759,6 @@ class AdversarialCustomerModel(LLMUserModel):
 
     def _record_courtesy(self, message: str) -> None:
         return None
-
-
-class RuleUserModel(UserModel):
-    """Deterministic customer policy used as a non-LLM evaluation baseline."""
-
-    def __init__(self, profile: UserProfile, system_prompt: str = "", case_spec: Optional[CaseSpec] = None):
-        super().__init__(profile, system_prompt)
-        self.case_spec = case_spec
-        self.backend_events = []
-        self.environment_state = UserEnvironmentState(
-            goal=case_spec.user_goal if case_spec else {"type": profile.user_intent},
-            facts=case_spec.user_knowledge if case_spec else {},
-            known_facts=case_spec.user_knowledge if case_spec else {},
-        )
-        if case_spec:
-            self.initialize_emotion_from_case(
-                (case_spec.user_policy or {}).get("initial_emotion")
-            )
-        self.problem_status = "unsolved"
-
-    def generate_initial_message(self) -> str:
-        goal = self.profile.user_intent.replace("_", " ")
-        return f"您好，我想咨询{goal}，请帮我核实并处理。"
-
-    def observe_backend_event(self, event: Dict[str, Any]) -> None:
-        self.backend_events.append({
-            "event_type": event.get("event_type"),
-            "name": event.get("name"),
-            "result": event.get("result", {}),
-        })
-        if event.get("event_type") == "action_execution" and event.get("result", {}).get("success"):
-            self.environment_state.resolution_status = "partially_solved"
-            self.environment_state.satisfaction = min(1.0, self.environment_state.satisfaction + 0.15)
-
-    def generate_next_message(self, agent_last_message: str, turn_count: int, context=None) -> str:
-        if self.environment_state.resolution_status == "solved":
-            return "谢谢，问题解决了，再见。"
-        if any(token in agent_last_message for token in ["订单号", "记录编号", "客户号"]):
-            knowledge = self.case_spec.user_knowledge if self.case_spec else {}
-            return knowledge.get("order_id") or knowledge.get("record_id") or "我先核对一下编号。"
-        if self.backend_events and self.backend_events[-1]["event_type"] == "action_execution":
-            return "请确认这个处理是否已经生效？"
-        return "请先帮我核实相关状态，再告诉我可以怎么处理。"
-
-
-class RewritingUserModel(LLMUserModel):
-    """Legacy paraphrasing variant; not the default REAL adversary executor.
-
-    When an AdversaryPolicy is attached, its free-text strategy and the base
-    deceptive Customer contract take precedence over the legacy fact-preserving
-    paraphrase instruction. Without a policy this remains the old paraphrase
-    evaluation mode.
-    """
-
-    def _build_initial_message_prompt(self) -> str:
-        return super()._build_initial_message_prompt() + "\n请使用与常见模板不同的自然表达。"
-
-    def _build_generation_prompt(self, agent_last_message: str, turn_count: int, context=None) -> str:
-        prompt = super()._build_generation_prompt(agent_last_message, turn_count, context)
-        if self.customer_policy is not None:
-            from ..evolution.customer.policy import AdversaryPolicy
-            if isinstance(self.customer_policy, AdversaryPolicy):
-                return prompt + "\nAvoid mechanically reusing wording; follow the free-text strategy directly.\n"
-            return prompt + "\n请避免机械复用上一轮措辞；继续追求同一业务目标，并按自由文本对抗策略行动。\n"
-        return prompt + "\n请避免复用上一轮句式，保持业务事实不变。\n"
 
 
 class LLMUserMessageGenerator:

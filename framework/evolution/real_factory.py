@@ -9,18 +9,17 @@ from .evaluator_adapter import EvoSAGEEpisodeEvaluator
 
 
 def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str | Path,
-                        max_turns: int = 10, user_simulator_mode: str = "llm", api_timeout: int = 300,
-                        client_type: str = "openai_api", judge_in_evolution: bool = False,
+                        scenario_id: str = "ecommerce_refund",
+                        max_turns: int = 10, api_timeout: int = 300,
+                        client_type: str = "openai_api", judge_validation_enabled: bool = False,
                         resume: bool = False, token_budget=None,
-                        customer_thinking_mode=None, agent_thinking_mode=None,
-                        evolver_thinking_mode=None, tool_contract_config=None,
+                        customer_thinking_mode=None, agent_thinking_mode=None, tool_contract_config=None,
                         max_tool_steps: int = 8, invalid_evaluation_retries: int = 1,
                         request_budget=None, customer_transport_max_retries: int = 1,
                         agent_max_retries: int = 1, judge_max_retries: int = 1,
                         judge_validation_retries: int = 2,
                         customer_protocol_retries: int = 1,
-                        rate_limit_backoff_seconds: float = 0.0,
-                        include_failure_analysis: bool = True):
+                        rate_limit_backoff_seconds: float = 0.0):
     from run_evaluation_with_llm import LLMEvaluationPipeline
     tool_contract_config = ToolContractConfig.from_value(tool_contract_config)
 
@@ -31,9 +30,9 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
             return int(token_budget.get(name, default))
         return int(getattr(token_budget, name, default))
 
-    def pipeline_factory(customer_policy, service_policy, judge_enabled=True):
+    def pipeline_factory(customer_policy, judge_enabled=False):
         return LLMEvaluationPipeline(
-            scenario_id="ecommerce_refund",
+            scenario_id=scenario_id,
             model_name=model,
             output_dir=str(Path(output_dir) / "real_traces"),
             eval_mode="api",
@@ -47,9 +46,7 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
             max_turns=max_turns,
             api_timeout=api_timeout,
             verbose=False,
-            user_simulator_mode=user_simulator_mode,
             customer_policy=customer_policy,
-            service_policy=service_policy,
             use_llm_judge=judge_enabled,
             user_max_tokens=budget("user", 512),
             agent_max_tokens=budget("agent", 1536),
@@ -69,12 +66,11 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
 
     return EvoSAGEEpisodeEvaluator(
         pipeline_factory,
-        judge_in_evolution=judge_in_evolution,
+        judge_validation_enabled=judge_validation_enabled,
         cache_namespace=(
             f"{client_type}|{model}|{api_url}|turns={max_turns}|timeout={api_timeout}"
             f"|customer-thinking={customer_thinking_mode or 'default'}"
             f"|agent-thinking={agent_thinking_mode or 'default'}"
-            f"|evolver-thinking={evolver_thinking_mode or 'default'}"
             f"|max-tool-steps={max_tool_steps}"
             f"|tokens={budget('user', 512)}:{budget('agent', 1536)}:{budget('judge', 1024)}"
             f"|transport-attempts={customer_transport_max_retries}:{agent_max_retries}:{judge_max_retries}"
@@ -82,12 +78,10 @@ def make_real_evaluator(model: str, api_url: str, api_key: str, output_dir: str 
             f"|invalid-eval-retries={invalid_evaluation_retries}"
             f"|judge-retries={judge_max_retries}:{judge_validation_retries}"
             f"|tool-contract={tool_contract_config.provider_schema_strict}:"
-            f"{tool_contract_config.runtime_schema_validation}"
-            f"|failure-analysis={include_failure_analysis}"
+            f"{tool_contract_config.runtime_schema_validation}|scenario={scenario_id}"
         ),
         cache_path=Path(output_dir) / "environment" / "episode_cache.jsonl",
         reset_cache=not resume,
         invalid_evaluation_retries=invalid_evaluation_retries,
         request_budget=request_budget,
-        include_failure_analysis=include_failure_analysis,
     )

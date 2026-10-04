@@ -201,8 +201,6 @@ def build_case_spec(
     user_intent: str,
     path_config: Optional[Dict[str, Any]] = None,
     user_id: str = "user",
-    user_policy_mode: str = "truthful",
-    disclosure_variant: str = "opening",
 ) -> CaseSpec:
     """Build a deterministic case from the existing PathList.
 
@@ -211,10 +209,6 @@ def build_case_spec(
     and an expected backend outcome.
     """
     path_config = path_config or {}
-    if disclosure_variant not in {"opening", "on_request"}:
-        raise ValueError(f"unsupported customer disclosure variant: {disclosure_variant}")
-    if disclosure_variant != "opening" and scenario_id != "ecommerce_refund":
-        raise ValueError("on_request disclosure variant is currently defined only for ecommerce_refund")
     legacy_gt = _build_legacy_gt(scenario_id, path_config)
     required_backend_verifications = _build_required_backend_verifications(
         scenario_id, path_config
@@ -272,15 +266,6 @@ def build_case_spec(
         elif expected_action == "Reject":
             expected_outcome["order.refund_status"] = "Rejected"
 
-        actual_shipping_status = shipping_status
-        if user_policy_mode in {"mistaken", "adversarial_false_claim"}:
-            believed_shipping_status = (
-                "Unshipped" if actual_shipping_status != "Unshipped" else "Signed"
-            )
-        else:
-            believed_shipping_status = actual_shipping_status
-        reveal_order_id = user_policy_mode != "withholding" and disclosure_variant == "opening"
-
         return CaseSpec(
             case_id=case_id,
             scenario=scenario_id,
@@ -295,21 +280,8 @@ def build_case_spec(
                 "product_name": "无线耳机",
                 "knows_order_id": True,
                 "knows_customer_id": True,
-                "believes_shipping_status": believed_shipping_status,
             },
-            user_policy={
-                "mode": user_policy_mode,
-                "truthfulness": "truthful" if user_policy_mode == "truthful" else "unreliable",
-                **(
-                    {"initial_emotion": initial_emotion}
-                    if initial_emotion is not None
-                    else {}
-                ),
-                "reveal_order_id_on_request": True,
-                "reveal_customer_id_on_request": True,
-                "show_order_id_initially": reveal_order_id,
-                "reveal_hidden_account_fields": False,
-            },
+            user_policy={"initial_emotion": initial_emotion} if initial_emotion is not None else {},
             initial_observation={},
             expected_outcome=expected_outcome,
             metadata={
@@ -324,7 +296,6 @@ def build_case_spec(
                 "classification": classification,
                 "required_backend_verifications": required_backend_verifications,
                 "backend_system_variables": dict(system_variables),
-                **({"customer_disclosure_variant": disclosure_variant} if disclosure_variant != "opening" else {}),
             },
         )
 
@@ -359,12 +330,7 @@ def build_case_spec(
             "knows_record_id": True,
             "knows_customer_id": True,
         },
-        user_policy={
-            "mode": user_policy_mode,
-            "truthfulness": "truthful" if user_policy_mode == "truthful" else "unreliable",
-            "reveal_record_id_on_request": True,
-            "reveal_customer_id_on_request": True,
-        },
+        user_policy={},
         initial_observation={},
         expected_outcome=expected_outcome,
         metadata={

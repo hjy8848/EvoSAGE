@@ -1,5 +1,11 @@
 # EvoSAGE-CoEvo：最终研究 IDEA
 
+> **历史研究设想，当前已暂停/不属于 active method（2026-10-04）。** 本文的
+> Customer–Service 共进化、Service patch、历史 replay、gate 和 fresh-adversary
+> 设计已被简化方案取代。当前研究固定 Service S0，只进化开放式 Customer 策略；
+> 以 [`../docs/CUSTOMER_ADVERSARIAL_SEARCH.md`](../docs/CUSTOMER_ADVERSARIAL_SEARCH.md)
+> 为准。保留本文供方法演变追溯，不代表当前代码支持这些机制。
+
 更新时间：2026-09-20
 
 ## 1. 一句话定义

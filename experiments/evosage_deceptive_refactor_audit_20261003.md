@@ -1,5 +1,12 @@
 # EvoSAGE open-ended Customer search contract — audited 2026-10-04
 
+> **Superseded historical snapshot.** This audit was written during the
+> transition and incorrectly describes several old Service/co-evolution
+> modules and configs as still present. The active repository was subsequently
+> simplified; use [`../docs/CUSTOMER_ADVERSARIAL_SEARCH.md`](../docs/CUSTOMER_ADVERSARIAL_SEARCH.md)
+> as the current contract. This file is retained to preserve the audit trail,
+> not as an implementation/run guide.
+
 ## Current research question
 
 The first stage tests whether freely generated Customer interaction strategies

@@ -1,6 +1,6 @@
-from framework.evolution.config import EvolutionConfig, PersistenceConfig, SplitConfig, load_config
+from framework.evolution.config import CustomerSearchConfig, SplitConfig
+from framework.evolution.customer.runner import CustomerEvolutionRunner
 from framework.evolution.evaluator_adapter import MockEpisodeEvaluator
-from framework.evolution.runner import EvolutionRunner
 from framework.evolution.scenario_cases import get_case_provider
 from framework.evolution.split_manager import SplitManager
 
@@ -29,11 +29,10 @@ def test_every_registered_scenario_builds_cases_for_all_mapped_paths():
         assert mapped_ids == set(range(1, expected_count + 1))
 
         splits = SplitManager(SplitConfig(seed=23), scenario=scenario).build()
-        cases = splits.all_cases
-        assert len(cases) == expected_count
-        assert {case.path_id for case in cases} == mapped_ids
-        assert {case.case_spec["scenario"] for case in cases} == {scenario}
-        assert {case.intent for case in cases} <= set(mapping)
+        assert len(splits.all_cases) == expected_count
+        assert {case.path_id for case in splits.all_cases} == mapped_ids
+        assert {case.case_spec["scenario"] for case in splits.all_cases} == {scenario}
+        assert {case.intent for case in splits.all_cases} <= set(mapping)
 
 
 def test_split_manager_rejects_unknown_scenario_instead_of_falling_back():
@@ -45,24 +44,16 @@ def test_split_manager_rejects_unknown_scenario_instead_of_falling_back():
         raise AssertionError("unknown scenario must not silently use Ecommerce PathList")
 
 
-def test_formal_ecommerce_config_keeps_scenario_explicit():
-    config = load_config("configs/formal_20260923_static.yaml")
-    assert config.scenario == "ecommerce_refund"
-    splits = SplitManager(config.splits, scenario=config.scenario).build()
-    assert {case.case_spec["scenario"] for case in splits.all_cases} == {"ecommerce_refund"}
-
-
-def test_runner_passes_configured_scenario_to_split_manager(tmp_path):
-    config = EvolutionConfig(
+def test_customer_search_runner_passes_configured_scenario_to_split_manager(tmp_path):
+    config = CustomerSearchConfig(
         scenario="telecom_package",
-        max_generations=0,
-        persistence=PersistenceConfig(output_dir=str(tmp_path / "telecom-run")),
+        max_generations=1,
+        splits=SplitConfig(seed=23, max_cases=3),
     )
-    runner = EvolutionRunner(config, evaluator=MockEpisodeEvaluator())
+    runner = CustomerEvolutionRunner(
+        config, evaluator=MockEpisodeEvaluator(), run_dir=tmp_path / "telecom-run",
+    )
     assert runner.split_manager.scenario == "telecom_package"
     runner.run()
-    assert {
-        case.case_spec["scenario"] for case in runner.split_manager.load(
-            runner.store.run_dir / "split_manifest"
-        ).all_cases
-    } == {"telecom_package"}
+    loaded = runner.split_manager.load(runner.store.run_dir / "split_manifest")
+    assert {case.case_spec["scenario"] for case in loaded.all_cases} == {"telecom_package"}
